@@ -4,15 +4,17 @@ from __future__ import annotations
 import hashlib
 import fcntl
 import copy
+import ctypes
 import os
 import stat
+import sys
 import time
 import threading
 import uuid
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .common import utc_now_iso
 from .paths import kb_root
@@ -25,6 +27,10 @@ JOURNAL_PARENT_OP_ENV = "RESEARCH_JOURNAL_PARENT_OP"
 JOURNAL_PARENT_ROOT_ENV = "RESEARCH_JOURNAL_PARENT_ROOT"
 MAX_JOURNAL_ENTRY_BYTES = 8 * 1024 * 1024
 KNOWN_JOURNAL_STATES = {"begin", "commit", "abort", "abort_failed"}
+ABORT_CAS_SCHEMA = "research-kb-abort-cas/v1"
+ABORT_CAS_PHASES = {"unarmed", "prepared", "validated", "retained"}
+MAX_ABORT_CAS_LEAF_BYTES = 1024 * 1024
+BASE_PRESENTATION_RESET_OP_TYPE = "reset_obsidian_base_presentation_sort"
 ROOT_COMMIT_GUARD_ERROR = (
     "带提交校验的正式发布不能嵌套在另一项写操作中；"
     "请等外层操作完成后重试。"
@@ -233,6 +239,141 @@ def _validate_journal_envelope_structure(entry: Mapping[str, object]) -> None:
         raise SystemExit("未完成操作日志包含意外后状态；知识库已进入恢复隔离状态。")
     if any(not isinstance(before_snapshots.get(key), dict) for key in keys):
         raise SystemExit("操作日志包含无效的恢复快照；知识库已进入恢复隔离状态。")
+    _validate_abort_cas_envelope(entry, keys)
+
+
+def _valid_nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_abort_cas_capability(value: object, *, directory: bool) -> None:
+    if (
+        not isinstance(value, list)
+        or len(value) != 3
+        or not all(_valid_nonnegative_int(item) for item in value)
+    ):
+        raise SystemExit("操作日志包含无效的 abort-CAS 目录能力；知识库已进入恢复隔离状态。")
+    if directory and not stat.S_ISDIR(int(value[2])):
+        raise SystemExit("操作日志的 abort-CAS 能力不是目录；知识库已进入恢复隔离状态。")
+
+
+def _validate_abort_cas_leaf_state(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "kind",
+        "dev",
+        "ino",
+        "mode",
+        "nlink",
+        "rdev",
+        "size",
+        "mtime_ns",
+        "digest",
+    }:
+        raise SystemExit("操作日志包含无效的 abort-CAS 叶节点状态；知识库已进入恢复隔离状态。")
+    kind = value.get("kind")
+    supported = {
+        "absent",
+        "regular",
+        "directory",
+        "symlink",
+        "fifo",
+        "socket",
+        "character-device",
+        "block-device",
+        "special",
+    }
+    if kind not in supported:
+        raise SystemExit("操作日志包含未知的 abort-CAS 叶节点类型；知识库已进入恢复隔离状态。")
+    fields = ("dev", "ino", "mode", "nlink", "rdev", "size", "mtime_ns")
+    if kind == "absent":
+        if any(value.get(field) is not None for field in fields) or value.get("digest") is not None:
+            raise SystemExit("操作日志包含无效的 abort-CAS 空叶节点；知识库已进入恢复隔离状态。")
+        return
+    if not all(_valid_nonnegative_int(value.get(field)) for field in fields):
+        raise SystemExit("操作日志的 abort-CAS 叶节点元数据无效；知识库已进入恢复隔离状态。")
+    digest = value.get("digest")
+    if kind in {"regular", "symlink"}:
+        if not _valid_digest(digest):
+            raise SystemExit("操作日志的 abort-CAS 内容摘要无效；知识库已进入恢复隔离状态。")
+    elif digest is not None:
+        raise SystemExit("操作日志的 abort-CAS 特殊节点不得包含内容摘要；知识库已进入恢复隔离状态。")
+
+
+def _validate_abort_cas_envelope(entry: Mapping[str, object], keys: Sequence[str]) -> None:
+    abort_cas = entry.get("abort_cas")
+    if abort_cas is None:
+        # Entries created before the durable abort-CAS contract remain readable.
+        # The one consumer that exchanged Base inodes is rejected separately at
+        # recovery time because its legacy begin state is not safely decidable.
+        return
+    if not isinstance(abort_cas, dict) or set(abort_cas) != {"schema", "targets"}:
+        raise SystemExit("操作日志包含无效的 abort-CAS 信封；知识库已进入恢复隔离状态。")
+    if abort_cas.get("schema") != ABORT_CAS_SCHEMA:
+        raise SystemExit("操作日志包含未知的 abort-CAS 版本；知识库已进入恢复隔离状态。")
+    targets = abort_cas.get("targets")
+    if not isinstance(targets, dict) or set(targets) != set(keys):
+        raise SystemExit("操作日志的 abort-CAS 目标集合不一致；知识库已进入恢复隔离状态。")
+    op_id = str(entry.get("op_id") or "")
+    expected_staging_directory = f"{SNAPSHOT_DIRNAME}/{op_id}"
+    phases: list[str] = []
+    for key in keys:
+        target = targets.get(key)
+        if not isinstance(target, dict) or set(target) != {
+            "phase",
+            "before_leaf",
+            "target_parent_capabilities",
+            "staging",
+            "owned_leaf",
+            "displaced_leaf",
+        }:
+            raise SystemExit("操作日志包含无效的 abort-CAS 目标记录；知识库已进入恢复隔离状态。")
+        phase = str(target.get("phase") or "")
+        if phase not in ABORT_CAS_PHASES:
+            raise SystemExit("操作日志包含未知的 abort-CAS 阶段；知识库已进入恢复隔离状态。")
+        phases.append(phase)
+        _validate_abort_cas_leaf_state(target.get("before_leaf"))
+        capabilities = target.get("target_parent_capabilities")
+        staging = target.get("staging")
+        if not isinstance(capabilities, list) or not isinstance(staging, dict) or set(staging) != {
+            "directory",
+            "directory_capability",
+            "leaf",
+        }:
+            raise SystemExit("操作日志包含无效的 abort-CAS 路径能力；知识库已进入恢复隔离状态。")
+        if phase == "unarmed":
+            if (
+                not capabilities
+                or staging != {"directory": "", "directory_capability": None, "leaf": None}
+                or target.get("owned_leaf") is not None
+                or target.get("displaced_leaf") is not None
+            ):
+                raise SystemExit("操作日志的 unarmed abort-CAS 记录不为空；知识库已进入恢复隔离状态。")
+            for capability in capabilities:
+                _validate_abort_cas_capability(capability, directory=True)
+            continue
+        if not capabilities:
+            raise SystemExit("操作日志缺少 abort-CAS 目标目录能力；知识库已进入恢复隔离状态。")
+        for capability in capabilities:
+            _validate_abort_cas_capability(capability, directory=True)
+        if staging.get("directory") != expected_staging_directory:
+            raise SystemExit("操作日志的 abort-CAS staging 路径无效；知识库已进入恢复隔离状态。")
+        _validate_abort_cas_capability(staging.get("directory_capability"), directory=True)
+        leaf = staging.get("leaf")
+        if not isinstance(leaf, str) or not leaf or Path(leaf).name != leaf or "/" in leaf or "\\" in leaf:
+            raise SystemExit("操作日志的 abort-CAS staging 叶节点无效；知识库已进入恢复隔离状态。")
+        _validate_abort_cas_leaf_state(target.get("owned_leaf"))
+        if str(target["owned_leaf"].get("kind") or "") == "absent":
+            raise SystemExit("操作日志的 abort-CAS owned 叶节点不得为空；知识库已进入恢复隔离状态。")
+        displaced = target.get("displaced_leaf")
+        if phase in {"prepared", "validated", "retained"}:
+            _validate_abort_cas_leaf_state(displaced)
+    if str(entry.get("state") or "") == "commit":
+        base_reset = str(entry.get("op_type") or "") == BASE_PRESENTATION_RESET_OP_TYPE
+        valid_terminal = all(phase == "retained" for phase in phases) or (
+            not base_reset and all(phase == "unarmed" for phase in phases)
+        )
+        if not valid_terminal:
+            raise SystemExit("已提交操作包含未保留的 abort-CAS 目标；知识库已进入恢复隔离状态。")
 
 
 def file_digest(path: Path) -> str | None:
@@ -310,6 +451,173 @@ def _anchored_target_parent(
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def _directory_capability(metadata: os.stat_result) -> list[int]:
+    return [int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_mode)]
+
+
+@contextmanager
+def _abort_cas_target_parent(
+    project_root: Path,
+    key: str,
+) -> Iterator[tuple[int | None, str, list[list[int]]]]:
+    """Open one target parent and retain every no-follow directory capability."""
+    canonical_key = _validate_target_key(key)
+    parts = canonical_key.split("/")
+    descriptors: list[int] = []
+    capabilities: list[list[int]] = []
+    try:
+        try:
+            descriptor = os.open(_canonical_kb_root(project_root), _directory_open_flags())
+        except FileNotFoundError:
+            yield None, parts[-1], []
+            return
+        descriptors.append(descriptor)
+        capabilities.append(_directory_capability(os.fstat(descriptor)))
+        for part in parts[:-1]:
+            metadata = _lstat_at(descriptor, part)
+            if metadata is None or _node_kind(metadata) != "directory":
+                yield None, parts[-1], capabilities
+                return
+            child = os.open(part, _directory_open_flags(), dir_fd=descriptor)
+            if not _same_node(metadata, os.fstat(child)):
+                os.close(child)
+                raise RuntimeError("abort-CAS target ancestor changed during traversal.")
+            descriptors.append(child)
+            descriptor = child
+            capabilities.append(_directory_capability(os.fstat(descriptor)))
+        yield descriptor, parts[-1], capabilities
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _leaf_kind(metadata: os.stat_result) -> str:
+    if stat.S_ISREG(metadata.st_mode):
+        return "regular"
+    if stat.S_ISDIR(metadata.st_mode):
+        return "directory"
+    if stat.S_ISLNK(metadata.st_mode):
+        return "symlink"
+    if stat.S_ISFIFO(metadata.st_mode):
+        return "fifo"
+    if stat.S_ISSOCK(metadata.st_mode):
+        return "socket"
+    if stat.S_ISCHR(metadata.st_mode):
+        return "character-device"
+    if stat.S_ISBLK(metadata.st_mode):
+        return "block-device"
+    return "special"
+
+
+def abort_cas_leaf_state(
+    parent_fd: int,
+    leaf: str,
+    *,
+    max_bytes: int = MAX_ABORT_CAS_LEAF_BYTES,
+) -> dict[str, object]:
+    """Capture a bounded no-follow leaf state; special nodes are never opened."""
+    if not isinstance(leaf, str) or not leaf or Path(leaf).name != leaf or "/" in leaf or "\\" in leaf:
+        raise RuntimeError("abort-CAS leaf name is invalid.")
+    metadata = _lstat_at(parent_fd, leaf)
+    fields: dict[str, object] = {
+        "kind": "absent",
+        "dev": None,
+        "ino": None,
+        "mode": None,
+        "nlink": None,
+        "rdev": None,
+        "size": None,
+        "mtime_ns": None,
+        "digest": None,
+    }
+    if metadata is None:
+        return fields
+    kind = _leaf_kind(metadata)
+    fields.update(
+        {
+            "kind": kind,
+            "dev": int(metadata.st_dev),
+            "ino": int(metadata.st_ino),
+            "mode": int(metadata.st_mode),
+            "nlink": int(metadata.st_nlink),
+            "rdev": int(getattr(metadata, "st_rdev", 0)),
+            "size": int(metadata.st_size),
+            "mtime_ns": int(metadata.st_mtime_ns),
+        }
+    )
+    if kind == "regular":
+        if metadata.st_size > max_bytes:
+            raise RuntimeError("abort-CAS regular leaf exceeds the bounded byte limit.")
+        descriptor = _open_regular_at(parent_fd, leaf, metadata)
+        digest = hashlib.sha256()
+        try:
+            total = _update_digest_from_fd(digest, descriptor)
+            if total != metadata.st_size or not _same_read_identity(metadata, os.fstat(descriptor)):
+                raise RuntimeError("abort-CAS regular leaf changed while it was read.")
+        finally:
+            os.close(descriptor)
+        fields["digest"] = digest.hexdigest()
+    elif kind == "symlink":
+        link_target = os.readlink(leaf, dir_fd=parent_fd)
+        encoded = os.fsencode(link_target)
+        if len(encoded) > max_bytes:
+            raise RuntimeError("abort-CAS symlink target exceeds the bounded byte limit.")
+        current = _lstat_at(parent_fd, leaf)
+        if current is None or not _same_read_identity(metadata, current):
+            raise RuntimeError("abort-CAS symlink changed while it was read.")
+        fields["digest"] = hashlib.sha256(encoded).hexdigest()
+    current = _lstat_at(parent_fd, leaf)
+    if current is None or not _same_read_identity(metadata, current):
+        raise RuntimeError("abort-CAS leaf changed while it was classified.")
+    return fields
+
+
+def _abort_cas_same_leaf(first: Mapping[str, object], second: Mapping[str, object]) -> bool:
+    # ctime is deliberately absent: an in-directory exchange changes it on some
+    # filesystems without changing the inode or its content contract.
+    return dict(first) == dict(second)
+
+
+def atomic_exchange_at(
+    left_parent_fd: int,
+    left: str,
+    right_parent_fd: int,
+    right: str,
+) -> None:
+    """Atomically swap two anchored names; never degrade to ordinary rename."""
+    library = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        exchange = getattr(library, "renameat2", None)
+        flag = 0x2  # RENAME_EXCHANGE
+    elif sys.platform == "darwin":
+        exchange = getattr(library, "renameatx_np", None)
+        flag = 0x2  # RENAME_SWAP
+    else:
+        exchange = None
+        flag = 0
+    if exchange is None:
+        raise SystemExit("Atomic abort-CAS exchange is unavailable on this platform.")
+    exchange.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    exchange.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    result = exchange(
+        left_parent_fd,
+        os.fsencode(left),
+        right_parent_fd,
+        os.fsencode(right),
+        flag,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
 
 
 def _lstat_at(parent_fd: int, name: str) -> os.stat_result | None:
@@ -518,9 +826,16 @@ def _anchored_journal_entries(project_root: Path) -> list[tuple[str, dict, os.st
         return entries
 
 
-def _write_journal_yaml(project_root: Path, op_id: str, value: Mapping[str, object]) -> None:
+def _write_journal_yaml(
+    project_root: Path,
+    op_id: str,
+    value: Mapping[str, object],
+    *,
+    expected_digest: str | None = None,
+) -> str:
     name = _journal_entry_name(op_id)
     data = yaml_io.dump_yaml(dict(value)).encode("utf-8")
+    new_digest = hashlib.sha256(data).hexdigest()
     with _anchored_journal_root_fd(project_root, create=True) as journal_fd:
         assert journal_fd is not None
         existing = _lstat_at(journal_fd, name)
@@ -528,8 +843,12 @@ def _write_journal_yaml(project_root: Path, op_id: str, value: Mapping[str, obje
             if _node_kind(existing) != "file":
                 raise SystemExit("操作日志包含非普通条目；知识库已进入恢复隔离状态。")
             current = _read_anchored_regular(journal_fd, name, existing)
+            if expected_digest is not None and hashlib.sha256(current).hexdigest() != expected_digest:
+                raise SystemExit("操作日志不再匹配 abort-CAS 前置摘要；已停止当前操作。")
             if current == data:
-                return
+                return new_digest
+        elif expected_digest is not None:
+            raise SystemExit("操作日志在 abort-CAS 更新前消失；已停止当前操作。")
         temporary = f".{name}.{uuid.uuid4().hex}.tmp"
         try:
             _write_new_regular_at(journal_fd, temporary, data, 0o600)
@@ -550,6 +869,7 @@ def _write_journal_yaml(project_root: Path, op_id: str, value: Mapping[str, obje
         finally:
             if _lstat_at(journal_fd, temporary) is not None:
                 _remove_at(journal_fd, temporary)
+    return new_digest
 
 
 def _journal_thread_lock(key: str) -> threading.RLock:
@@ -1669,6 +1989,8 @@ def journal_subprocess_env(
     env = dict(os.environ if base_env is None else base_env)
     parent_op_id = current_operation_id(project_root)
     if parent_op_id:
+        if abort_cas:
+            raise SystemExit("abort-CAS may only be enabled on an authoritative root operation.")
         env[JOURNAL_PARENT_OP_ENV] = parent_op_id
         env[JOURNAL_PARENT_ROOT_ENV] = _project_context_key(project_root)
     else:
@@ -1781,7 +2103,7 @@ def incomplete_ops(project_root: Path) -> list[dict]:
     """
     ordered_entries: list[tuple[str, dict]] = []
     for name, entry, _ in _anchored_journal_entries(project_root):
-        if entry.get("state") != "begin":
+        if entry.get("state") not in {"begin", "abort_failed"}:
             continue
         ordered_entries.append((name, entry))
     begin_by_id = {
@@ -1949,6 +2271,283 @@ def restorable_committed_ops(project_root: Path) -> list[dict]:
     return [entry for entry in committed_ops(project_root) if _entry_is_undo_candidate(entry)]
 
 
+def _abort_cas_target_key(project_root: Path, target_path_value: Path) -> str:
+    return _target_key(project_root, Path(target_path_value))
+
+
+def _load_abort_cas_transition(
+    project_root: Path,
+    op_id: str,
+    key: str,
+    expected_journal_digest: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    entry, digest = load_op_view(project_root, op_id)
+    if digest != expected_journal_digest:
+        raise SystemExit("操作日志不再匹配 abort-CAS 前置摘要；已停止当前操作。")
+    if str(entry.get("state") or "") != "begin":
+        raise SystemExit("只有进行中的操作可以推进 abort-CAS 阶段。")
+    abort_cas = entry.get("abort_cas")
+    targets = abort_cas.get("targets") if isinstance(abort_cas, dict) else None
+    record = targets.get(key) if isinstance(targets, dict) else None
+    if not isinstance(record, dict):
+        raise SystemExit("abort-CAS 目标不属于该操作。")
+    return entry, record
+
+
+def _write_abort_cas_transition(
+    project_root: Path,
+    op_id: str,
+    entry: dict[str, Any],
+    *,
+    expected_journal_digest: str,
+) -> str:
+    keys = [_validate_target_key(key) for key in entry.get("target_paths", [])]
+    _validate_abort_cas_envelope(entry, keys)
+    return _write_journal_yaml(
+        project_root,
+        op_id,
+        entry,
+        expected_digest=expected_journal_digest,
+    )
+
+
+def _abort_cas_staging_is_current(
+    project_root: Path,
+    directory: str,
+    capability: Sequence[int],
+) -> bool:
+    try:
+        with _anchored_journal_directory(project_root, directory) as descriptor:
+            return _directory_capability(os.fstat(descriptor)) == list(capability)
+    except (OSError, RuntimeError, SystemExit):
+        return False
+
+
+def _abort_cas_target_is_current(
+    project_root: Path,
+    key: str,
+    capabilities: Sequence[Sequence[int]],
+) -> bool:
+    try:
+        with _abort_cas_target_parent(project_root, key) as (parent_fd, _leaf, current):
+            return parent_fd is not None and current == [list(item) for item in capabilities]
+    except (OSError, RuntimeError, SystemExit):
+        return False
+
+
+def arm_abort_cas(
+    project_root: Path,
+    op_id: str,
+    target_path_value: Path,
+    *,
+    expected_journal_digest: str,
+    staging_leaf: str,
+) -> str:
+    """Durably bind one fsynced staging inode before an atomic exchange."""
+    key = _abort_cas_target_key(project_root, target_path_value)
+    entry, record = _load_abort_cas_transition(
+        project_root,
+        op_id,
+        key,
+        expected_journal_digest,
+    )
+    if record.get("phase") != "unarmed":
+        raise SystemExit("abort-CAS target is not unarmed.")
+    staging_directory = f"{SNAPSHOT_DIRNAME}/{op_id}"
+    with _abort_cas_target_parent(project_root, key) as (target_parent_fd, _leaf, target_caps):
+        if target_parent_fd is None:
+            raise SystemExit("abort-CAS target parent is unavailable.")
+        if target_caps != record["target_parent_capabilities"]:
+            raise SystemExit("abort-CAS target ancestry changed before staging was armed.")
+        expected_displaced = abort_cas_leaf_state(target_parent_fd, _leaf)
+        if not _abort_cas_same_leaf(expected_displaced, record["before_leaf"]):
+            raise SystemExit("abort-CAS target leaf changed before staging was armed.")
+        if _anchored_node_digest_at(target_parent_fd, _leaf) != entry["before_digests"].get(key):
+            raise SystemExit("abort-CAS target changed before staging was armed.")
+        with _anchored_journal_directory(project_root, staging_directory) as staging_fd:
+            staging_capability = _directory_capability(os.fstat(staging_fd))
+            owned_leaf = abort_cas_leaf_state(staging_fd, staging_leaf)
+            if owned_leaf.get("kind") != "regular":
+                raise SystemExit("abort-CAS staging must be a bounded regular file.")
+            os.fsync(staging_fd)
+            if abort_cas_leaf_state(staging_fd, staging_leaf) != owned_leaf:
+                raise SystemExit("abort-CAS staging changed while it was armed.")
+    if not _abort_cas_target_is_current(project_root, key, target_caps):
+        raise SystemExit("abort-CAS target ancestry changed while staging was armed.")
+    if not _abort_cas_staging_is_current(project_root, staging_directory, staging_capability):
+        raise SystemExit("abort-CAS staging directory changed while it was armed.")
+    record["phase"] = "prepared"
+    record["target_parent_capabilities"] = target_caps
+    record["staging"] = {
+        "directory": staging_directory,
+        "directory_capability": staging_capability,
+        "leaf": staging_leaf,
+    }
+    record["owned_leaf"] = owned_leaf
+    record["displaced_leaf"] = expected_displaced
+    return _write_abort_cas_transition(
+        project_root,
+        op_id,
+        entry,
+        expected_journal_digest=expected_journal_digest,
+    )
+
+
+def _abort_cas_swap_back_after_mismatch(
+    target_parent_fd: int,
+    target_leaf: str,
+    staging_fd: int,
+    staging_leaf: str,
+    *,
+    owned_leaf: Mapping[str, object],
+    displaced_leaf: Mapping[str, object],
+) -> None:
+    current_target = abort_cas_leaf_state(target_parent_fd, target_leaf)
+    current_staging = abort_cas_leaf_state(staging_fd, staging_leaf)
+    if not _abort_cas_same_leaf(current_target, owned_leaf) or current_staging.get("kind") == "absent":
+        raise RuntimeError("abort-CAS mismatch cannot be swapped back without overwriting a third party.")
+    atomic_exchange_at(staging_fd, staging_leaf, target_parent_fd, target_leaf)
+    restored_target = abort_cas_leaf_state(target_parent_fd, target_leaf)
+    restored_staging = abort_cas_leaf_state(staging_fd, staging_leaf)
+    if (
+        not _abort_cas_same_leaf(restored_target, displaced_leaf)
+        or not _abort_cas_same_leaf(restored_staging, owned_leaf)
+    ):
+        raise RuntimeError("abort-CAS mismatch swap-back did not restore both exact leaves.")
+    os.fsync(staging_fd)
+    os.fsync(target_parent_fd)
+
+
+def exchange_abort_cas(
+    project_root: Path,
+    op_id: str,
+    target_path_value: Path,
+    *,
+    expected_journal_digest: str,
+) -> str:
+    """Exchange one prepared leaf, compare both sides, and durably validate it."""
+    key = _abort_cas_target_key(project_root, target_path_value)
+    entry, record = _load_abort_cas_transition(
+        project_root,
+        op_id,
+        key,
+        expected_journal_digest,
+    )
+    if record.get("phase") != "prepared":
+        raise SystemExit("abort-CAS target is not prepared.")
+    staging = record["staging"]
+    target_caps = record["target_parent_capabilities"]
+    owned_leaf = record["owned_leaf"]
+    with _abort_cas_target_parent(project_root, key) as (target_parent_fd, target_leaf, current_caps):
+        if target_parent_fd is None or current_caps != target_caps:
+            raise SystemExit("abort-CAS target ancestry changed before exchange.")
+        if not _abort_cas_same_leaf(
+            abort_cas_leaf_state(target_parent_fd, target_leaf),
+            record["displaced_leaf"],
+        ):
+            raise SystemExit("abort-CAS target leaf changed before exchange.")
+        if _anchored_node_digest_at(target_parent_fd, target_leaf) != entry["before_digests"].get(key):
+            raise SystemExit("abort-CAS target changed before exchange.")
+        with _anchored_journal_directory(project_root, staging["directory"]) as staging_fd:
+            if _directory_capability(os.fstat(staging_fd)) != staging["directory_capability"]:
+                raise SystemExit("abort-CAS staging directory changed before exchange.")
+            if not _abort_cas_same_leaf(
+                abort_cas_leaf_state(staging_fd, staging["leaf"]),
+                owned_leaf,
+            ):
+                raise SystemExit("abort-CAS owned staging changed before exchange.")
+            atomic_exchange_at(staging_fd, staging["leaf"], target_parent_fd, target_leaf)
+            target_after = abort_cas_leaf_state(target_parent_fd, target_leaf)
+            displaced_after = abort_cas_leaf_state(staging_fd, staging["leaf"])
+            displaced_digest = _anchored_node_digest_at(staging_fd, staging["leaf"])
+            valid = (
+                _abort_cas_same_leaf(target_after, owned_leaf)
+                and _abort_cas_same_leaf(displaced_after, record["displaced_leaf"])
+                and displaced_digest == entry["before_digests"].get(key)
+                and _abort_cas_target_is_current(project_root, key, target_caps)
+                and _abort_cas_staging_is_current(
+                    project_root,
+                    staging["directory"],
+                    staging["directory_capability"],
+                )
+            )
+            if not valid:
+                _abort_cas_swap_back_after_mismatch(
+                    target_parent_fd,
+                    target_leaf,
+                    staging_fd,
+                    staging["leaf"],
+                    owned_leaf=owned_leaf,
+                    displaced_leaf=displaced_after,
+                )
+                raise SystemExit("abort-CAS exchange comparison failed; exact leaves were swapped back.")
+            os.fsync(staging_fd)
+            os.fsync(target_parent_fd)
+    record["phase"] = "validated"
+    record["displaced_leaf"] = displaced_after
+    return _write_abort_cas_transition(
+        project_root,
+        op_id,
+        entry,
+        expected_journal_digest=expected_journal_digest,
+    )
+
+
+def retain_abort_cas(
+    project_root: Path,
+    op_id: str,
+    target_path_value: Path,
+    *,
+    expected_journal_digest: str,
+) -> str:
+    """Durably retain the exact displaced leaf and persist the retained phase."""
+    key = _abort_cas_target_key(project_root, target_path_value)
+    entry, record = _load_abort_cas_transition(
+        project_root,
+        op_id,
+        key,
+        expected_journal_digest,
+    )
+    if record.get("phase") != "validated":
+        raise SystemExit("abort-CAS target is not validated.")
+    staging = record["staging"]
+    with _abort_cas_target_parent(project_root, key) as (target_parent_fd, target_leaf, current_caps):
+        if target_parent_fd is None or current_caps != record["target_parent_capabilities"]:
+            raise SystemExit("abort-CAS target ancestry changed before retention.")
+        if not _abort_cas_same_leaf(
+            abort_cas_leaf_state(target_parent_fd, target_leaf),
+            record["owned_leaf"],
+        ):
+            raise SystemExit("abort-CAS target changed before retention.")
+        with _anchored_journal_directory(project_root, staging["directory"]) as staging_fd:
+            if _directory_capability(os.fstat(staging_fd)) != staging["directory_capability"]:
+                raise SystemExit("abort-CAS staging directory changed before retention.")
+            displaced = abort_cas_leaf_state(staging_fd, staging["leaf"])
+            if not _abort_cas_same_leaf(displaced, record["displaced_leaf"]):
+                raise SystemExit("abort-CAS displaced staging changed before retention.")
+            os.fsync(staging_fd)
+            if not _abort_cas_same_leaf(
+                abort_cas_leaf_state(staging_fd, staging["leaf"]),
+                record["displaced_leaf"],
+            ):
+                raise RuntimeError("abort-CAS retained leaf changed during directory fsync.")
+    if not _abort_cas_target_is_current(project_root, key, record["target_parent_capabilities"]):
+        raise SystemExit("abort-CAS target ancestry changed during retention.")
+    if not _abort_cas_staging_is_current(
+        project_root,
+        staging["directory"],
+        staging["directory_capability"],
+    ):
+        raise SystemExit("abort-CAS staging directory changed during retention.")
+    record["phase"] = "retained"
+    return _write_abort_cas_transition(
+        project_root,
+        op_id,
+        entry,
+        expected_journal_digest=expected_journal_digest,
+    )
+
+
 def begin_op(
     project_root: Path,
     op_type: str,
@@ -1959,6 +2558,7 @@ def begin_op(
     coordination_scope: str = "none",
     parent_op_id: str | None = None,
     attach_to_active: bool = True,
+    abort_cas: bool = False,
 ) -> str:
     keys = sorted({_target_key(project_root, Path(path)) for path in target_paths})
     if not keys:
@@ -1977,6 +2577,8 @@ def begin_op(
     if requested_parent_id and requested_parent_id != active_parent_id:
         raise SystemExit("Explicit journal parent does not match the active transaction context.")
     resolved_parent_id = requested_parent_id or active_parent_id
+    if abort_cas and resolved_parent_id:
+        raise SystemExit("abort-CAS may only be enabled on an authoritative root operation.")
 
     if not resolved_parent_id:
         # Direct begin_op/journaled_op callers do not otherwise own the
@@ -1994,6 +2596,7 @@ def begin_op(
                 operation_role=operation_role,
                 coordination_scope=coordination_scope,
                 resolved_parent_id="",
+                abort_cas=abort_cas,
             )
     return _begin_op_with_keys(
         project_root,
@@ -2003,6 +2606,7 @@ def begin_op(
         operation_role=operation_role,
         coordination_scope=coordination_scope,
         resolved_parent_id=resolved_parent_id,
+        abort_cas=abort_cas,
     )
 
 
@@ -2015,6 +2619,7 @@ def _begin_op_with_keys(
     operation_role: str,
     coordination_scope: str,
     resolved_parent_id: str,
+    abort_cas: bool,
 ) -> str:
     # Recheck target topology inside the root workspace lease (or inside the
     # inherited parent lease for nested work) before any snapshot/journal write.
@@ -2036,8 +2641,21 @@ def _begin_op_with_keys(
     else:
         root_op_id, transaction_depth = op_id, 0
         resolved_coordination_scope = str(coordination_scope or "none")
+    abort_cas_before: dict[str, dict[str, object]] = {}
+    abort_cas_parent_caps: dict[str, list[list[int]]] = {}
     try:
         before_snapshots = {key: _snapshot_target(project_root, op_id, key) for key in keys}
+        if abort_cas:
+            for key in keys:
+                with _abort_cas_target_parent(project_root, key) as (parent_fd, leaf, caps):
+                    if parent_fd is None:
+                        raise SystemExit("abort-CAS target parent must exist before begin.")
+                    state = abort_cas_leaf_state(parent_fd, leaf)
+                    current_digest = _anchored_node_digest_at(parent_fd, leaf)
+                    if current_digest != before_snapshots[key].get("digest"):
+                        raise RuntimeError("abort-CAS target changed after its before snapshot.")
+                    abort_cas_before[key] = state
+                    abort_cas_parent_caps[key] = caps
     except BaseException:
         try:
             _remove_journal_relative(project_root, f"{SNAPSHOT_DIRNAME}/{op_id}")
@@ -2047,7 +2665,7 @@ def _begin_op_with_keys(
             # deleting through an untrusted replacement.
             pass
         raise
-    entry = {
+    entry: dict[str, Any] = {
         "op_id": op_id,
         "op_type": str(op_type),
         "operation_role": str(operation_role or "user"),
@@ -2066,17 +2684,55 @@ def _begin_op_with_keys(
         "after_digests": {},
         "state": "begin",
     }
+    if abort_cas:
+        entry["abort_cas"] = {
+            "schema": ABORT_CAS_SCHEMA,
+            "targets": {
+                key: {
+                    "phase": "unarmed",
+                    "before_leaf": abort_cas_before[key],
+                    "target_parent_capabilities": abort_cas_parent_caps[key],
+                    "staging": {
+                        "directory": "",
+                        "directory_capability": None,
+                        "leaf": None,
+                    },
+                    "owned_leaf": None,
+                    "displaced_leaf": None,
+                }
+                for key in keys
+            },
+        }
     _write_journal_yaml(project_root, op_id, entry)
     return op_id
 
 
 def commit_op(project_root: Path, op_id: str) -> None:
-    entry = load_op(project_root, op_id)
+    entry, source_digest = load_op_view(project_root, op_id)
     keys = validated_recovery_target_keys(project_root, entry, require_after=False)
+    abort_cas = entry.get("abort_cas")
+    if isinstance(abort_cas, dict):
+        targets = abort_cas.get("targets")
+        phases = [
+            str(targets[key].get("phase") or "")
+            for key in keys
+            if isinstance(targets, dict) and isinstance(targets.get(key), dict)
+        ]
+        base_reset = str(entry.get("op_type") or "") == BASE_PRESENTATION_RESET_OP_TYPE
+        valid_terminal = all(phase == "retained" for phase in phases) or (
+            not base_reset and all(phase == "unarmed" for phase in phases)
+        )
+        if len(phases) != len(keys) or not valid_terminal:
+            raise SystemExit("abort-CAS targets must all be unarmed or all retained before commit.")
     entry["after_digests"] = {key: _anchored_target_digest(project_root, key) for key in keys}
     entry["completed_at"] = utc_now_iso()
     entry["state"] = "commit"
-    _write_journal_yaml(project_root, op_id, entry)
+    _write_journal_yaml(
+        project_root,
+        op_id,
+        entry,
+        expected_digest=source_digest if isinstance(abort_cas, dict) else None,
+    )
 
 
 def restore_before_snapshots(
@@ -2163,6 +2819,215 @@ def _abort_descendants(project_root: Path, op_id: str, *, error: str = "") -> No
         _write_journal_yaml(project_root, name[:-5], entry)
 
 
+def _abort_cas_observation(
+    project_root: Path,
+    key: str,
+    record: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, object] | None, str | None]:
+    phase = str(record.get("phase") or "")
+    with _abort_cas_target_parent(project_root, key) as (target_fd, target_leaf, capabilities):
+        if target_fd is None:
+            target_state = {
+                "kind": "absent",
+                "dev": None,
+                "ino": None,
+                "mode": None,
+                "nlink": None,
+                "rdev": None,
+                "size": None,
+                "mtime_ns": None,
+                "digest": None,
+            }
+            target_digest_value = None
+        else:
+            if phase != "unarmed" and capabilities != record.get("target_parent_capabilities"):
+                raise RuntimeError(f"abort-CAS target ancestry changed for {key}.")
+            target_state = abort_cas_leaf_state(target_fd, target_leaf)
+            target_digest_value = _anchored_node_digest_at(target_fd, target_leaf)
+    if phase == "unarmed":
+        return target_state, None, target_digest_value
+    staging = record.get("staging")
+    if not isinstance(staging, dict):
+        raise RuntimeError(f"abort-CAS staging record is missing for {key}.")
+    with _anchored_journal_directory(project_root, str(staging.get("directory") or "")) as staging_fd:
+        if _directory_capability(os.fstat(staging_fd)) != staging.get("directory_capability"):
+            raise RuntimeError(f"abort-CAS staging directory changed for {key}.")
+        staging_state = abort_cas_leaf_state(staging_fd, str(staging.get("leaf") or ""))
+    if not _abort_cas_staging_is_current(
+        project_root,
+        str(staging.get("directory") or ""),
+        staging.get("directory_capability") or [],
+    ):
+        raise RuntimeError(f"abort-CAS staging path was rebound for {key}.")
+    return target_state, staging_state, target_digest_value
+
+
+def recover_abort_cas(
+    project_root: Path,
+    op_id: str,
+    *,
+    source_entry: Mapping[str, object],
+    source_digest: str,
+) -> tuple[dict[str, Any], str]:
+    """Classify and recover durable exchange state before ordinary snapshots.
+
+    The full target set is classified before the first business-target write.
+    A third-party target or rebound capability therefore quarantines the root
+    without partially restoring another target.  A prepared post-exchange leaf
+    is the sole exception: it is swapped back first to preserve the exact
+    displaced inode, then reclassified before any other target is touched.
+    """
+    entry = dict(source_entry)
+    if str(entry.get("op_id") or "") != op_id:
+        raise RuntimeError("abort-CAS recovery source identity changed.")
+    current, current_digest = load_op_view(project_root, op_id)
+    if current_digest != source_digest or current != entry:
+        raise SystemExit("abort-CAS recovery source journal changed before recovery.")
+    abort_cas = entry.get("abort_cas")
+    if not isinstance(abort_cas, dict):
+        if str(entry.get("op_type") or "") == BASE_PRESENTATION_RESET_OP_TYPE:
+            raise SystemExit(
+                "Legacy Base reset journal lacks durable abort-CAS state; automatic recovery refused without writes."
+            )
+        return entry, source_digest
+    targets = abort_cas.get("targets")
+    if not isinstance(targets, dict):
+        raise RuntimeError("abort-CAS recovery target map is missing.")
+    keys = validated_recovery_target_keys(project_root, entry, require_after=False)
+    active = any(str(targets[key].get("phase") or "") != "unarmed" for key in keys)
+    if not active and str(entry.get("op_type") or "") != BASE_PRESENTATION_RESET_OP_TYPE:
+        return entry, source_digest
+
+    exchange_keys: list[str] = []
+    for key in keys:
+        record = targets[key]
+        target_state, staging_state, target_digest_value = _abort_cas_observation(
+            project_root,
+            key,
+            record,
+        )
+        phase = str(record.get("phase") or "")
+        before = _abort_cas_same_leaf(target_state, record["before_leaf"])
+        owned = (
+            isinstance(record.get("owned_leaf"), dict)
+            and _abort_cas_same_leaf(target_state, record["owned_leaf"])
+        )
+        stage_absent = staging_state is None or staging_state.get("kind") == "absent"
+        if phase == "unarmed":
+            if (
+                not before
+                or target_digest_value != entry["before_digests"].get(key)
+                or not _abort_cas_target_is_current(
+                    project_root,
+                    key,
+                    record["target_parent_capabilities"],
+                )
+            ):
+                raise RuntimeError(f"abort-CAS unarmed target changed unexpectedly: {key}")
+        elif phase in {"prepared", "validated", "retained"}:
+            if stage_absent:
+                raise RuntimeError(f"abort-CAS retained recovery leaf is missing: {key}")
+            stage_owned = _abort_cas_same_leaf(staging_state or {}, record["owned_leaf"])
+            stage_displaced = _abort_cas_same_leaf(staging_state or {}, record["displaced_leaf"])
+            if before and (stage_owned or stage_displaced):
+                # Pre-exchange or an earlier recovery already restored the exact
+                # before inode.  Retain the private leaf without relabelling it.
+                continue
+            if owned and stage_displaced:
+                exchange_keys.append(key)
+            else:
+                raise RuntimeError(f"abort-CAS target is a third-party state: {key}")
+        else:
+            raise RuntimeError(f"abort-CAS target has an unknown phase: {key}")
+
+    # Recover every post-exchange state before changing any journal phase.  The
+    # retained leaf may be a symlink/FIFO/special node and is never opened.
+    for key in exchange_keys:
+        record = targets[key]
+        staging = record["staging"]
+        with _abort_cas_target_parent(project_root, key) as (target_fd, target_leaf, capabilities):
+            if target_fd is None or capabilities != record["target_parent_capabilities"]:
+                raise RuntimeError(f"abort-CAS target ancestry changed during recovery: {key}")
+            with _anchored_journal_directory(project_root, staging["directory"]) as staging_fd:
+                if _directory_capability(os.fstat(staging_fd)) != staging["directory_capability"]:
+                    raise RuntimeError(f"abort-CAS staging changed during recovery: {key}")
+                current_owned = abort_cas_leaf_state(target_fd, target_leaf)
+                retained_leaf = abort_cas_leaf_state(staging_fd, staging["leaf"])
+                if not _abort_cas_same_leaf(current_owned, record["owned_leaf"]):
+                    raise RuntimeError(f"abort-CAS owned target changed during recovery: {key}")
+                atomic_exchange_at(staging_fd, staging["leaf"], target_fd, target_leaf)
+                target_after = abort_cas_leaf_state(target_fd, target_leaf)
+                staging_after = abort_cas_leaf_state(staging_fd, staging["leaf"])
+                if not (
+                    _abort_cas_same_leaf(target_after, retained_leaf)
+                    and _abort_cas_same_leaf(staging_after, current_owned)
+                    and _abort_cas_target_is_current(
+                        project_root,
+                        key,
+                        record["target_parent_capabilities"],
+                    )
+                    and _abort_cas_staging_is_current(
+                        project_root,
+                        staging["directory"],
+                        staging["directory_capability"],
+                    )
+                ):
+                    if _abort_cas_same_leaf(target_after, retained_leaf) and staging_after["kind"] != "absent":
+                        atomic_exchange_at(staging_fd, staging["leaf"], target_fd, target_leaf)
+                        if (
+                            not _abort_cas_same_leaf(
+                                abort_cas_leaf_state(target_fd, target_leaf),
+                                staging_after,
+                            )
+                            or not _abort_cas_same_leaf(
+                                abort_cas_leaf_state(staging_fd, staging["leaf"]),
+                                retained_leaf,
+                            )
+                        ):
+                            raise RuntimeError(
+                                f"abort-CAS recovery mismatch swap-back failed: {key}"
+                            )
+                    raise RuntimeError(
+                        f"abort-CAS recovery exchange mismatched; exact leaves were preserved: {key}"
+                    )
+                os.fsync(staging_fd)
+                os.fsync(target_fd)
+        target_state, _staging_state, target_digest_value = _abort_cas_observation(
+            project_root,
+            key,
+            record,
+        )
+        if (
+            not _abort_cas_same_leaf(target_state, record["before_leaf"])
+            or target_digest_value != entry["before_digests"].get(key)
+        ):
+            raise RuntimeError(
+                f"abort-CAS preserved a displaced third-party target and quarantined the operation: {key}"
+            )
+
+    # Reclassify the complete set after swap-back.  Do not mutate phases during
+    # abort: prepared pre-exchange material is owned staging, not displaced
+    # material, and relabelling it would falsify the durable record.
+    current, current_digest = load_op_view(project_root, op_id)
+    if current_digest != source_digest:
+        raise SystemExit("abort-CAS journal changed during recovery.")
+    entry = current
+    targets = entry["abort_cas"]["targets"]
+    for key in keys:
+        record = targets[key]
+        target_state, staging_state, target_digest_value = _abort_cas_observation(project_root, key, record)
+        if (
+            not _abort_cas_same_leaf(target_state, record["before_leaf"])
+            or target_digest_value != entry["before_digests"].get(key)
+        ):
+            raise RuntimeError(f"abort-CAS target is not its exact before leaf: {key}")
+        if str(record.get("phase") or "") != "unarmed" and (
+            staging_state is None or staging_state.get("kind") == "absent"
+        ):
+            raise RuntimeError(f"abort-CAS retained recovery leaf disappeared: {key}")
+    return entry, source_digest
+
+
 def terminalize_resumed_op(
     project_root: Path,
     op_id: str,
@@ -2198,19 +3063,32 @@ def terminalize_resumed_op(
 
 
 def abort_op(project_root: Path, op_id: str, *, restore: bool = False, error: str = "") -> None:
+    source_digest: str | None = None
     if restore:
         try:
-            restore_before_snapshots(project_root, op_id)
+            entry, source_digest = load_op_view(project_root, op_id)
+            entry, source_digest = recover_abort_cas(
+                project_root,
+                op_id,
+                source_entry=entry,
+                source_digest=source_digest,
+            )
+            restore_before_snapshots(project_root, op_id, source_entry=entry)
         except BaseException as exc:
-            entry = load_op(project_root, op_id)
+            entry, failed_source_digest = load_op_view(project_root, op_id)
             entry["completed_at"] = utc_now_iso()
             entry["state"] = "abort_failed"
             entry["restoration_error"] = str(exc)
             if error:
                 entry["operation_error"] = error
-            _write_journal_yaml(project_root, op_id, entry)
+            _write_journal_yaml(
+                project_root,
+                op_id,
+                entry,
+                expected_digest=failed_source_digest,
+            )
             raise RuntimeError(f"Failed to restore operation {op_id}: {exc}") from exc
-    entry = load_op(project_root, op_id)
+    entry, current_digest = load_op_view(project_root, op_id)
     # Root-last terminalization keeps the authoritative root recoverable when a
     # descendant journal write is interrupted.  A retry may safely revisit
     # already-aborted descendants before finally consuming the root.
@@ -2219,7 +3097,12 @@ def abort_op(project_root: Path, op_id: str, *, restore: bool = False, error: st
     entry["state"] = "abort"
     if error:
         entry["operation_error"] = error
-    _write_journal_yaml(project_root, op_id, entry)
+    _write_journal_yaml(
+        project_root,
+        op_id,
+        entry,
+        expected_digest=current_digest if isinstance(entry.get("abort_cas"), dict) else None,
+    )
 
 
 def mark_op_undone(project_root: Path, op_id: str, recovery_op_id: str) -> None:
@@ -2243,6 +3126,7 @@ def journaled_op(
     parent_op_id: str | None = None,
     attach_to_active: bool = True,
     commit_guard: Callable[[], None] | None = None,
+    abort_cas: bool = False,
 ) -> Iterator[str]:
     """Journal one mutation and optionally validate at its commit boundary.
 
@@ -2270,6 +3154,7 @@ def journaled_op(
         coordination_scope=coordination_scope,
         parent_op_id=parent_op_id,
         attach_to_active=attach_to_active,
+        abort_cas=abort_cas,
     )
     stack = _ACTIVE_OP_STACK.get()
     token = _ACTIVE_OP_STACK.set((*stack, (_project_context_key(project_root), op_id)))
@@ -2320,6 +3205,7 @@ def mutation_transaction(
     operation_role: str = "user",
     preflight: Callable[[], None] | None = None,
     commit_guard: Callable[[], None] | None = None,
+    abort_cas: bool = False,
 ) -> Iterator[str]:
     """Coordinate and journal one command-level mutation transaction.
 
@@ -2352,6 +3238,7 @@ def mutation_transaction(
             operation_role=operation_role,
             coordination_scope="inherited",
             commit_guard=commit_guard,
+            abort_cas=abort_cas,
         ) as op_id:
             yield op_id
         return
@@ -2376,5 +3263,6 @@ def mutation_transaction(
                 operation_role=operation_role,
                 coordination_scope="workspace-exclusive",
                 commit_guard=commit_guard,
+                abort_cas=abort_cas,
             ) as op_id:
                 yield op_id

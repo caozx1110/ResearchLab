@@ -26,16 +26,21 @@ from research.git_ops import (
     undo_last_operation,
 )
 from research.journal import (
+    ABORT_CAS_SCHEMA,
+    arm_abort_cas,
     abort_op,
     begin_op,
     commit_op,
     committed_ops,
+    exchange_abort_cas,
     file_digest,
     incomplete_ops,
     journal_entry_path,
     journaled_op,
     load_op,
+    load_op_view,
     mutation_transaction,
+    retain_abort_cas,
     target_path,
 )
 from research.prefs import ensure_workspace
@@ -149,6 +154,7 @@ def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None
     begun = load_op(tmp_path, op_id)
     assert begun["state"] == "begin"
     assert begun["before_digests"] == {"units/papers/p-test/record.yaml": None}
+    assert "abort_cas" not in begun
 
     target.parent.mkdir(parents=True)
     target.write_text("value: one\n", encoding="utf-8")
@@ -165,6 +171,147 @@ def test_operation_journal_tracks_begin_commit_and_abort(tmp_path: Path) -> None
 
     with pytest.raises(SystemExit, match="Invalid operation id"):
         load_op(tmp_path, "../outside")
+
+
+def test_begin_journal_persists_exact_unarmed_abort_cas_envelope(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "guarded.md"
+    target.parent.mkdir(parents=True)
+    op_id = begin_op(tmp_path, "guarded-test", [target], abort_cas=True)
+
+    entry, digest = load_op_view(tmp_path, op_id)
+    capabilities = entry["abort_cas"]["targets"]["notes/guarded.md"][
+        "target_parent_capabilities"
+    ]
+
+    assert len(digest) == 64
+    assert capabilities and all(len(item) == 3 for item in capabilities)
+    assert entry["abort_cas"] == {
+        "schema": ABORT_CAS_SCHEMA,
+        "targets": {
+            "notes/guarded.md": {
+                "phase": "unarmed",
+                "before_leaf": {
+                    "kind": "absent",
+                    "dev": None,
+                    "ino": None,
+                    "mode": None,
+                    "nlink": None,
+                    "rdev": None,
+                    "size": None,
+                    "mtime_ns": None,
+                    "digest": None,
+                },
+                "target_parent_capabilities": capabilities,
+                "staging": {
+                    "directory": "",
+                    "directory_capability": None,
+                    "leaf": None,
+                },
+                "owned_leaf": None,
+                "displaced_leaf": None,
+            }
+        },
+    }
+
+
+def test_abort_cas_arm_exchange_retain_and_commit_preserves_private_recovery_leaf(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    before_state = _lstat_state(target)
+    op_id = begin_op(
+        tmp_path,
+        "reset_obsidian_base_presentation_sort",
+        [target],
+        abort_cas=True,
+    )
+    staging_leaf = ".guarded-abort-cas.tmp"
+    staging = tmp_path / "kb" / ".journal" / "snapshots" / op_id / staging_leaf
+    staging.write_bytes(b"desired\n")
+    os.chmod(staging, stat.S_IMODE(target.stat().st_mode))
+
+    digest = load_op_view(tmp_path, op_id)[1]
+    digest = arm_abort_cas(
+        tmp_path,
+        op_id,
+        target,
+        expected_journal_digest=digest,
+        staging_leaf=staging_leaf,
+    )
+    prepared = load_op(tmp_path, op_id)["abort_cas"]["targets"]["notes/guarded.md"]
+    assert prepared["phase"] == "prepared"
+    assert prepared["before_leaf"]["ino"] == before_state[1]
+    assert prepared["displaced_leaf"] == prepared["before_leaf"]
+
+    digest = exchange_abort_cas(
+        tmp_path,
+        op_id,
+        target,
+        expected_journal_digest=digest,
+    )
+    assert target.read_bytes() == b"desired\n"
+    assert staging.read_bytes() == b"before\n"
+    assert load_op(tmp_path, op_id)["abort_cas"]["targets"]["notes/guarded.md"]["phase"] == "validated"
+
+    retain_abort_cas(
+        tmp_path,
+        op_id,
+        target,
+        expected_journal_digest=digest,
+    )
+    retained = load_op(tmp_path, op_id)["abort_cas"]["targets"]["notes/guarded.md"]
+    assert retained["phase"] == "retained"
+    assert staging.read_bytes() == b"before\n"
+
+    commit_op(tmp_path, op_id)
+    assert load_op(tmp_path, op_id)["state"] == "commit"
+    assert staging.read_bytes() == b"before\n"
+
+
+def test_base_abort_cas_commit_rejects_all_unarmed_targets(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    op_id = begin_op(
+        tmp_path,
+        "reset_obsidian_base_presentation_sort",
+        [target],
+        abort_cas=True,
+    )
+
+    with pytest.raises(SystemExit, match="abort-CAS"):
+        commit_op(tmp_path, op_id)
+
+    assert load_op(tmp_path, op_id)["state"] == "begin"
+
+
+def test_abort_cas_arm_rejects_same_bytes_replaced_inode(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    op_id = begin_op(tmp_path, "guarded-test", [target], abort_cas=True)
+    staging_leaf = ".guarded-abort-cas.tmp"
+    staging = tmp_path / "kb" / ".journal" / "snapshots" / op_id / staging_leaf
+    staging.write_bytes(b"desired\n")
+    replacement = target.with_name("replacement.md")
+    replacement.write_bytes(target.read_bytes())
+    os.chmod(replacement, stat.S_IMODE(target.stat().st_mode))
+    os.replace(replacement, target)
+    replacement_state = _lstat_state(target)
+
+    with pytest.raises(SystemExit, match="leaf changed"):
+        arm_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=load_op_view(tmp_path, op_id)[1],
+            staging_leaf=staging_leaf,
+        )
+
+    assert _lstat_state(target) == replacement_state
+    assert staging.read_bytes() == b"desired\n"
 
 
 def test_journaled_abort_without_target_writes_preserves_file_and_tree_identities(
