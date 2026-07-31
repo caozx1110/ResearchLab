@@ -269,6 +269,11 @@ def test_abort_cas_arm_exchange_retain_and_commit_preserves_private_recovery_lea
     assert load_op(tmp_path, op_id)["state"] == "commit"
     assert staging.read_bytes() == b"before\n"
 
+    undone = undo_last_operation(tmp_path)
+    assert undone["op_id"] == op_id
+    assert target.read_bytes() == b"before\n"
+    assert staging.read_bytes() == b"before\n"
+
 
 def test_base_abort_cas_commit_rejects_all_unarmed_targets(tmp_path: Path) -> None:
     target = tmp_path / "kb" / "notes" / "guarded.md"
@@ -312,6 +317,586 @@ def test_abort_cas_arm_rejects_same_bytes_replaced_inode(tmp_path: Path) -> None
 
     assert _lstat_state(target) == replacement_state
     assert staging.read_bytes() == b"desired\n"
+
+
+def _prepared_abort_cas(
+    tmp_path: Path,
+    *,
+    name: str = "guarded.md",
+) -> tuple[Path, str, Path, str, tuple[int, int, int, object]]:
+    target = tmp_path / "kb" / "notes" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(f"before:{name}\n".encode())
+    before_state = _lstat_state(target)
+    op_id = begin_op(
+        tmp_path,
+        "reset_obsidian_base_presentation_sort",
+        [target],
+        abort_cas=True,
+    )
+    staging_leaf = f".{name}.abort-cas.tmp"
+    staging = tmp_path / "kb" / ".journal" / "snapshots" / op_id / staging_leaf
+    staging.write_bytes(f"desired:{name}\n".encode())
+    digest = arm_abort_cas(
+        tmp_path,
+        op_id,
+        target,
+        expected_journal_digest=load_op_view(tmp_path, op_id)[1],
+        staging_leaf=staging_leaf,
+    )
+    return target, op_id, staging, digest, before_state
+
+
+@pytest.mark.parametrize("phase", ["prepared", "validated", "retained"])
+def test_abort_cas_abort_restores_exact_before_inode_for_every_durable_phase(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    target, op_id, staging, digest, before_state = _prepared_abort_cas(tmp_path)
+    if phase in {"validated", "retained"}:
+        digest = exchange_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=digest,
+        )
+    if phase == "retained":
+        retain_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=digest,
+        )
+
+    abort_op(tmp_path, op_id, restore=True, error="simulated business failure")
+
+    assert _lstat_state(target) == before_state
+    assert staging.exists()
+    assert load_op(tmp_path, op_id)["state"] == "abort"
+
+
+@pytest.mark.parametrize("replacement_kind", ["regular", "symlink", "fifo", "absent"])
+def test_abort_cas_exchange_boundary_preserves_replacement_without_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    real_exchange = journal.atomic_exchange_at
+    injected: dict[str, tuple[int, int, int, object] | None] = {"state": None}
+
+    def inject_before_first_exchange(left_fd: int, left: str, right_fd: int, right: str) -> None:
+        if injected["state"] is None:
+            os.unlink(right, dir_fd=right_fd)
+            if replacement_kind == "regular":
+                descriptor = os.open(right, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=right_fd)
+                os.write(descriptor, b"before:guarded.md\n")
+                os.close(descriptor)
+            elif replacement_kind == "symlink":
+                os.symlink("third-party", right, dir_fd=right_fd)
+            elif replacement_kind == "fifo":
+                os.mkfifo(target, 0o600)
+            injected["state"] = _lstat_state(target) if replacement_kind != "absent" else None
+        real_exchange(left_fd, left, right_fd, right)
+
+    monkeypatch.setattr(journal, "atomic_exchange_at", inject_before_first_exchange)
+
+    with pytest.raises((OSError, SystemExit, RuntimeError), match="exchange|No such file|unowned leaf"):
+        exchange_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=digest,
+        )
+
+    if replacement_kind == "absent":
+        assert not target.exists() and not target.is_symlink()
+        assert staging.read_bytes() == b"desired:guarded.md\n"
+    else:
+        assert target.read_bytes() == b"desired:guarded.md\n"
+        assert _lstat_state(staging) == injected["state"]
+
+
+@pytest.mark.parametrize("replacement_kind", ["regular", "symlink", "fifo", "absent"])
+def test_abort_cas_retain_boundary_never_unlinks_replacement(
+    tmp_path: Path,
+    replacement_kind: str,
+) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(
+        tmp_path,
+        op_id,
+        target,
+        expected_journal_digest=digest,
+    )
+    staging.unlink()
+    if replacement_kind == "regular":
+        staging.write_bytes(b"third-party\n")
+    elif replacement_kind == "symlink":
+        staging.symlink_to("third-party")
+    elif replacement_kind == "fifo":
+        os.mkfifo(staging, 0o600)
+    replacement_state = _lstat_state(staging) if replacement_kind != "absent" else None
+    target_state = _lstat_state(target)
+
+    with pytest.raises(SystemExit, match="displaced staging changed"):
+        retain_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=digest,
+        )
+
+    assert _lstat_state(target) == target_state
+    if replacement_kind == "absent":
+        assert not staging.exists() and not staging.is_symlink()
+    else:
+        assert _lstat_state(staging) == replacement_state
+
+
+def test_abort_cas_abort_failed_blocks_new_work_and_resumes_only_when_provable(
+    tmp_path: Path,
+) -> None:
+    target, op_id, staging, digest, before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    retain_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    owned = target.with_name("owned.saved")
+    os.replace(target, owned)
+    target.write_bytes(b"third-party\n")
+    third_party = _lstat_state(target)
+
+    with pytest.raises(RuntimeError, match="Failed to restore"):
+        abort_op(tmp_path, op_id, restore=True)
+
+    assert _lstat_state(target) == third_party
+    assert load_op(tmp_path, op_id)["state"] == "abort_failed"
+    assert [entry["op_id"] for entry in incomplete_ops(tmp_path)] == [op_id]
+    with pytest.raises(SystemExit, match="unfinished|未完成"):
+        begin_op(tmp_path, "blocked", [target])
+
+    quarantined = target.with_name("third-party.saved")
+    os.replace(target, quarantined)
+    os.replace(owned, target)
+    result = restore_operation(tmp_path, op_id, recovery_type="resume")
+
+    assert result["op_id"] == op_id
+    assert _lstat_state(target) == before_state
+    assert load_op(tmp_path, op_id)["state"] == "abort"
+    assert staging.read_bytes() == b"desired:guarded.md\n"
+    assert quarantined.read_bytes() == b"third-party\n"
+
+
+def test_legacy_base_reset_begin_and_abort_failed_refuse_recovery_without_writes(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "legacy.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    op_id = begin_op(tmp_path, "reset_obsidian_base_presentation_sort", [target])
+    target.write_bytes(b"unknown post-exchange bytes\n")
+    target_state = _lstat_state(target)
+
+    with pytest.raises(RuntimeError, match="Legacy Base reset"):
+        abort_op(tmp_path, op_id, restore=True)
+
+    assert _lstat_state(target) == target_state
+    assert load_op(tmp_path, op_id)["state"] == "abort_failed"
+    with pytest.raises(SystemExit, match="Legacy Base reset"):
+        restore_operation(tmp_path, op_id, recovery_type="resume")
+    assert _lstat_state(target) == target_state
+
+
+def test_abort_cas_multitarget_preflight_makes_zero_target_writes_on_one_unsafe_leaf(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "kb" / "notes" / "first.md"
+    second = tmp_path / "kb" / "notes" / "second.md"
+    first.parent.mkdir(parents=True)
+    first.write_bytes(b"first-before\n")
+    second.write_bytes(b"second-before\n")
+    op_id = begin_op(
+        tmp_path,
+        "reset_obsidian_base_presentation_sort",
+        [first, second],
+        abort_cas=True,
+    )
+    digest = load_op_view(tmp_path, op_id)[1]
+    staging_root = tmp_path / "kb" / ".journal" / "snapshots" / op_id
+    for target in (first, second):
+        leaf = f".{target.stem}.tmp"
+        (staging_root / leaf).write_bytes(f"{target.stem}-desired\n".encode())
+        digest = arm_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=digest,
+            staging_leaf=leaf,
+        )
+    digest = exchange_abort_cas(tmp_path, op_id, first, expected_journal_digest=digest)
+    second.write_bytes(b"third-party\n")
+    before_abort = (_lstat_state(first), _lstat_state(second))
+
+    with pytest.raises(RuntimeError, match="Failed to restore"):
+        abort_op(tmp_path, op_id, restore=True)
+
+    assert (_lstat_state(first), _lstat_state(second)) == before_abort
+    assert load_op(tmp_path, op_id)["state"] == "abort_failed"
+
+
+def test_abort_cas_commit_rejects_same_bytes_replaced_owned_inode(tmp_path: Path) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    retain_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    replacement = target.with_name("replacement.md")
+    replacement.write_bytes(target.read_bytes())
+    os.chmod(replacement, stat.S_IMODE(target.stat().st_mode))
+    os.replace(replacement, target)
+    replacement_state = _lstat_state(target)
+    staging_state = _lstat_state(staging)
+
+    with pytest.raises(SystemExit, match="owned target changed"):
+        commit_op(tmp_path, op_id)
+
+    assert _lstat_state(target) == replacement_state
+    assert _lstat_state(staging) == staging_state
+    assert load_op(tmp_path, op_id)["state"] == "begin"
+
+
+def test_abort_cas_commit_rejects_retained_leaf_replacement_and_directory_rebind(
+    tmp_path: Path,
+) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    retain_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    staging.write_bytes(b"third-party retained replacement\n")
+    target_state = _lstat_state(target)
+    staging_state = _lstat_state(staging)
+
+    with pytest.raises(SystemExit, match="retained recovery leaf changed"):
+        commit_op(tmp_path, op_id)
+
+    assert _lstat_state(target) == target_state
+    assert _lstat_state(staging) == staging_state
+
+    staging_dir = staging.parent
+    parked = tmp_path / "parked-abort-cas-staging"
+    os.replace(staging_dir, parked)
+    staging_dir.mkdir()
+    (staging_dir / staging.name).write_bytes(b"replacement directory material\n")
+    replacement_state = _lstat_state(staging_dir / staging.name)
+
+    with pytest.raises((RuntimeError, SystemExit), match="staging directory changed|rebound|快照材料"):
+        commit_op(tmp_path, op_id)
+
+    assert _lstat_state(target) == target_state
+    assert _lstat_state(staging_dir / staging.name) == replacement_state
+    assert (parked / staging.name).read_bytes() == b"third-party retained replacement\n"
+
+
+def test_abort_cas_leaf_state_classifies_absent_regular_symlink_and_fifo_without_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "leaves"
+    parent.mkdir()
+    (parent / "regular").write_bytes(b"regular\n")
+    (parent / "link").symlink_to("regular")
+    os.mkfifo(parent / "fifo", 0o600)
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    real_open = journal.os.open
+
+    def refuse_special_open(path: object, *args: object, **kwargs: object) -> int:
+        if path in {"link", "fifo"}:
+            raise AssertionError(f"special leaf was opened: {path}")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(journal.os, "open", refuse_special_open)
+    try:
+        assert journal.abort_cas_leaf_state(descriptor, "missing")["kind"] == "absent"
+        assert journal.abort_cas_leaf_state(descriptor, "regular")["kind"] == "regular"
+        assert journal.abort_cas_leaf_state(descriptor, "link")["kind"] == "symlink"
+        assert journal.abort_cas_leaf_state(descriptor, "fifo")["kind"] == "fifo"
+    finally:
+        os.close(descriptor)
+
+
+def test_abort_cas_exchange_rejects_staging_directory_rebind_without_replacement_write(
+    tmp_path: Path,
+) -> None:
+    target, op_id, staging, digest, before_state = _prepared_abort_cas(tmp_path)
+    staging_dir = staging.parent
+    parked = tmp_path / "parked-staging"
+    os.replace(staging_dir, parked)
+    staging_dir.mkdir()
+    replacement = staging_dir / staging.name
+    replacement.write_bytes(b"third-party replacement staging\n")
+    replacement_state = _lstat_state(replacement)
+
+    with pytest.raises(SystemExit, match="staging directory changed"):
+        exchange_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=digest,
+        )
+
+    assert _lstat_state(target) == before_state
+    assert _lstat_state(replacement) == replacement_state
+    assert (parked / staging.name).read_bytes() == b"desired:guarded.md\n"
+
+
+def test_abort_cas_journal_publish_cas_reverses_in_place_source_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    op_id = begin_op(tmp_path, "guarded-test", [target], abort_cas=True)
+    staging_leaf = ".guarded.tmp"
+    staging = tmp_path / "kb" / ".journal" / "snapshots" / op_id / staging_leaf
+    staging.write_bytes(b"desired\n")
+    entry_path = journal_entry_path(tmp_path, op_id)
+    real_exchange = journal.atomic_exchange_at
+    raced: dict[str, object] = {"done": False, "state": None}
+
+    def mutate_authority_before_publish(
+        left_fd: int,
+        left: str,
+        right_fd: int,
+        right: str,
+    ) -> None:
+        if not raced["done"] and left.startswith(".journal-cas-") and right == f"{op_id}.yaml":
+            payload = load_yaml(entry_path, default={})
+            payload["started_at"] = "third-party-raced-version"
+            yaml_io.write_yaml_if_changed(entry_path, payload)
+            raced["done"] = True
+            raced["state"] = _lstat_state(entry_path)
+        real_exchange(left_fd, left, right_fd, right)
+
+    monkeypatch.setattr(journal, "atomic_exchange_at", mutate_authority_before_publish)
+
+    with pytest.raises(SystemExit, match="前置摘要"):
+        arm_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=load_op_view(tmp_path, op_id)[1],
+            staging_leaf=staging_leaf,
+        )
+
+    assert _lstat_state(entry_path) == raced["state"]
+    assert load_op(tmp_path, op_id)["abort_cas"]["targets"]["notes/guarded.md"]["phase"] == "unarmed"
+    assert staging.read_bytes() == b"desired\n"
+    assert list(staging.parent.glob(".journal-cas-*.yaml"))
+
+
+def test_abort_cas_arm_fsyncs_owned_file_before_directory_and_failure_stays_unarmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    op_id = begin_op(tmp_path, "guarded-test", [target], abort_cas=True)
+    staging_leaf = ".guarded.tmp"
+    staging = tmp_path / "kb" / ".journal" / "snapshots" / op_id / staging_leaf
+    staging.write_bytes(b"desired\n")
+    real_fsync = journal.os.fsync
+    seen: list[str] = []
+
+    def fail_first_regular_fsync(descriptor: int) -> None:
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "regular"
+        seen.append(kind)
+        if len(seen) == 1:
+            raise OSError("simulated staging file fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(journal.os, "fsync", fail_first_regular_fsync)
+
+    with pytest.raises(OSError, match="staging file fsync"):
+        arm_abort_cas(
+            tmp_path,
+            op_id,
+            target,
+            expected_journal_digest=load_op_view(tmp_path, op_id)[1],
+            staging_leaf=staging_leaf,
+        )
+
+    assert seen == ["regular"]
+    assert load_op(tmp_path, op_id)["abort_cas"]["targets"]["notes/guarded.md"]["phase"] == "unarmed"
+    assert staging.read_bytes() == b"desired\n"
+
+
+def test_abort_cas_abort_failure_never_relabels_raced_source_journal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    retain_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    target.write_bytes(b"third-party\n")
+    target_state = _lstat_state(target)
+    entry_path = journal_entry_path(tmp_path, op_id)
+    real_recover = journal.recover_abort_cas
+    raced_entry: dict[str, object] = {}
+
+    def race_then_fail(*args: object, **kwargs: object) -> tuple[dict[str, object], str]:
+        payload = load_yaml(entry_path, default={})
+        payload["started_at"] = "third-party-raced-abort"
+        yaml_io.write_yaml_if_changed(entry_path, payload)
+        raced_entry.update(payload)
+        return real_recover(*args, **kwargs)
+
+    monkeypatch.setattr(journal, "recover_abort_cas", race_then_fail)
+
+    with pytest.raises(SystemExit, match="source journal changed|前置摘要"):
+        abort_op(tmp_path, op_id, restore=True)
+
+    assert _lstat_state(target) == target_state
+    assert load_op(tmp_path, op_id) == raced_entry
+    assert load_op(tmp_path, op_id)["state"] == "begin"
+    assert staging.exists()
+
+
+def test_resume_root_terminalization_uses_publish_cas_and_preserves_raced_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "kb" / "notes" / "resume-cas.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    op_id = begin_op(tmp_path, "resume-cas", [target])
+    target.write_bytes(b"partial\n")
+    entry_path = journal_entry_path(tmp_path, op_id)
+    real_exchange = journal.atomic_exchange_at
+    raced = False
+
+    def race_root_terminal_publish(
+        left_fd: int,
+        left: str,
+        right_fd: int,
+        right: str,
+    ) -> None:
+        nonlocal raced
+        if not raced and left.startswith(".journal-cas-") and right == f"{op_id}.yaml":
+            payload = load_yaml(entry_path, default={})
+            payload["started_at"] = "third-party-raced-terminal"
+            yaml_io.write_yaml_if_changed(entry_path, payload)
+            raced = True
+        real_exchange(left_fd, left, right_fd, right)
+
+    monkeypatch.setattr(journal, "atomic_exchange_at", race_root_terminal_publish)
+
+    with pytest.raises(SystemExit, match="前置摘要"):
+        restore_operation(tmp_path, op_id, recovery_type="resume")
+
+    assert target.read_bytes() == b"before\n"
+    assert load_op(tmp_path, op_id)["state"] == "begin"
+    assert load_op(tmp_path, op_id)["started_at"] == "third-party-raced-terminal"
+
+    result = restore_operation(tmp_path, op_id, recovery_type="resume")
+    assert result["op_id"] == op_id
+    assert load_op(tmp_path, op_id)["state"] == "abort"
+
+
+def test_abort_cas_commit_second_validation_catches_final_same_bytes_inode_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    retain_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    real_digest = journal._anchored_target_digest
+    injected = False
+    replacement_state: tuple[int, int, int, object] | None = None
+
+    def replace_during_after_digest(root: Path, key: str) -> str | None:
+        nonlocal injected, replacement_state
+        if not injected and key == "notes/guarded.md":
+            replacement = target.with_name("final-window.md")
+            replacement.write_bytes(target.read_bytes())
+            os.chmod(replacement, stat.S_IMODE(target.stat().st_mode))
+            os.replace(replacement, target)
+            replacement_state = _lstat_state(target)
+            injected = True
+        return real_digest(root, key)
+
+    monkeypatch.setattr(journal, "_anchored_target_digest", replace_during_after_digest)
+
+    with pytest.raises(SystemExit, match="owned target changed"):
+        commit_op(tmp_path, op_id)
+
+    assert replacement_state is not None and _lstat_state(target) == replacement_state
+    assert staging.exists()
+    assert load_op(tmp_path, op_id)["state"] == "begin"
+
+
+def test_abort_cas_recovery_exchange_race_preserves_observed_third_party_position(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target, op_id, staging, digest, _before_state = _prepared_abort_cas(tmp_path)
+    digest = exchange_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    retain_abort_cas(tmp_path, op_id, target, expected_journal_digest=digest)
+    real_exchange = journal.atomic_exchange_at
+    parked_before = tmp_path / "parked-before-leaf"
+    injected = False
+    third_party_state: tuple[int, int, int, object] | None = None
+
+    def replace_staging_at_recovery_exchange(
+        left_fd: int,
+        left: str,
+        right_fd: int,
+        right: str,
+    ) -> None:
+        nonlocal injected, third_party_state
+        if not injected and left == staging.name and right == target.name:
+            os.replace(staging, parked_before)
+            staging.write_bytes(b"third-party-at-recovery-boundary\n")
+            third_party_state = _lstat_state(staging)
+            injected = True
+        real_exchange(left_fd, left, right_fd, right)
+
+    monkeypatch.setattr(journal, "atomic_exchange_at", replace_staging_at_recovery_exchange)
+
+    with pytest.raises(RuntimeError, match="Failed to restore"):
+        abort_op(tmp_path, op_id, restore=True)
+
+    assert third_party_state is not None and _lstat_state(target) == third_party_state
+    assert staging.read_bytes() == b"desired:guarded.md\n"
+    assert parked_before.read_bytes() == b"before:guarded.md\n"
+    assert load_op(tmp_path, op_id)["state"] == "abort_failed"
+
+
+def test_abort_cas_nested_opt_in_rejected_before_child_journal_or_body(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "nested.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    entered = False
+
+    with mutation_transaction(tmp_path, "root", [target]):
+        journal_count = len(list((tmp_path / "kb" / ".journal").glob("*.yaml")))
+        with pytest.raises(SystemExit, match="authoritative root"):
+            with mutation_transaction(tmp_path, "nested-guard", [target], abort_cas=True):
+                entered = True
+        assert len(list((tmp_path / "kb" / ".journal").glob("*.yaml"))) == journal_count
+
+    assert entered is False
+
+
+def test_abort_cas_envelope_unknown_phase_fails_closed_on_read(tmp_path: Path) -> None:
+    target = tmp_path / "kb" / "notes" / "guarded.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before\n")
+    op_id = begin_op(tmp_path, "guarded", [target], abort_cas=True)
+    entry_path = journal_entry_path(tmp_path, op_id)
+    payload = load_yaml(entry_path, default={})
+    payload["abort_cas"]["targets"]["notes/guarded.md"]["phase"] = "unknown"
+    yaml_io.write_yaml_if_changed(entry_path, payload)
+
+    with pytest.raises(SystemExit, match="abort-CAS 阶段"):
+        load_op(tmp_path, op_id)
 
 
 def test_journaled_abort_without_target_writes_preserves_file_and_tree_identities(
@@ -1097,7 +1682,12 @@ def test_resume_terminalizes_root_last_and_retries_after_descendant_write_failur
     real_write = journal._write_journal_yaml
     failed = False
 
-    def fail_child_terminal(project_root: Path, op_id: str, payload: object) -> None:
+    def fail_child_terminal(
+        project_root: Path,
+        op_id: str,
+        payload: object,
+        **kwargs: object,
+    ) -> None:
         nonlocal failed
         if (
             not failed
@@ -1107,7 +1697,7 @@ def test_resume_terminalizes_root_last_and_retries_after_descendant_write_failur
         ):
             failed = True
             raise OSError("simulated descendant terminalization failure")
-        real_write(project_root, op_id, payload)
+        real_write(project_root, op_id, payload, **kwargs)
 
     monkeypatch.setattr(journal, "_write_journal_yaml", fail_child_terminal)
     with pytest.raises(OSError, match="descendant terminalization"):

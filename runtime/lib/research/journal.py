@@ -826,6 +826,85 @@ def _anchored_journal_entries(project_root: Path) -> list[tuple[str, dict, os.st
         return entries
 
 
+def _write_journal_yaml_cas(
+    project_root: Path,
+    op_id: str,
+    name: str,
+    data: bytes,
+    expected_digest: str,
+) -> str:
+    """Publish journal bytes with an atomic exchange and compare-after CAS."""
+    if not _valid_digest(expected_digest):
+        raise SystemExit("abort-CAS journal precondition digest is invalid.")
+    retained_directory = f"{SNAPSHOT_DIRNAME}/{op_id}"
+    retained_name = f".journal-cas-{uuid.uuid4().hex}.yaml"
+    with _anchored_journal_root_fd(project_root, create=True) as journal_fd:
+        assert journal_fd is not None
+        with _anchored_journal_directory(project_root, retained_directory) as retained_fd:
+            _write_new_regular_at(retained_fd, retained_name, data, 0o600)
+            owned = abort_cas_leaf_state(
+                retained_fd,
+                retained_name,
+                max_bytes=MAX_JOURNAL_ENTRY_BYTES,
+            )
+            os.fsync(retained_fd)
+            atomic_exchange_at(retained_fd, retained_name, journal_fd, name)
+            published = abort_cas_leaf_state(
+                journal_fd,
+                name,
+                max_bytes=MAX_JOURNAL_ENTRY_BYTES,
+            )
+            displaced = abort_cas_leaf_state(
+                retained_fd,
+                retained_name,
+                max_bytes=MAX_JOURNAL_ENTRY_BYTES,
+            )
+            displaced_raw: bytes | None = None
+            if displaced.get("kind") == "regular":
+                displaced_metadata = _lstat_at(retained_fd, retained_name)
+                assert displaced_metadata is not None
+                displaced_raw = _read_anchored_regular(
+                    retained_fd,
+                    retained_name,
+                    displaced_metadata,
+                )
+            valid = (
+                _abort_cas_same_leaf(published, owned)
+                and displaced_raw is not None
+                and hashlib.sha256(displaced_raw).hexdigest() == expected_digest
+            )
+            if not valid:
+                if _abort_cas_same_leaf(published, owned) and displaced.get("kind") != "absent":
+                    atomic_exchange_at(retained_fd, retained_name, journal_fd, name)
+                    if (
+                        not _abort_cas_same_leaf(
+                            abort_cas_leaf_state(
+                                journal_fd,
+                                name,
+                                max_bytes=MAX_JOURNAL_ENTRY_BYTES,
+                            ),
+                            displaced,
+                        )
+                        or not _abort_cas_same_leaf(
+                            abort_cas_leaf_state(
+                                retained_fd,
+                                retained_name,
+                                max_bytes=MAX_JOURNAL_ENTRY_BYTES,
+                            ),
+                            owned,
+                        )
+                    ):
+                        raise RuntimeError("Journal digest-CAS mismatch swap-back failed.")
+                    os.fsync(retained_fd)
+                    os.fsync(journal_fd)
+                raise SystemExit("操作日志不再匹配 abort-CAS 前置摘要；已停止当前操作。")
+            os.fsync(retained_fd)
+            os.fsync(journal_fd)
+            # The exact displaced authoritative version intentionally remains
+            # under snapshots/<op_id>; there is no portable inode-CAS unlink.
+    return hashlib.sha256(data).hexdigest()
+
+
 def _write_journal_yaml(
     project_root: Path,
     op_id: str,
@@ -836,6 +915,14 @@ def _write_journal_yaml(
     name = _journal_entry_name(op_id)
     data = yaml_io.dump_yaml(dict(value)).encode("utf-8")
     new_digest = hashlib.sha256(data).hexdigest()
+    if expected_digest is not None:
+        return _write_journal_yaml_cas(
+            project_root,
+            op_id,
+            name,
+            data,
+            expected_digest,
+        )
     with _anchored_journal_root_fd(project_root, create=True) as journal_fd:
         assert journal_fd is not None
         existing = _lstat_at(journal_fd, name)
@@ -843,12 +930,8 @@ def _write_journal_yaml(
             if _node_kind(existing) != "file":
                 raise SystemExit("操作日志包含非普通条目；知识库已进入恢复隔离状态。")
             current = _read_anchored_regular(journal_fd, name, existing)
-            if expected_digest is not None and hashlib.sha256(current).hexdigest() != expected_digest:
-                raise SystemExit("操作日志不再匹配 abort-CAS 前置摘要；已停止当前操作。")
             if current == data:
                 return new_digest
-        elif expected_digest is not None:
-            raise SystemExit("操作日志在 abort-CAS 更新前消失；已停止当前操作。")
         temporary = f".{name}.{uuid.uuid4().hex}.tmp"
         try:
             _write_new_regular_at(journal_fd, temporary, data, 0o600)
@@ -1989,8 +2072,6 @@ def journal_subprocess_env(
     env = dict(os.environ if base_env is None else base_env)
     parent_op_id = current_operation_id(project_root)
     if parent_op_id:
-        if abort_cas:
-            raise SystemExit("abort-CAS may only be enabled on an authoritative root operation.")
         env[JOURNAL_PARENT_OP_ENV] = parent_op_id
         env[JOURNAL_PARENT_ROOT_ENV] = _project_context_key(project_root)
     else:
@@ -2369,6 +2450,15 @@ def arm_abort_cas(
             owned_leaf = abort_cas_leaf_state(staging_fd, staging_leaf)
             if owned_leaf.get("kind") != "regular":
                 raise SystemExit("abort-CAS staging must be a bounded regular file.")
+            staging_metadata = _lstat_at(staging_fd, staging_leaf)
+            assert staging_metadata is not None
+            staging_file_fd = _open_regular_at(staging_fd, staging_leaf, staging_metadata)
+            try:
+                os.fsync(staging_file_fd)
+                if not _same_read_identity(staging_metadata, os.fstat(staging_file_fd)):
+                    raise SystemExit("abort-CAS staging changed during file fsync.")
+            finally:
+                os.close(staging_file_fd)
             os.fsync(staging_fd)
             if abort_cas_leaf_state(staging_fd, staging_leaf) != owned_leaf:
                 raise SystemExit("abort-CAS staging changed while it was armed.")
@@ -2400,17 +2490,22 @@ def _abort_cas_swap_back_after_mismatch(
     staging_leaf: str,
     *,
     owned_leaf: Mapping[str, object],
-    displaced_leaf: Mapping[str, object],
+    expected_displaced_leaf: Mapping[str, object],
 ) -> None:
     current_target = abort_cas_leaf_state(target_parent_fd, target_leaf)
     current_staging = abort_cas_leaf_state(staging_fd, staging_leaf)
-    if not _abort_cas_same_leaf(current_target, owned_leaf) or current_staging.get("kind") == "absent":
-        raise RuntimeError("abort-CAS mismatch cannot be swapped back without overwriting a third party.")
+    if (
+        not _abort_cas_same_leaf(current_target, owned_leaf)
+        or not _abort_cas_same_leaf(current_staging, expected_displaced_leaf)
+    ):
+        raise RuntimeError(
+            "abort-CAS mismatch includes an unowned leaf; positions were preserved without guessing."
+        )
     atomic_exchange_at(staging_fd, staging_leaf, target_parent_fd, target_leaf)
     restored_target = abort_cas_leaf_state(target_parent_fd, target_leaf)
     restored_staging = abort_cas_leaf_state(staging_fd, staging_leaf)
     if (
-        not _abort_cas_same_leaf(restored_target, displaced_leaf)
+        not _abort_cas_same_leaf(restored_target, expected_displaced_leaf)
         or not _abort_cas_same_leaf(restored_staging, owned_leaf)
     ):
         raise RuntimeError("abort-CAS mismatch swap-back did not restore both exact leaves.")
@@ -2478,7 +2573,7 @@ def exchange_abort_cas(
                     staging_fd,
                     staging["leaf"],
                     owned_leaf=owned_leaf,
-                    displaced_leaf=displaced_after,
+                    expected_displaced_leaf=record["displaced_leaf"],
                 )
                 raise SystemExit("abort-CAS exchange comparison failed; exact leaves were swapped back.")
             os.fsync(staging_fd)
@@ -2707,6 +2802,41 @@ def _begin_op_with_keys(
     return op_id
 
 
+def _validate_abort_cas_commit_state(
+    project_root: Path,
+    entry: Mapping[str, object],
+    keys: Sequence[str],
+) -> None:
+    abort_cas = entry.get("abort_cas")
+    if not isinstance(abort_cas, dict) or not isinstance(abort_cas.get("targets"), dict):
+        return
+    targets = abort_cas["targets"]
+    for key in keys:
+        record = targets[key]
+        target_state, staging_state, target_digest_value = _abort_cas_observation(
+            project_root,
+            key,
+            record,
+        )
+        phase = str(record.get("phase") or "")
+        if phase == "unarmed":
+            if (
+                not _abort_cas_same_leaf(target_state, record["before_leaf"])
+                or target_digest_value != entry["before_digests"].get(key)
+            ):
+                raise SystemExit("abort-CAS unarmed target changed before commit.")
+            continue
+        if phase != "retained":
+            raise SystemExit("abort-CAS target is not retained before commit.")
+        if not _abort_cas_same_leaf(target_state, record["owned_leaf"]):
+            raise SystemExit("abort-CAS owned target changed before commit.")
+        if staging_state is None or not _abort_cas_same_leaf(
+            staging_state,
+            record["displaced_leaf"],
+        ):
+            raise SystemExit("abort-CAS retained recovery leaf changed before commit.")
+
+
 def commit_op(project_root: Path, op_id: str) -> None:
     entry, source_digest = load_op_view(project_root, op_id)
     keys = validated_recovery_target_keys(project_root, entry, require_after=False)
@@ -2724,15 +2854,21 @@ def commit_op(project_root: Path, op_id: str) -> None:
         )
         if len(phases) != len(keys) or not valid_terminal:
             raise SystemExit("abort-CAS targets must all be unarmed or all retained before commit.")
+        _validate_abort_cas_commit_state(project_root, entry, keys)
     entry["after_digests"] = {key: _anchored_target_digest(project_root, key) for key in keys}
+    if isinstance(abort_cas, dict):
+        _validate_abort_cas_commit_state(project_root, entry, keys)
     entry["completed_at"] = utc_now_iso()
     entry["state"] = "commit"
-    _write_journal_yaml(
-        project_root,
-        op_id,
-        entry,
-        expected_digest=source_digest if isinstance(abort_cas, dict) else None,
-    )
+    if isinstance(abort_cas, dict):
+        _write_journal_yaml(
+            project_root,
+            op_id,
+            entry,
+            expected_digest=source_digest,
+        )
+    else:
+        _write_journal_yaml(project_root, op_id, entry)
 
 
 def restore_before_snapshots(
@@ -2840,7 +2976,7 @@ def _abort_cas_observation(
             }
             target_digest_value = None
         else:
-            if phase != "unarmed" and capabilities != record.get("target_parent_capabilities"):
+            if capabilities != record.get("target_parent_capabilities"):
                 raise RuntimeError(f"abort-CAS target ancestry changed for {key}.")
             target_state = abort_cas_leaf_state(target_fd, target_leaf)
             target_digest_value = _anchored_node_digest_at(target_fd, target_leaf)
@@ -2972,7 +3108,10 @@ def recover_abort_cas(
                         staging["directory_capability"],
                     )
                 ):
-                    if _abort_cas_same_leaf(target_after, retained_leaf) and staging_after["kind"] != "absent":
+                    if (
+                        _abort_cas_same_leaf(target_after, retained_leaf)
+                        and _abort_cas_same_leaf(staging_after, current_owned)
+                    ):
                         atomic_exchange_at(staging_fd, staging["leaf"], target_fd, target_leaf)
                         if (
                             not _abort_cas_same_leaf(
@@ -3028,6 +3167,33 @@ def recover_abort_cas(
     return entry, source_digest
 
 
+def mark_abort_cas_failed(
+    project_root: Path,
+    op_id: str,
+    *,
+    expected_journal_digest: str,
+    error: str,
+    operation_error: str = "",
+) -> str:
+    """Durably quarantine a guarded recovery failure with a source byte CAS."""
+    entry, digest = load_op_view(project_root, op_id)
+    if digest != expected_journal_digest:
+        raise SystemExit("abort-CAS source journal changed before failure quarantine.")
+    if str(entry.get("state") or "") not in {"begin", "abort_failed"}:
+        raise SystemExit("Only an incomplete operation can enter abort_failed quarantine.")
+    entry["state"] = "abort_failed"
+    entry["completed_at"] = utc_now_iso()
+    entry["restoration_error"] = str(error)
+    if operation_error:
+        entry["operation_error"] = str(operation_error)
+    return _write_journal_yaml(
+        project_root,
+        op_id,
+        entry,
+        expected_digest=expected_journal_digest,
+    )
+
+
 def terminalize_resumed_op(
     project_root: Path,
     op_id: str,
@@ -3059,34 +3225,51 @@ def terminalize_resumed_op(
     terminal["state"] = "abort"
     terminal["resumed_at"] = completed_at
     terminal["resumed_by"] = recovery_op_id
-    _write_journal_yaml(project_root, op_id, terminal)
+    _write_journal_yaml(
+        project_root,
+        op_id,
+        terminal,
+        expected_digest=source_digest,
+    )
 
 
 def abort_op(project_root: Path, op_id: str, *, restore: bool = False, error: str = "") -> None:
     source_digest: str | None = None
+    source_entry: dict[str, Any] | None = None
     if restore:
         try:
-            entry, source_digest = load_op_view(project_root, op_id)
+            source_entry, source_digest = load_op_view(project_root, op_id)
             entry, source_digest = recover_abort_cas(
                 project_root,
                 op_id,
-                source_entry=entry,
+                source_entry=source_entry,
                 source_digest=source_digest,
             )
             restore_before_snapshots(project_root, op_id, source_entry=entry)
         except BaseException as exc:
-            entry, failed_source_digest = load_op_view(project_root, op_id)
-            entry["completed_at"] = utc_now_iso()
-            entry["state"] = "abort_failed"
-            entry["restoration_error"] = str(exc)
-            if error:
-                entry["operation_error"] = error
-            _write_journal_yaml(
-                project_root,
-                op_id,
-                entry,
-                expected_digest=failed_source_digest,
-            )
+            if (
+                source_entry is not None
+                and source_digest is not None
+                and (
+                    isinstance(source_entry.get("abort_cas"), dict)
+                    or str(source_entry.get("op_type") or "") == BASE_PRESENTATION_RESET_OP_TYPE
+                )
+            ):
+                mark_abort_cas_failed(
+                    project_root,
+                    op_id,
+                    expected_journal_digest=source_digest,
+                    error=str(exc),
+                    operation_error=error,
+                )
+            else:
+                entry = load_op(project_root, op_id)
+                entry["completed_at"] = utc_now_iso()
+                entry["state"] = "abort_failed"
+                entry["restoration_error"] = str(exc)
+                if error:
+                    entry["operation_error"] = error
+                _write_journal_yaml(project_root, op_id, entry)
             raise RuntimeError(f"Failed to restore operation {op_id}: {exc}") from exc
     entry, current_digest = load_op_view(project_root, op_id)
     # Root-last terminalization keeps the authoritative root recoverable when a
@@ -3097,12 +3280,15 @@ def abort_op(project_root: Path, op_id: str, *, restore: bool = False, error: st
     entry["state"] = "abort"
     if error:
         entry["operation_error"] = error
-    _write_journal_yaml(
-        project_root,
-        op_id,
-        entry,
-        expected_digest=current_digest if isinstance(entry.get("abort_cas"), dict) else None,
-    )
+    if isinstance(entry.get("abort_cas"), dict):
+        _write_journal_yaml(
+            project_root,
+            op_id,
+            entry,
+            expected_digest=current_digest,
+        )
+    else:
+        _write_journal_yaml(project_root, op_id, entry)
 
 
 def mark_op_undone(project_root: Path, op_id: str, recovery_op_id: str) -> None:

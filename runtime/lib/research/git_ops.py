@@ -37,9 +37,11 @@ from .journal import (
     latest_committed_op,
     load_op,
     load_op_view,
+    mark_abort_cas_failed,
     mark_op_undone,
     operation_lock,
     restore_before_snapshots,
+    recover_abort_cas,
     restorable_committed_ops,
     target_path,
     target_digest,
@@ -463,7 +465,8 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
                 "checkpoint": {"committed": False, "status": "already-resumed"},
                 "status": "already-resumed",
             }
-        if state != "commit" and not (state == "begin" and recovery_type == "resume"):
+        resumable_states = {"begin", "abort_failed"}
+        if state != "commit" and not (state in resumable_states and recovery_type == "resume"):
             raise SystemExit("只有已完成的操作可恢复；未完成操作只能通过 kb resume 自愈。")
         keys = validated_recovery_target_keys(
             project_root,
@@ -477,7 +480,7 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
             if incomplete_roots
             else ""
         )
-        if state == "begin" and op_id != newest_incomplete_id:
+        if state in resumable_states and op_id != newest_incomplete_id:
             raise SystemExit("未完成操作必须按从新到旧的顺序恢复；已停止恢复。")
         if state == "commit" and incomplete_roots:
             raise SystemExit("检测到未完成的知识库操作；请先使用 kb resume 完成恢复。")
@@ -496,6 +499,22 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
             _, locked_source_digest = load_op_view(project_root, op_id)
             if locked_source_digest != source_digest:
                 raise SystemExit("恢复来源操作日志在执行前发生变化；已停止恢复。")
+            if state in resumable_states:
+                try:
+                    entry, source_digest = recover_abort_cas(
+                        project_root,
+                        op_id,
+                        source_entry=entry,
+                        source_digest=source_digest,
+                    )
+                except BaseException as exc:
+                    mark_abort_cas_failed(
+                        project_root,
+                        op_id,
+                        expected_journal_digest=source_digest,
+                        error=str(exc),
+                    )
+                    raise
             with _recovery_journaled_op(
                 project_root,
                 f"{recovery_type}:{op_id}",
@@ -517,7 +536,7 @@ def restore_operation(project_root: Path, op_id: str, *, recovery_type: str = "r
                     target_paths=restored,
                     prepare_workspace=False,
                 )
-            if state == "begin":
+            if state in resumable_states:
                 terminalize_resumed_op(
                     project_root,
                     op_id,
