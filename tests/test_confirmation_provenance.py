@@ -483,7 +483,6 @@ def test_confirm_scripts_require_provenance_arguments() -> None:
     for owner, skill, script_name in [
         ("paper-analyst", "unit-analyst", "paper.py"),
         ("repo-analyst", "unit-analyst", "repo.py"),
-        ("blog-analyst", "unit-analyst", "blog.py"),
         ("experiment-workbench", "experiment-workbench", "experiment.py"),
     ]:
         text = _script_text(skill, script_name)
@@ -491,6 +490,21 @@ def test_confirm_scripts_require_provenance_arguments() -> None:
         assert "apply_confirmation" not in text
         assert _has_optional_arg(text, "--confirmed-by"), owner
         assert _has_required_arg(text, "--evidence"), owner
+
+    shared_text = (
+        _project_root() / "runtime/lib/research/analyzer_note_flow.py"
+    ).read_text(encoding="utf-8")
+    assert "confirm_unit" in shared_text
+    assert "apply_confirmation" not in shared_text
+    assert _has_optional_arg(shared_text, "--confirmed-by")
+    assert _has_required_arg(shared_text, "--evidence")
+    for owner, script_name in [
+        ("blog-analyst", "blog.py"),
+        ("dataset-analyst", "dataset.py"),
+    ]:
+        text = _script_text("unit-analyst", script_name)
+        assert "AnalyzerNoteFlow" in text, owner
+        assert "apply_confirmation" not in text, owner
 
     idea_text = _script_text("idea-workbench", "idea.py")
     assert "require_confirmation_provenance" in idea_text

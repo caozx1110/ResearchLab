@@ -541,8 +541,21 @@ def test_r1_analyzer_command_failure_rolls_back_record_and_artifacts(
     loaded, _ = locate_record(tmp_path, record["id"], kind=skill)
     before = path.read_bytes()
     checkpoint_calls: list[object] = []
-    monkeypatch.setattr(module, "checkpoint_and_report", lambda *args, **kwargs: checkpoint_calls.append(kwargs))
-    monkeypatch.setattr(module, "build_index", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected")))
+    monkeypatch.setattr(
+        module,
+        "checkpoint_and_report",
+        lambda *args, **kwargs: checkpoint_calls.append(kwargs),
+    )
+    build_index_owner = (
+        sys.modules[module.FLOW.__class__.__module__]
+        if hasattr(module, "FLOW")
+        else module
+    )
+    monkeypatch.setattr(
+        build_index_owner,
+        "build_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("injected")),
+    )
 
     if skill == "paper":
         cache = path.parent / "parse-cache.yaml"

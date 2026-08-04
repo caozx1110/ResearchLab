@@ -7,9 +7,9 @@ verb the corresponding analyzer actually exposes.
 """
 from __future__ import annotations
 
+import argparse
 import importlib.machinery
 import importlib.util
-import re
 import sys
 from pathlib import Path
 
@@ -33,8 +33,21 @@ def _load_kb_module():
 
 def _analyzer_verbs(skill: str, script_name: str) -> set[str]:
     script = _project_root() / "skills" / skill / "scripts" / script_name
-    text = script.read_text(encoding="utf-8")
-    return set(re.findall(r'add_parser\(\s*"([a-z0-9-]+)"', text))
+    module_name = f"{skill}_{script_name.removesuffix('.py')}_verbs_under_test"
+    loader = importlib.machinery.SourceFileLoader(module_name, str(script))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    spec.loader.exec_module(module)
+
+    parser = module.build_parser()
+    subparsers = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    return set(subparsers.choices)
 
 
 def test_blog_next_hint_is_not_the_removed_summarize_verb() -> None:
