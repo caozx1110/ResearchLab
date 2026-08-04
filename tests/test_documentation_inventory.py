@@ -4,6 +4,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import yaml
+
 from repo_paths import REPO_ROOT
 
 
@@ -244,6 +246,29 @@ def test_development_contract_is_github_remote_complete() -> None:
         text=True,
     )
     assert result.stdout.strip() == ""
+
+
+def test_ci_matrix_keeps_supported_bounds_without_repeating_release_gate() -> None:
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    jobs = workflow["jobs"]
+
+    assert jobs["test"]["strategy"]["matrix"]["python-version"] == ["3.9", "3.12"]
+    assert jobs["macos-release-gate"]["strategy"]["matrix"]["python-version"] == [
+        "3.12"
+    ]
+
+    linux_steps = {
+        step["name"]: step for step in jobs["test"]["steps"] if "name" in step
+    }
+    assert linux_steps["Run conversational release gate"]["run"] == (
+        "python -m pytest tests/test_r1_conversational_release.py -q"
+    )
+    assert linux_steps["Run tests"]["run"] == (
+        "env -u CI python -m pytest tests -q "
+        "--ignore=tests/test_r1_conversational_release.py"
+    )
 
 
 def test_tracked_sources_do_not_point_to_retired_private_design_sections() -> None:
