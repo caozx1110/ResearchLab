@@ -506,6 +506,8 @@ def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
         / "decisions"
         / "0003-separate-diagnostic-capture-mode-from-local-detail.md"
     ).read_text(encoding="utf-8")
+    assert "- Status: Accepted" in decision
+    assert "- Status: Proposed" not in decision
 
     for mode in ("off", "errors-only", "developer"):
         assert mode in agent_rules

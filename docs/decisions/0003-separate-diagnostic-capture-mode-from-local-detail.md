@@ -1,6 +1,6 @@
 # ADR 0003: Separate diagnostic capture mode from local detail
 
-- Status: Proposed（随 #13 PR 审查；仅合入 default branch 后生效）
+- Status: Accepted（经 PR #19 人类审查并合入 default branch 后生效）
 - Date: 2026-07-31
 - Atomic Issue: [#13](https://github.com/caozx1110/ResearchLab/issues/13)
 - Decision owners: ResearchLab maintainers
