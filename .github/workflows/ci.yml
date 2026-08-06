@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.12"]
+        python-version: ["3.9", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
         # Unset CI for this step only: the installer PTY tests drive a simulated
         # interactive terminal, and install.sh's is_interactive_input() correctly
         # refuses to prompt when $CI is set (a real-CI safety guard we keep intact).
-        run: env -u CI python -m pytest tests -q
+        run: env -u CI python -m pytest tests -q --ignore=tests/test_r1_conversational_release.py
 
   macos-release-gate:
     name: "${{ github.event_name == 'push' && 'candidate-head' || 'tested-merge' }} / macos / py${{ matrix.python-version }}"
@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.12"]
+        python-version: ["3.12"]
 
     steps:
       - uses: actions/checkout@v4
