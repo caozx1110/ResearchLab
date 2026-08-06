@@ -1,6 +1,6 @@
 ---
 name: discussion-archivist
-description: Archive important technical route discussions into durable per-program notes, including conclusions, tradeoffs, open questions, and next validation actions.
+description: Archive explicit research-route discussions into durable per-program notes; skill/workflow friction and improvement candidates belong to skill-evolution-advisor.
 ---
 
 # Discussion Archivist
@@ -10,6 +10,12 @@ Preference contract: explicitly neutral with an empty eligible catalog. This own
 > 协议参考：`.agents/lib/research/SCHEMAS.md#program-files` · `#ownership` · `#runtime`
 
 Use this skill when an important research discussion should become a durable note instead of staying only in chat. 产出落在 `kb/programs/<program-id>/discussions/<slug>.md`。
+
+## 触发边界
+
+- 本 owner 只归档明确的研究/技术路线讨论：路线取舍、尚未拍板的分歧、open question 与下一步验证。
+- “skill/workflow 优化项、待改进、流程问题、摩擦、改进候选”属于 `skill-evolution-advisor`，即使原请求使用了泛化的“讨论 / discussion”措辞，也不得由本 owner 单独吞并。
+- 同一请求若还独立要求归档研究路线讨论，由 `research-orchestrator` 生成有序 route decision，分别交给两个 owner；本 owner 仍只写 pending/unverified 的研究讨论记录。
 
 ## 与 decision-log 的边界
 

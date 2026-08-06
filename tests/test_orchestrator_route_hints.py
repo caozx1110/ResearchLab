@@ -46,6 +46,158 @@ def test_source_intake_routes_cover_new_source_tasks() -> None:
     assert module.ROUTE_HINTS["新论文"] == "source-intake"
 
 
+@pytest.mark.parametrize(
+    "task",
+    (
+        "记录这次 skill/workflow 的待优化项",
+        "记下这个 skill 的待改进项",
+        "把这次流程问题记下来",
+        "记录这个工作流的摩擦",
+        "记录这个 workflow 改进候选",
+        "record this workflow improvement candidate",
+        "note this skill friction",
+    ),
+)
+def test_skill_workflow_improvement_records_route_to_evolution_advisor(task: str) -> None:
+    module = _load_orchestrator_module()
+
+    snapshot = module.route_candidate_snapshot(task)
+
+    assert snapshot["candidate_skills"] == ["skill-evolution-advisor"]
+    assert snapshot["planning_required"] is False
+    assert snapshot["direct_owner"] == "skill-evolution-advisor"
+
+
+@pytest.mark.parametrize(
+    "task",
+    (
+        "记录这次 skill 优化讨论",
+        "archive this workflow improvement discussion",
+    ),
+)
+def test_meta_workflow_request_suppresses_generic_discussion_hint(task: str) -> None:
+    module = _load_orchestrator_module()
+
+    snapshot = module.route_candidate_snapshot(task)
+
+    assert snapshot["candidate_skills"] == ["skill-evolution-advisor"]
+    assert snapshot["direct_owner"] == "skill-evolution-advisor"
+    generic_discussion_hits = [
+        hit for hit in snapshot["matched_hints"] if hit["hint"] in {"讨论", "discussion"}
+    ]
+    assert generic_discussion_hits
+    assert all(hit["suppressed_by_specific_hint"] for hit in generic_discussion_hits)
+
+
+@pytest.mark.parametrize(
+    ("task", "expected_owner"),
+    (
+        ("优化这个方法", "method-designer"),
+        ("优化这个实验", "experiment-workbench"),
+        ("讨论如何优化模型", "discussion-archivist"),
+        ("optimize this method", "method-designer"),
+    ),
+)
+def test_research_optimization_tasks_do_not_route_to_skill_evolution(
+    task: str, expected_owner: str
+) -> None:
+    module = _load_orchestrator_module()
+
+    snapshot = module.route_candidate_snapshot(task)
+
+    assert "skill-evolution-advisor" not in snapshot["candidate_skills"]
+    assert snapshot["direct_owner"] == expected_owner
+
+
+@pytest.mark.parametrize(
+    "task",
+    (
+        "记录这次改进候选",
+        "record this improvement candidate",
+        "optimize this model",
+    ),
+)
+def test_context_free_improvement_language_remains_agent_routed(task: str) -> None:
+    module = _load_orchestrator_module()
+
+    snapshot = module.route_candidate_snapshot(task)
+
+    assert "skill-evolution-advisor" not in snapshot["candidate_skills"]
+    assert snapshot["planning_required"] is True
+    assert snapshot["direct_owner"] == "research-orchestrator"
+
+
+@pytest.mark.parametrize(
+    "task",
+    (
+        "归档研究路线讨论",
+        "archive the research-route discussion",
+    ),
+)
+def test_explicit_research_route_discussion_still_routes_to_archivist(task: str) -> None:
+    module = _load_orchestrator_module()
+
+    snapshot = module.route_candidate_snapshot(task)
+
+    assert snapshot["candidate_skills"] == ["discussion-archivist"]
+    assert snapshot["planning_required"] is False
+    assert snapshot["direct_owner"] == "discussion-archivist"
+
+
+@pytest.mark.parametrize(
+    "task",
+    (
+        "先记录 skill 优化项，再归档研究路线讨论",
+        "record this skill improvement candidate, then archive the research-route discussion",
+    ),
+)
+def test_composed_skill_improvement_and_route_archive_requires_ordered_decision(
+    task: str,
+) -> None:
+    module = _load_orchestrator_module()
+    snapshot = module.route_candidate_snapshot(task)
+
+    assert snapshot["candidate_skills"] == [
+        "discussion-archivist",
+        "skill-evolution-advisor",
+    ]
+    assert snapshot["planning_required"] is True
+    assert snapshot["direct_owner"] == "research-orchestrator"
+
+    decision = {
+        "task_digest": snapshot["route_snapshot_digest"],
+        "intents": [
+            "record the skill improvement candidate",
+            "archive the independent research-route discussion",
+        ],
+        "negated_intents": [],
+        "rationale": "Record workflow friction before archiving the separate research discussion.",
+        "ordered_steps": [
+            {
+                "step_id": "record-improvement",
+                "owner_skill": "skill-evolution-advisor",
+                "instruction": "Record the skill improvement candidate without changing the skill.",
+                "depends_on": [],
+                "governance_gate": "none",
+            },
+            {
+                "step_id": "archive-route-discussion",
+                "owner_skill": "discussion-archivist",
+                "instruction": "Archive the independent research-route discussion as pending.",
+                "depends_on": ["record-improvement"],
+                "governance_gate": "agent-verification",
+            },
+        ],
+    }
+
+    normalized = module.validate_route_decision(decision, snapshot)
+    assert [step["owner_skill"] for step in normalized["ordered_steps"]] == [
+        "skill-evolution-advisor",
+        "discussion-archivist",
+    ]
+    assert normalized["ordered_steps"][1]["depends_on"] == ["record-improvement"]
+
+
 def test_survey_routes_require_agent_scope_decision_before_synthesis() -> None:
     module = _load_orchestrator_module()
     for task in (

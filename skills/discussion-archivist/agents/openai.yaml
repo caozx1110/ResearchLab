@@ -1,5 +1,5 @@
 interface:
   display_name: Discussion Archivist
-  short_description: Archive route discussions into durable program notes in core
-  default_prompt: Use $discussion-archivist to turn an important research discussion into a durable note with conclusion,
-    tradeoffs, open questions, and next actions.
+  short_description: Archive research-route discussions, not skill improvement notes
+  default_prompt: Use $discussion-archivist to archive an explicit research-route discussion with tradeoffs, open questions,
+    and next actions. Do not use it for skill/workflow friction or improvement candidates; route those to $skill-evolution-advisor.

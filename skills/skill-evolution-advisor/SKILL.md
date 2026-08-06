@@ -1,6 +1,6 @@
 ---
 name: skill-evolution-advisor
-description: 经验 + skill 演化记忆：capture lightweight learnings, redacted diagnostic summaries, optional private local-detailed records, confirmed habits/gotchas, and confirmation-gated retrospective improvement prompts.
+description: Capture skill/workflow friction, corrections, defects, improvement candidates, and retrospective prompts as record-only evolution memory.
 ---
 
 # Skill Evolution Advisor
@@ -8,6 +8,13 @@ description: 经验 + skill 演化记忆：capture lightweight learnings, redact
 Preference contract: explicitly neutral with an empty eligible catalog. Governance and diagnostic privacy/detail constraints remain deterministic owner rules rather than soft research preferences.
 
 Use this skill when a real workflow exposes friction in the research system, when the user corrects the agent, or when lightweight memory should capture a confirmed habit, recurring issue, or skill defect.
+
+## Trigger boundary
+
+- Route explicit skill/workflow optimization items, pending improvements, process problems, friction, and improvement candidates here, including equivalent Chinese or English requests to record them.
+- Do not claim generic research work such as optimizing a model, method, experiment, metric, or research result merely because it contains “优化 / optimization”. Ambiguous context stays with `research-orchestrator`.
+- A separate request to archive a research-route discussion remains owned by `discussion-archivist`; a composed request uses an ordered `research-orchestrator` route decision.
+- Capturing a defect or candidate remains record-only and never authorizes an automatic skill or roadmap edit.
 
 ## Workflow
 

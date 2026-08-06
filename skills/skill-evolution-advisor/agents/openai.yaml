@@ -1,7 +1,8 @@
 interface:
   display_name: Skill Evolution Advisor
-  short_description: Capture learnings and skill-evolution memory
-  default_prompt: Use $skill-evolution-advisor after a research workflow to log lightweight habits/gotchas/skill defects or
-    to turn deeper routing, schema, script, or handoff friction into a small improvement prompt.
+  short_description: Capture skill/workflow friction and improvement candidates
+  default_prompt: Use $skill-evolution-advisor to record skill/workflow friction, corrections, defects, or improvement candidates
+    without auto-editing a skill. Do not use it for optimizing a research model, method, or experiment; combine an independent
+    research-route archive through $research-orchestrator.
 policy:
   allow_implicit_invocation: true

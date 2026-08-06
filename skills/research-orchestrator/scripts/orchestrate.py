@@ -98,6 +98,26 @@ class _PortfolioDecisionValidationPlan:
             raise SystemExit("Program decision reference is unavailable or unverified")
 
 
+ROUTE_EXPLICIT_DISCUSSION_HINTS = (
+    "研究路线讨论",
+    "技术路线讨论",
+    "研究方向讨论",
+    "research discussion",
+    "research route discussion",
+    "research-route discussion",
+    "technical route discussion",
+    "technical-route discussion",
+)
+ROUTE_GENERIC_DISCUSSION_HINTS = {"讨论", "discussion"}
+ROUTE_META_WORKFLOW_PATTERNS = (
+    r"(?:skill|技能|workflow|工作流)(?:\s*[/／、与和]\s*(?:skill|技能|workflow|工作流))?\s*(?:的|相关的)?\s*(?:优化(?:项)?|待优化(?:项)?|待改进(?:项)?|改进候选|问题|摩擦)",
+    r"(?:优化项|待优化(?:项)?|待改进(?:项)?|改进候选|问题|摩擦)\s*(?:的|相关的)?\s*(?:skill|技能|workflow|工作流)",
+    r"(?:工作流|流程)\s*(?:的)?\s*(?:问题|摩擦)",
+    r"\b(?:skill|workflow)(?:\s*[/&]\s*(?:skill|workflow))?[-\s]+(?:optimization(?:[-\s]+(?:item|candidate))?|improvement(?:[-\s]+candidate)?|issue|problem|friction)\b",
+    r"\b(?:optimization(?:[-\s]+(?:item|candidate))?|improvement(?:[-\s]+candidate)?|issue|problem|friction)\s+(?:for|in|with|of)\s+(?:this\s+|the\s+)?(?:skill|workflow)\b",
+)
+
+
 ROUTE_HINTS = {
     "source": "source-intake",
     "intake": "source-intake",
@@ -180,6 +200,7 @@ ROUTE_HINTS = {
     "schema": "knowledge-base-manager",
     "lint": "knowledge-base-manager",
     "governance": "knowledge-base-manager",
+    **{hint: "discussion-archivist" for hint in ROUTE_EXPLICIT_DISCUSSION_HINTS},
     "讨论": "discussion-archivist",
     "discussion": "discussion-archivist",
     "skill evolution": "skill-evolution-advisor",
@@ -262,11 +283,36 @@ ROUTABLE_OWNER_SKILLS = (
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 
 
+def _meta_workflow_route_hits(text: str) -> list[dict[str, Any]]:
+    """Match only bounded skill/workflow improvement phrases."""
+    hits: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for pattern in ROUTE_META_WORKFLOW_PATTERNS:
+        for match in re.finditer(pattern, text):
+            hint = match.group(0)
+            key = (match.start(), hint)
+            if key in seen:
+                continue
+            seen.add(key)
+            hits.append(
+                {
+                    "hint": hint,
+                    "owner_skill": "skill-evolution-advisor",
+                    "start": match.start(),
+                }
+            )
+    return hits
+
+
 def route_candidate_snapshot(task: str) -> dict[str, Any]:
     """Expose factual route hints; leave ambiguous or composed routing to the Agent."""
     text = str(task or "").strip()
     lower = text.casefold()
     composition_markers = [marker for marker in ROUTE_COMPOSITION_MARKERS if marker in lower]
+    first_index = lower.find("先")
+    then_index = lower.find("再", first_index + 1) if first_index >= 0 else -1
+    if first_index >= 0 and then_index > first_index:
+        composition_markers.append("先…再…")
     negation_markers = [marker for marker in ROUTE_NEGATION_MARKERS if marker in lower]
     if re.search(r"\b(?:not|don't|do not|never)\b", lower):
         negation_markers.append("english-negation")
@@ -275,6 +321,13 @@ def route_candidate_snapshot(task: str) -> dict[str, Any]:
         for hint, skill in ROUTE_HINTS.items()
         if hint in lower
     ]
+    raw_hits.extend(_meta_workflow_route_hits(lower))
+    meta_workflow_present = any(
+        str(hit["owner_skill"]) == "skill-evolution-advisor" for hit in raw_hits
+    )
+    explicit_discussion_present = any(
+        hint in lower for hint in ROUTE_EXPLICIT_DISCUSSION_HINTS
+    )
     effective_hits: list[dict[str, Any]] = []
     for hit in raw_hits:
         hint = str(hit["hint"])
@@ -289,6 +342,13 @@ def route_candidate_snapshot(task: str) -> dict[str, Any]:
             )
             for other in raw_hits
         )
+        if (
+            str(hit["owner_skill"]) == "discussion-archivist"
+            and hint in ROUTE_GENERIC_DISCUSSION_HINTS
+            and meta_workflow_present
+            and not explicit_discussion_present
+        ):
+            suppressed = True
         effective_hits.append({**hit, "suppressed_by_specific_hint": suppressed})
     candidate_skills = sorted(
         {
