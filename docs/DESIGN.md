@@ -97,6 +97,7 @@ Wave 1 的 `path_contract.py` 只提供 typed roots、logical/physical conversio
 - `monitoring.py`：provider-neutral subscriptions、due facts、frozen run receipt 与引用验证；
 - `review_batches.py`：无插件 Obsidian editable sheet、严格 checkbox 解析与跨 owner batch binding；
 - `evidence.py`：逐字 evidence 和派生证据验证；
+- `analyzer_note_flow.py`：blog/dataset 共用的 deterministic prepare/verify/confirm、preference binding、事务与 post-action 编排；kind adapter 只提供 schema、artifact、rendering 与 CLI spec，理解仍由 runtime Agent 完成；
 - `relations.py` / `obsidian.py`：有向关系注册表、细粒度 locator、无插件 Obsidian 派生投影与只读审计；
 - `journal.py` / `git_ops.py`：恢复与精确 checkpoint；
 - `bootstrap.py` / `updater.py`：运行环境与来源感知更新；
