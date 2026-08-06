@@ -417,7 +417,8 @@ class AnalyzerNoteFlow:
             element = elements.get(name)
             if element is None:
                 violations.append(
-                    f"element '{name}': missing (all four elements are required)"
+                    f"element '{name}': missing "
+                    f"(all {len(self.spec.note_elements)} configured elements are required)"
                 )
                 continue
             content = clean_text(str(element.get("content") or ""))

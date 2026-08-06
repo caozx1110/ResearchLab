@@ -43,10 +43,14 @@ def _analyzer_verbs(skill: str, script_name: str) -> set[str]:
 
     parser = module.build_parser()
     subparsers = next(
-        action
-        for action in parser._actions
-        if isinstance(action, argparse._SubParsersAction)
+        (
+            action
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ),
+        None,
     )
+    assert subparsers is not None, f"{script_name} parser does not define subcommands"
     return set(subparsers.choices)
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,24 @@ def test_shared_owner_uses_narrow_modules_not_core_facade() -> None:
 
     assert "research.core" not in source
     assert "from .core" not in source
+
+
+def test_missing_element_message_uses_configured_element_count(tmp_path: Path) -> None:
+    blog = _load_adapter(
+        ".agents/skills/unit-analyst/scripts/blog.py",
+        "shared_flow_configured_count_blog_adapter",
+    )
+    flow = AnalyzerNoteFlow(
+        replace(blog.SPEC, note_elements=("first", "second")),
+        script_path=blog.SCRIPT_PATH,
+        default_project_root=blog.PROJECT_ROOT,
+    )
+
+    violations, claims = flow.verify_note_fill({}, tmp_path)
+
+    assert claims == []
+    assert any("all 2 configured elements are required" in item for item in violations)
+    assert all("all four elements" not in item for item in violations)
 
 
 def test_shared_transaction_rolls_back_adapter_write(tmp_path: Path) -> None:
