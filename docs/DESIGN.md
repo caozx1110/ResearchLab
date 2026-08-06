@@ -18,6 +18,8 @@ Open Research Workspace Skills 是 knowledge-unit-first 的 research operating s
 
 ## 分发边界
 
+下图是 Wave 1 合入时仍在运行的 legacy 物理布局；workspace-root 目标合同已经冻结，但只有后续 runtime/installer waves 合入后才激活：
+
 ```text
 source checkout                    installed workspace
 ├── skills/                        ├── .agents/
@@ -34,6 +36,16 @@ source checkout                    installed workspace
 仓库根 `AGENTS.md` 是开发这套 skill 系统的工作流；`runtime/AGENTS.md` 是安装后 Agent 使用 KB 的 runtime 规则源码，并映射为 `.agents/AGENTS.md`。根 `/.agents/` 只放 ignored 本地工具，绝不进入产品 inventory、release enumeration、digest 或安装 payload。三者不可混写。
 
 Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
+
+### Workspace/data-root 目标合同（activation deferred）
+
+[ADR 0004](decisions/0004-workspace-root-canonical-data-and-logical-artifact-namespace.md) 将 workspace/integration root、canonical data root 与 product bundle root 定义为三个显式角色。当前 runtime 继续以 `<workspace>/kb/` 为 physical data root；后续 Wave 2 的目标是 dedicated workspace 根本身成为 physical data root，而 `.agents/**` 仍是 ignored、可重装的产品面。不得仅修改 `research_root()` 就扩大 mutation 范围。
+
+Persisted `kb/...` 是稳定 logical artifact namespace，不再等同于物理目录前缀。同一 ref 在 legacy layout 映射到 `<workspace>/kb/...`，在 root layout 映射到 `<workspace>/...`，reverse mapping 必须保持 bytes 不变；record、history、evidence、receipt 与 survey/report bindings 不因物理迁移批量重写。
+
+Root layout 采用 reviewed canonical top-level allowlist；`.journal/`、`.runtime/` 单独分类为 operational state。`.agents/**`、`.git/**`、`.venv/**`、`.claude/**`、根 `AGENTS.md`、`CLAUDE.md` 与 `bin/**` 是 reserved integration targets，不能成为 business mutation、journal snapshot、strict-reader artifact 或普通 Git checkpoint pathspec。未知 top-level、traversal、absolute path、symlink ancestor/leaf 与 special node 全部 fail closed。根 `AGENTS.md` 仍可由用户选择进入 workspace Git history，但 installer 只可维护稳定 pointer block，业务 owner 不得写它。
+
+Wave 1 的 `path_contract.py` 只提供 typed roots、logical/physical conversion、classification 与只读 no-follow precondition，不创建或迁移数据。Wave 2 的 journal/Git/strict-reader/owner 必须在 descriptor、lock 与 commit boundary 重验 identity；Wave 3 才收敛根 pointer 与最小 `WORKSPACE_RULES`；Wave 4 负责显式 legacy migration、拒绝条件和 rollback。普通 install/update 不静默迁移。
 
 任何本地 scratch、worktree、提示词或工具记忆都不属于 Git 或 release bundle，也不属于开发合同。另一个 Agent 必须能只凭 fresh clone 与 GitHub 上的 tracked contracts、Issue、PR、remote commits 和 Actions 恢复任务；未 push 或仅本机可见的状态按不存在处理。
 
@@ -72,6 +84,7 @@ Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和�
 `runtime/lib/research/core.py`（安装后为 `.agents/lib/research/core.py`）是兼容导出 facade，不再是业务 god-file。实现按职责拆分：
 
 - `paths.py`：KB 路径与存储约束；
+- `path_contract.py`：workspace/data/bundle typed root roles、稳定 `kb/...` logical namespace、canonical/reserved classification 与只读 no-follow precondition；Wave 1 不激活 root layout；
 - `records.py`：record schema、迭代与 workflow state；
 - `prefs.py`：runtime preferences 与 workspace scaffold；
 - `confirm.py`：write gate、confirmation receipt、link 与 lifecycle mutation；

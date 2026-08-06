@@ -3,6 +3,7 @@
 - Status: Accepted（仅在本 ADR 合入 default branch 后生效）
 - Date: 2026-07-30
 - Issue: [#14](https://github.com/caozx1110/ResearchLab/issues/14)
+- Superseded by: [ADR 0004](0004-workspace-root-canonical-data-and-logical-artifact-namespace.md)（仅 supersede 固定 installed `kb/` data layout 与复制完整 runtime rules 到根/`.agents` AGENTS 的部分；source/product/local-tool 分离继续有效）
 
 ## Context
 
