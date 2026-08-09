@@ -131,7 +131,9 @@ def test_context_free_improvement_language_remains_agent_routed(task: str) -> No
     "task",
     (
         "归档研究路线讨论",
+        "讨论研究路线",
         "archive the research-route discussion",
+        "discuss the research route",
     ),
 )
 def test_explicit_research_route_discussion_still_routes_to_archivist(task: str) -> None:
@@ -148,7 +150,10 @@ def test_explicit_research_route_discussion_still_routes_to_archivist(task: str)
     "task",
     (
         "先记录 skill 优化项，再归档研究路线讨论",
+        "先记录 skill 优化项，再讨论研究路线",
+        "先记录 skill 优化项，再讨论技术路线",
         "record this skill improvement candidate, then archive the research-route discussion",
+        "record this skill improvement candidate, then discuss the research route",
     ),
 )
 def test_composed_skill_improvement_and_route_archive_requires_ordered_decision(

@@ -108,6 +108,11 @@ ROUTE_EXPLICIT_DISCUSSION_HINTS = (
     "technical route discussion",
     "technical-route discussion",
 )
+ROUTE_EXPLICIT_DISCUSSION_PATTERNS = (
+    r"讨论\s*(?:一下\s*)?(?:研究路线|技术路线|研究方向)",
+    r"\bdiscuss(?:es|ed|ing)?\s+(?:the\s+)?"
+    r"(?:research|technical)[-\s]+(?:route|direction)\b",
+)
 ROUTE_GENERIC_DISCUSSION_HINTS = {"讨论", "discussion"}
 ROUTE_META_WORKFLOW_PATTERNS = (
     r"(?:skill|技能|workflow|工作流)(?:\s*[/／、与和]\s*(?:skill|技能|workflow|工作流))?\s*(?:的|相关的)?\s*(?:优化(?:项)?|待优化(?:项)?|待改进(?:项)?|改进候选|问题|摩擦)",
@@ -304,6 +309,27 @@ def _meta_workflow_route_hits(text: str) -> list[dict[str, Any]]:
     return hits
 
 
+def _explicit_discussion_route_hits(text: str) -> list[dict[str, Any]]:
+    """Match bounded research-route discussion phrases in verb-first order."""
+    hits: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for pattern in ROUTE_EXPLICIT_DISCUSSION_PATTERNS:
+        for match in re.finditer(pattern, text):
+            hint = match.group(0)
+            key = (match.start(), hint)
+            if key in seen:
+                continue
+            seen.add(key)
+            hits.append(
+                {
+                    "hint": hint,
+                    "owner_skill": "discussion-archivist",
+                    "start": match.start(),
+                }
+            )
+    return hits
+
+
 def route_candidate_snapshot(task: str) -> dict[str, Any]:
     """Expose factual route hints; leave ambiguous or composed routing to the Agent."""
     text = str(task or "").strip()
@@ -322,10 +348,12 @@ def route_candidate_snapshot(task: str) -> dict[str, Any]:
         if hint in lower
     ]
     raw_hits.extend(_meta_workflow_route_hits(lower))
+    explicit_discussion_hits = _explicit_discussion_route_hits(lower)
+    raw_hits.extend(explicit_discussion_hits)
     meta_workflow_present = any(
         str(hit["owner_skill"]) == "skill-evolution-advisor" for hit in raw_hits
     )
-    explicit_discussion_present = any(
+    explicit_discussion_present = bool(explicit_discussion_hits) or any(
         hint in lower for hint in ROUTE_EXPLICIT_DISCUSSION_HINTS
     )
     effective_hits: list[dict[str, Any]] = []
