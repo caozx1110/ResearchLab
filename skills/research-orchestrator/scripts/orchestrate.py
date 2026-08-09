@@ -102,14 +102,16 @@ ROUTE_EXPLICIT_DISCUSSION_HINTS = (
     "研究路线讨论",
     "技术路线讨论",
     "研究方向讨论",
-    "research discussion",
     "research route discussion",
     "research-route discussion",
     "technical route discussion",
     "technical-route discussion",
 )
 ROUTE_EXPLICIT_DISCUSSION_PATTERNS = (
+    r"(?:归档|存档|保存)\s*(?:这次|该|这场)?\s*(?:研究|技术)讨论",
     r"讨论\s*(?:一下\s*)?(?:研究路线|技术路线|研究方向)",
+    r"\b(?:archive|save)\s+(?:(?:this|the)\s+)?"
+    r"(?:research|technical)\s+discussion\b",
     r"\bdiscuss(?:es|ed|ing)?\s+(?:the\s+)?"
     r"(?:research|technical)[-\s]+(?:route|direction)\b",
 )

@@ -73,6 +73,7 @@ def test_skill_workflow_improvement_records_route_to_evolution_advisor(task: str
     (
         "记录这次 skill 优化讨论",
         "archive this workflow improvement discussion",
+        "record this workflow improvement candidate for a research discussion",
     ),
 )
 def test_meta_workflow_request_suppresses_generic_discussion_hint(task: str) -> None:
@@ -131,8 +132,10 @@ def test_context_free_improvement_language_remains_agent_routed(task: str) -> No
     "task",
     (
         "归档研究路线讨论",
+        "归档这次研究讨论",
         "讨论研究路线",
         "archive the research-route discussion",
+        "archive this research discussion",
         "discuss the research route",
     ),
 )
@@ -150,9 +153,11 @@ def test_explicit_research_route_discussion_still_routes_to_archivist(task: str)
     "task",
     (
         "先记录 skill 优化项，再归档研究路线讨论",
+        "先记录 skill 优化项，再归档这次研究讨论",
         "先记录 skill 优化项，再讨论研究路线",
         "先记录 skill 优化项，再讨论技术路线",
         "record this skill improvement candidate, then archive the research-route discussion",
+        "record this skill improvement candidate, then archive this research discussion",
         "record this skill improvement candidate, then discuss the research route",
     ),
 )
