@@ -2,13 +2,19 @@
 
 A Chinese-first research workspace for turning papers, repositories, technical articles, ideas, experiments, and reports into durable local knowledge.
 
-The bundle installs beside your project data:
+The bundle installs beside canonical data in one dedicated workspace. An explicit `kb init` activates the workspace root with a tracked layout marker; it does not create another physical `kb/` directory:
 
 ```text
 workspace/
-├── .agents/   # skills, runtime library, and agent rules
-└── kb/        # your local research data
+├── .agents/                    # skills, runtime library, and agent rules
+├── config/workspace-layout.yaml
+├── units/ programs/ synthesis/ # canonical research data
+├── raw/ user/ output/ obsidian/
+├── .journal/ .runtime/         # private operational state
+└── AGENTS.md                   # user-owned integration file
 ```
+
+Persisted artifact references still begin with `kb/...`; that prefix is a stable logical namespace, not a required physical directory. Existing legacy workspaces with a physical `<workspace>/kb/` are never guessed or moved by init, install, update, or reinstall. The workspace-root runtime refuses mutation until the later explicit migration workflow can prove a safe conversion.
 
 The bundle identifier is **`0.2.0-rc.7`**, sourced from `runtime/VERSION` and installed as `.agents/VERSION`. The identifier denotes a release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. [CHANGELOG.md](CHANGELOG.md) records durable candidate/release acceptance summaries plus compatibility and support scope; active delivery gates, blockers, exact candidates, and live evidence belong to the linked GitHub Epic, Atomic Issues, PRs, and Actions. Installation and core workflows have no external API Key, paid search quota, commercial database, or paid plugin prerequisite.
 
@@ -113,16 +119,18 @@ The same `kb init` and `kb review` semantics apply in a terminal, a pipe, or an 
 ## What the system preserves
 
 ```text
-kb/
-├── raw/          # immutable external source bytes
-├── units/        # papers, repos, datasets, blogs, ideas, experiments, concepts
-├── programs/     # research state, decisions, designs, runs, reports
-├── synthesis/    # surveys, taxonomy, trends, gaps
-├── config/       # user and runtime policy
-├── user/         # generated navigation and reopen pages
-├── output/       # exports, never the only source of truth
-└── .runtime/     # private local runtime state
+workspace/         # physical data root after explicit kb init
+├── raw/           # immutable external source bytes
+├── units/         # papers, repos, datasets, blogs, ideas, experiments, concepts
+├── programs/      # research state, decisions, designs, runs, reports
+├── synthesis/     # surveys, taxonomy, trends, gaps
+├── config/        # layout marker plus user and runtime policy
+├── user/          # generated navigation and reopen pages
+├── output/        # exports, never the only source of truth
+└── .runtime/      # private local runtime state
 ```
+
+Schemas, receipts, evidence, and user-facing references continue to name these artifacts as `kb/raw/...`, `kb/units/...`, and so on, so the physical layout does not rewrite durable identities.
 
 Convertible paper, HTML, Markdown, and text units preserve the original material and add a complete `source/document.md` reading view, a source map, a conversion manifest, and locally stored image assets. HTML units also add a passive normalized offline `source/archive.html`; the raw server response remains untouched. arXiv/ar5iv HTML must pass a structural quality gate before it is selected, otherwise intake falls back to PDF and finally an explicitly degraded abstract page; an explicitly requested arXiv version is preserved through every candidate. Markdown conversion preserves code, source front matter, formulae, complex tables, headings, and local image references, and the complete derived bundle is collision-checked before publication. Human readers and agents use Markdown first, while the offline page and original format remain fallbacks. Repository source stays in its native files; generated Obsidian pages can link to verified local code files without making machine-local URIs canonical evidence.
 
@@ -180,7 +188,7 @@ This D1 slice is beta/scaffold, not part of the scoped stable promises above. Or
 
 Installed copies record where their source came from and, for remote sources, which branch was selected. An installation from a local checkout stays attached to that checkout; an installation from a fork branch stays attached to that fork and branch. A legacy manifest with no trustworthy origin or branch asks you to choose rather than silently switching to a canonical remote. A detached checkout is pinned to its recorded commit and requires a branch choice before later updates.
 
-The release bundle contains no private `kb/`. Storage migration and updates are scoped so they do not rewrite the installed skill tree or root workspace rules, and uninstall leaves the knowledge base in place.
+The release bundle contains no private canonical workspace data (including legacy `kb/`). Storage migration and updates are scoped so they do not rewrite the installed skill tree or root workspace rules, and uninstall leaves the knowledge base in place.
 
 ## Documentation
 

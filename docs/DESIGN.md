@@ -18,34 +18,36 @@ Open Research Workspace Skills 是 knowledge-unit-first 的 research operating s
 
 ## 分发边界
 
-下图是 Wave 1 合入时仍在运行的 legacy 物理布局；workspace-root 目标合同已经冻结，但只有后续 runtime/installer waves 合入后才激活：
+新建并显式初始化的 dedicated workspace 采用 workspace-root 物理布局；安装面、用户入口和 canonical 数据共享 workspace 边界，但由不同 owner 与 target class 隔离：
 
 ```text
-source checkout                    installed workspace
-├── skills/                        ├── .agents/
-│   └── <15 product skills>/       │   ├── skills/
-├── runtime/                       │   ├── lib/research/
-│   ├── AGENTS.md                  │   ├── AGENTS.md
-│   ├── AGENT_GUIDE.md             │   └── AGENT_GUIDE.md
-│   └── lib/research/              ├── AGENTS.md
-├── .agents/  # ignored local      └── kb/
-├── AGENTS.md
+source checkout                    initialized workspace
+├── skills/                        ├── .agents/          # installed product
+│   └── <15 product skills>/       ├── AGENTS.md         # user-owned + managed block
+├── runtime/                       ├── config/
+│   ├── AGENTS.md                  │   └── workspace-layout.yaml
+│   ├── AGENT_GUIDE.md             ├── units/ programs/ synthesis/
+│   └── lib/research/              ├── raw/ user/ output/ obsidian/
+├── .agents/  # ignored local      ├── .journal/ .runtime/
+├── AGENTS.md                      └── .git/             # optional KB history
 └── docs/
 ```
 
 仓库根 `AGENTS.md` 是开发这套 skill 系统的工作流；`runtime/AGENTS.md` 是安装后 Agent 使用 KB 的 runtime 规则源码，并映射为 `.agents/AGENTS.md`。根 `/.agents/` 只放 ignored 本地工具，绝不进入产品 inventory、release enumeration、digest 或安装 payload。三者不可混写。
 
-Release bundle 不包含任何私有 `kb/`。安装、更新、storage sync 和卸载必须保持数据边界：workspace 的 `kb/` 永不成为发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
+Release bundle 不包含任何私有 canonical workspace 数据。安装、更新、storage sync 和卸载只处理各自声明的 managed targets；`units/`、`programs/`、`raw/` 等数据面以及 legacy `kb/` 都不是发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
-### Workspace/data-root 目标合同（activation deferred）
+### Workspace/data-root runtime 合同
 
-[ADR 0004](decisions/0004-workspace-root-canonical-data-and-logical-artifact-namespace.md) 将 workspace/integration root、canonical data root 与 product bundle root 定义为三个显式角色。当前 runtime 继续以 `<workspace>/kb/` 为 physical data root；后续 Wave 2 的目标是 dedicated workspace 根本身成为 physical data root，而 `.agents/**` 仍是 ignored、可重装的产品面。不得仅修改 `research_root()` 就扩大 mutation 范围。
+[ADR 0004](decisions/0004-workspace-root-canonical-data-and-logical-artifact-namespace.md) 将 workspace/integration root、canonical data root 与 product bundle root 定义为三个显式角色。当前 runtime 只在 `config/workspace-layout.yaml` 为 byte-canonical `research-workspace-layout/v1 + workspace-root` 时，把 dedicated workspace 根解析为 physical data root；`.agents/**` 仍是 ignored、可重装的产品面。只有显式 `kb init` 可以在通过零写 collision preflight 的新 workspace 创建 marker；其他 mutation 在 marker 缺失、未知或身份漂移时一律先拒绝。
+
+现有 `<workspace>/kb/`、无 marker 的 Git repository、partial canonical tree、unknown sibling、symlink 与 special node 不会被猜测或自动转换。普通 install/update/reinstall 也不迁移数据；legacy workspace 在 Wave 4 的显式 migration plan/apply/rollback 可用前保持 fail closed。
 
 Persisted `kb/...` 是稳定 logical artifact namespace，不再等同于物理目录前缀。同一 ref 在 legacy layout 映射到 `<workspace>/kb/...`，在 root layout 映射到 `<workspace>/...`，reverse mapping 必须保持 bytes 不变；record、history、evidence、receipt 与 survey/report bindings 不因物理迁移批量重写。
 
 Root layout 采用 reviewed canonical top-level allowlist；`.journal/`、`.runtime/` 单独分类为 operational state。`.agents/**`、`.git/**`、`.venv/**`、`.claude/**`、根 `AGENTS.md`、`CLAUDE.md` 与 `bin/**` 是 reserved integration targets，不能成为 business mutation、journal snapshot、strict-reader artifact 或普通 Git checkpoint pathspec。未知 top-level、traversal、absolute path、symlink ancestor/leaf 与 special node 全部 fail closed。根 `AGENTS.md` 仍可由用户选择进入 workspace Git history，但 installer 只可维护稳定 pointer block，业务 owner 不得写它。
 
-Wave 1 的 `path_contract.py` 只提供 typed roots、logical/physical conversion、classification 与只读 no-follow precondition，不创建或迁移数据。Wave 2 的 journal/Git/strict-reader/owner 必须在 descriptor、lock 与 commit boundary 重验 identity；Wave 3 才收敛根 pointer 与最小 `WORKSPACE_RULES`；Wave 4 负责显式 legacy migration、拒绝条件和 rollback。普通 install/update 不静默迁移。
+`path_contract.py` 提供 typed roots、logical/physical conversion、classification 与只读 no-follow precondition；`workspace_layout.py` 独占 marker activation、解析与 currentness。journal、Git、strict reader 与 shipping owner 统一消费 root-role resolver，并在 descriptor、lock 或 commit boundary 重验身份；journal key 保持 data-root-relative，持久 artifact identity 保持 `kb/...`。Wave 3 才收敛根 pointer 与最小 `WORKSPACE_RULES`；Wave 4 负责显式 legacy migration、拒绝条件和 rollback。
 
 任何本地 scratch、worktree、提示词或工具记忆都不属于 Git 或 release bundle，也不属于开发合同。另一个 Agent 必须能只凭 fresh clone 与 GitHub 上的 tracked contracts、Issue、PR、remote commits 和 Actions 恢复任务；未 push 或仅本机可见的状态按不存在处理。
 
@@ -83,8 +85,9 @@ Wave 1 的 `path_contract.py` 只提供 typed roots、logical/physical conversio
 
 `runtime/lib/research/core.py`（安装后为 `.agents/lib/research/core.py`）是兼容导出 facade，不再是业务 god-file。实现按职责拆分：
 
-- `paths.py`：KB 路径与存储约束；
-- `path_contract.py`：workspace/data/bundle typed root roles、稳定 `kb/...` logical namespace、canonical/reserved classification 与只读 no-follow precondition；Wave 1 不激活 root layout；
+- `paths.py`：KB 逻辑路径与 active data-root 存储映射；
+- `path_contract.py`：workspace/data/bundle typed root roles、稳定 `kb/...` logical namespace、canonical/reserved classification 与只读 no-follow precondition；
+- `workspace_layout.py`：byte-canonical layout marker、显式新 workspace activation、root-role resolver 与 operation-boundary currentness；
 - `records.py`：record schema、迭代与 workflow state；
 - `prefs.py`：runtime preferences 与 workspace scaffold；
 - `confirm.py`：write gate、confirmation receipt、link 与 lifecycle mutation；
@@ -107,7 +110,7 @@ Wave 1 的 `path_contract.py` 只提供 typed roots、logical/physical conversio
 
 ### Obsidian 派生视图
 
-`kb/` 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统只管理 `kb/obsidian/managed/`，人工内容放在 `inbox/` 与 `annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；renderer 11 的 Bases 直接输出当前支持的 Obsidian 保存格式所采用的 byte-canonical YAML。manifest-owned 普通 `.base` 是 renderer 完整拥有的可重建派生视图，刷新会丢弃任何手工内容并恢复默认 bytes；symlink、特殊类型、未登记路径仍拒绝，managed Markdown 的内容漂移也继续保留并 fail closed。manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
+已激活的 workspace root 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统物理上只管理 `obsidian/managed/`（稳定逻辑 identity 为 `kb/obsidian/managed/`），人工内容放在 `obsidian/inbox/` 与 `obsidian/annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；renderer 11 的 Bases 直接输出当前支持的 Obsidian 保存格式所采用的 byte-canonical YAML。manifest-owned 普通 `.base` 是 renderer 完整拥有的可重建派生视图，刷新会丢弃任何手工内容并恢复默认 bytes；symlink、特殊类型、未登记路径仍拒绝，managed Markdown 的内容漂移也继续保留并 fail closed。manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
 
 人工笔记回流是显式选择，不是目录扫描：只接收当前消息点名的 `inbox/` 或 `annotations/` 下一层 UTF-8 普通 Markdown basename，拒绝 nested path、symlink、special、oversize 与 review sheet。source-intake 将选择时 exact bytes 冻结成 provenance 隔离的 `blog` unit（`source_origin=human-note`），原件不进入 transaction 或 checkpoint；blog owner 只从冻结 parse cache 接受 Agent fill/verify，结构化判断仍进入普通 pending review。
 

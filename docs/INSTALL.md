@@ -1,6 +1,6 @@
 # 安装指南
 
-这份指南说明如何把这套 workspace skill bundle 接入 Claude Code、Codex 和可选的 `kb` 快捷入口。安装目标是你的 **workspace 根目录**：安装后的 `.agents/` 与之后生成的 `kb/` 同级，而不是把 bundle 安装进 `kb/`。安装入口是仓库根目录的 `install.sh`。
+这份指南说明如何把这套 workspace skill bundle 接入 Claude Code、Codex 和可选的 `kb` 快捷入口。安装目标是你的 **workspace 根目录**：安装后的 `.agents/` 与显式 `kb init` 激活的 canonical data root 同级；新 workspace 的 data root 就是 workspace 根，不再生成物理 `kb/` 子目录。安装入口是仓库根目录的 `install.sh`。
 
 > **普通用户只需完成一次安装。** 安装是日常使用之前唯一的技术 bootstrap；成功后请回到 Agent 对话，只用自然语言或 16 个 `kb <verb>` 伪 CLI 快捷入口。除“新用户快速安装”和“首次运行 KB”外，本页的 flags、scripts、环境变量与显式 paths 都是管理员、维护者或 CI 自动化参考，普通用户不需要复制或理解，Agent 也不应把它们作为日常操作步骤暴露给用户。
 
@@ -11,7 +11,7 @@
 你可以不先克隆仓库。把仓库链接粘贴给 Codex 或 Claude Code，并直接说：
 
 ```text
-把这个 research skill 系统安装到我当前 workspace。先检查目标目录和已有 AGENTS.md，再使用仓库自带安装器；保留 kb、虚拟环境和所有用户文件。安装后验证 skill metadata、kb help 和一次全新临时 workspace 的 init，不要替我推送或发布。
+把这个 research skill 系统安装到我当前 workspace。先检查目标目录和已有 AGENTS.md，再使用仓库自带安装器；保留 canonical 研究数据、legacy kb、虚拟环境和所有用户文件。安装后验证 skill metadata、kb help 和一次全新临时 workspace 的 init，不要替我推送或发布。
 ```
 
 仓库对 Agent 的安装合同如下，Agent 应自行完成，不让用户复制内部 flags：
@@ -20,7 +20,7 @@
 2. 把当前 workspace 根作为安装目标，绝不能把 `kb/` 当目标；已有普通根 `AGENTS.md` 时，确认安装器只追加/更新带 marker 的受管区块并保留块外原文。目标是 symlink、类型冲突、marker 异常或已有受管区块漂移时停止解释，不能覆盖整文件或猜测修复。
 3. 先让安装器生成 Agent JSON 计划（它隐含 dry-run）。终端保持短预览并显示目标数、冲突数和 semantic plan digest；JSON 精确列出 action、scope、tools、source provenance、canonical distributable tree map/digest、按执行顺序排列的全部 targets、每项来源内容 digest 与目标前置状态、冲突、条件性 runtime 变化及可复现的 apply contract。除 Agent 明确指定的 JSON 计划文件外，这一步不写 workspace、HOME、runtime 或 Python cache。计划文件必须位于目标 workspace 与 HOME 之外。
 4. 核对计划中的 source commit 与 source tree digest 仍等于当前 checkout，目标只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree。完成审阅后，Agent 自动计算这份最终计划文件的精确 byte SHA-256，替换 apply contract 中的 `COMPUTE_AFTER_REVIEW` 占位，再在用户已要求“安装”的授权范围内执行；用户不需要查看、复制或填写 digest。安装器会在解析 JSON 或触碰首个目标前，以 no-follow 方式读取同一个普通文件 inode，同时校验外部 byte SHA 与 semantic plan digest，再验证源码树和每个目标的前置状态。计划后出现空白、换行、键序、编码字节、未提交源码、来源身份或目标状态变化时整次操作零写失败。计划和应用都使用显式参数，非交互运行不读取 stdin。
-5. 安装后核对 manifest、15 个可发现 skill、bundle version、`kb help` 与临时目录中的 `kb init`；真实 `kb/` 不参与验收。
+5. 安装后核对 manifest、15 个可发现 skill、bundle version、`kb help` 与全新临时目录中的 `kb init`；真实用户 workspace 与 legacy `kb/` 不参与验收。
 6. 不安装 Obsidian 插件、daemon、cron、watcher 或全局 Python 包；不 push、tag、publish，也不改 shell 配置。可选终端快捷入口只在用户明确要求时创建。
 
 这使“粘贴 GitHub 链接让 Agent 安装”成为受支持主路径；当前没有市场包，也不需要插件。
@@ -56,13 +56,15 @@ kb init
 
 初始化会先让知识库可用，再提供“现在设置”（推荐）和“先跳过”。选择跳过不会追加或覆盖偏好，也不妨碍立即添加、检索或分析资料；之后可直接说“补充我的研究偏好”。初始化后可用 `kb status` 查看当前状态。此后不需要继续操作安装脚本；更新、重装和卸载由 Agent 或管理员按需处理，并保留已有研究资料。
 
+全新 dedicated workspace 的 `kb init` 会先做零写 collision preflight，再写入 byte-canonical `config/workspace-layout.yaml`，随后把 `units/`、`programs/`、`raw/` 等 canonical 目录直接建在 workspace 根。普通业务动词不能创建 marker；marker 缺失/异常、已有 Git repository、partial root tree、unknown sibling、symlink、special node 或 legacy `kb/` 都先拒绝。当前安装/update/reinstall 不会自动迁移 legacy 数据；在显式 migration 流程交付前，不要对 legacy workspace 强行运行 root-layout init。
+
 ## 管理员参考：推荐安装模型
 
 推荐把 bundle 以 project-scope copy 方式安装到外部 workspace 根：
 
 - `bash install.sh --all --project DIR` 把 manifest 声明的完整受管运行子集（含使用规则 `.agents/AGENTS.md`）复制到 `DIR`。
 - 安装器把使用规则写到 workspace 根 `DIR/AGENTS.md`，并配置所选 agent 工具。
-- workspace 数据继续放在 `DIR/kb/`，受管 Python 环境放在 `DIR/.venv/`。
+- 全新初始化的 workspace 数据直接放在 `DIR/` 的 canonical allowlist 下，受管 Python 环境放在 reserved `DIR/.venv/`；持久引用仍使用逻辑 `kb/...`。
 
 完整受管运行子集是受支持的安装单元；源码树中的测试、validator、开发评估工具和 checkout 说明不属于该子集。不要只复制单个 skill，也不要把 bundle 指向或安装进 `DIR/kb/`。system scope 与 symlink 模式只保留兼容性，不作为新安装建议。
 
@@ -190,7 +192,7 @@ Codex 直接读取仓库已有的 `AGENTS.md`（开发者工作流；`CLAUDE.md`
 
 ### 从旧源码布局升级
 
-现有外部 workspace 的安装目标仍是 `.agents/**`，`kb/` 不需要迁移。若旧版本的 `kb update` 因为无法识别新的 `skills/`、`runtime/` 源码布局而不能自助跨越这次结构迁移，请让 Agent 检出最新源码并对同一 workspace 执行一次 `reinstall`；安装器会沿用既有 manifest、原子替换受管文件并保留 `kb/`。完成这次桥接后，后续 `update` 继续使用新布局。
+现有外部 workspace 的安装目标仍是 `.agents/**`。若旧版本的 `kb update` 因为无法识别新的 `skills/`、`runtime/` 源码布局而不能自助跨越这次源码结构迁移，请让 Agent 检出最新源码并对同一 workspace 执行一次 `reinstall`；安装器会沿用既有 manifest、原子替换受管文件，并逐字保留 legacy `kb/`。这只桥接产品源码/安装布局，不迁移数据布局；workspace-root runtime 会对未迁移 legacy workspace fail closed，不能把 reinstall 当 migration。
 
 如果目标 workspace 已有普通 `AGENTS.md` 且没有异常 marker，安装器会保留块外原文并加入本 bundle 区块；update/reinstall 也只维护该区块。`AGENTS.md` 是 symlink、非普通文件、marker 结构异常，或已有受管区块发生未授权漂移时会 fail closed，不跟随链接、不替换整文件。
 
@@ -218,7 +220,7 @@ bash install.sh update --project /path/to/workspace
 clean-sync 安全合同：
 
 - 只枚举和写入 `DIR/.agents` 子树与单个 `DIR/AGENTS.md`。
-- 永不枚举、写入或删除 `DIR/kb`、`DIR/.venv`。
+- 永不把 canonical root entries、legacy `DIR/kb` 或 `DIR/.venv` 纳入安装 managed set；不通过 workspace-wide 扫描推导数据 targets。
 - 排除 `__pycache__/`、`*.pyc`、`*.pyo`、`.venv/`、`.DS_Store` 和 manifest 本身。
 - 删除只针对 manifest 里记录过、source 已不再提供、且仍在 `.agents` 下的文件；用户新增到 `.agents` 的文件会保留。
 - 每个删除目标在 unlink 前都会重新校验仍落在 `DIR/.agents` 内；不使用 `rm -rf` 或 `rsync --delete`。
@@ -229,7 +231,7 @@ update 会打印 old commit -> new commit 和 added/changed/removed 差异。若
 bash install.sh update --project /path/to/workspace --force
 ```
 
-`--force` 只绕过漂移门，不扩大删除范围，也不会触碰 `kb/` 或 `.venv/`。源不变时重复 update 是 no-op，manifest 字节不变。
+`--force` 只绕过漂移门，不扩大删除范围，也不会触碰 canonical root data、legacy `kb/` 或 `.venv/`。源不变时重复 update 是 no-op，manifest 字节不变。
 
 也可以 dry-run：
 
@@ -250,7 +252,7 @@ bash install.sh reinstall --project /path/to/workspace
 `update` 与 `reinstall` 的区别是：
 
 - `update` 只同步源版本带来的 added/changed/removed 差异；若受管文件存在本地漂移，会默认阻断，适合日常升级。
-- `reinstall` 根据当前源重新铺设完整的受管文件集，并重新运行安装检查，适合恢复缺失、损坏或已漂移的受管文件；它不会删除 `kb/`、`.venv/` 或受管范围外的用户文件。
+- `reinstall` 根据当前源重新铺设完整的受管文件集，并重新运行安装检查，适合恢复缺失、损坏或已漂移的受管文件；它不会删除 canonical root data、legacy `kb/`、`.venv/` 或受管范围外的用户文件，也不会迁移 data layout。
 
 两者都不会由重复 `install` 静默触发。若源中新出现的受管路径与用户本地文件冲突，重装会停止；只有明确接受覆盖该冲突时才使用 `--force`。
 
@@ -271,7 +273,7 @@ copy 安装的卸载会执行以下操作：
 - 删除安装 manifest。因漂移而保留的文件从此成为用户自管文件；如果 `.agents/` 仍非空，目录也会保留。
 - 尝试清理终端 `kb` 快捷 symlink：project scope 对应 `<workspace>/bin/kb`，system scope 对应 `~/.local/bin/kb`。project、system 和旧版兼容卸载都会执行这一步；只有链接目标仍指向本安装时才删除，普通文件或指向其他目标的链接会保留并告警。
 
-`DIR/kb`、`DIR/.venv` 和未写入 manifest 的用户文件永远保留。卸载后 workspace 只是变为 unmanaged，研究数据不受影响。
+canonical root data、legacy `DIR/kb`、`DIR/.venv` 和未写入 manifest 的用户文件永远保留。卸载后 workspace 只是变为 unmanaged，研究数据不受影响。
 
 旧版外部 symlink 安装仍可用兼容卸载：
 
