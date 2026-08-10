@@ -1973,7 +1973,7 @@ def _revalidate_search_stage_ancestor_chain(
         descriptors.append(current)
         if _directory_node_identity(os.fstat(current)) != expected[0]:
             raise SystemExit("Literature search stage ancestor chain changed.")
-        for index, component in enumerate(("kb", "synthesis", "source-search"), start=1):
+        for index, component in enumerate(("synthesis", "source-search"), start=1):
             try:
                 metadata = os.stat(component, dir_fd=current, follow_symlinks=False)
                 child = os.open(component, flags, dir_fd=current)
@@ -2023,7 +2023,7 @@ def _anchored_search_stage_bytes(
             raise SystemExit("Literature search workspace root is unsafe or unavailable.") from exc
         descriptors.append(current_fd)
         ancestor_identities.append(_directory_node_identity(os.fstat(current_fd)))
-        for component in ("kb", "synthesis", "source-search"):
+        for component in ("synthesis", "source-search"):
             try:
                 next_fd = os.open(component, directory_flags, dir_fd=current_fd)
             except FileNotFoundError:
@@ -3512,7 +3512,11 @@ def _abstract_from_text(text: str) -> str:
     return clean_text(match.group(1))[:2000] if match else ""
 
 
-def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any]:
+def _pdf_metadata(
+    project_root: Path,
+    pdf_path: Path,
+    chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Best-effort lightweight metadata from a parsed PDF (title/abstract/year)."""
     title = ""
     year: int | None = None
@@ -3564,7 +3568,7 @@ def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any
         year = 2000 + int(arxiv_id[:2])
     richer: dict[str, Any] = {}
     try:
-        richer = extract_pdf_record(pdf_path)
+        richer = extract_pdf_record(pdf_path, project_root=project_root)
     except (OSError, RuntimeError, UnicodeError, ValueError):
         richer = {}
     return {
@@ -4276,7 +4280,7 @@ def _backup_pdf_bytes(
         result["backup_warning"] = "PDF stored with real bytes+sha256 but PyMuPDF4LLM extracted no text (scanned/image-only?)."
         _warn(result["backup_warning"], original_uri)
     else:
-        result["parse_metadata"] = _pdf_metadata(raw, chunks)
+        result["parse_metadata"] = _pdf_metadata(project_root, raw, chunks)
     if materialized is not None:
         _attach_materialization(project_root, result, materialized)
     return result
@@ -4604,7 +4608,7 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
             result["backup_warning"] = "Local PDF stored with real sha256 but PyMuPDF4LLM extracted no text (scanned/image-only?)."
             _warn(result["backup_warning"], src.as_posix())
         else:
-            result["parse_metadata"] = _pdf_metadata(dst, chunks)
+            result["parse_metadata"] = _pdf_metadata(project_root, dst, chunks)
         if materialized is not None:
             _attach_materialization(project_root, result, materialized)
         return result

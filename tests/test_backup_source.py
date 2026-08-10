@@ -5,12 +5,19 @@ from pathlib import Path
 
 import pytest
 
+from repo_paths import initialize_test_workspace
+
 import research.core as core
 
 # backup_source lives in research.sources after the god-file split; its fetch_url
 # lookup resolves in that module's namespace, so patch it there.
 import research.sources as sources
 import research.source_materials as source_materials
+
+
+@pytest.fixture(autouse=True)
+def _active_workspace(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
 
 
 def _minimal_pdf_bytes(text: str = "Dual Source Test\nBody paragraph on page one.") -> bytes:
@@ -625,8 +632,8 @@ def test_backup_source_html_localizes_images_and_preserves_structured_markdown(
     assets = list((source_root / "assets").glob("image-*.png"))
     assert len(assets) == 1
     assert assets[0].read_bytes() == _PNG_BYTES
-    assert payload["materialization"]["asset_paths"] == [assets[0].relative_to(tmp_path).as_posix()]
-    assert payload["markdown_path"] == (source_root / "document.md").relative_to(tmp_path).as_posix()
+    assert payload["materialization"]["asset_paths"] == [core.rel(tmp_path, assets[0])]
+    assert payload["markdown_path"] == core.rel(tmp_path, source_root / "document.md")
 
 
 def test_html_materialization_v2_resolves_base_and_preserves_math_fragments_and_gallery(
@@ -677,7 +684,10 @@ def test_html_materialization_v2_resolves_base_and_preserves_math_fragments_and_
     assert conversion["schema"] == "research-source-markdown/v2"
     assert conversion["archive"] == "archive.html"
     assert conversion["archive_sha256"] == hashlib.sha256((source_root / "archive.html").read_bytes()).hexdigest()
-    assert payload["materialization"]["archive_path"] == (source_root / "archive.html").relative_to(tmp_path).as_posix()
+    assert payload["materialization"]["archive_path"] == core.rel(
+        tmp_path,
+        source_root / "archive.html",
+    )
     assert any(item["anchor"] == "bib.bib1" for item in source_map["blocks"])
     assert any(item["anchor"] == "bib.bib2" for item in source_map["blocks"])
 
@@ -867,7 +877,7 @@ def test_backup_source_rejects_a_file_symlink_without_copying_target_bytes(tmp_p
         sources.backup_source(tmp_path, "blog", "b-link-file", selected.as_posix())
 
     assert not core.unit_root(tmp_path, "blog", "b-link-file").exists()
-    copied = [path for path in (tmp_path / "kb").rglob("*") if path.is_file() and secret in path.read_bytes()]
+    copied = [path for path in (tmp_path / "units").rglob("*") if path.is_file() and secret in path.read_bytes()]
     assert copied == []
 
 
@@ -892,7 +902,7 @@ def test_backup_source_rejects_nested_directory_symlinks_without_copying_target_
         sources.backup_source(tmp_path, "repo", f"r-link-{link_target}", selected.as_posix())
 
     assert not core.unit_root(tmp_path, "repo", f"r-link-{link_target}").exists()
-    copied = [path for path in (tmp_path / "kb").rglob("*") if path.is_file() and secret in path.read_bytes()]
+    copied = [path for path in (tmp_path / "units").rglob("*") if path.is_file() and secret in path.read_bytes()]
     assert copied == []
 
 
@@ -905,7 +915,8 @@ def test_backup_source_copies_an_ordinary_directory_without_vcs_metadata(tmp_pat
 
     payload = sources.backup_source(tmp_path, "repo", "r-ordinary", selected.as_posix())
 
-    archived = tmp_path / payload["backup_paths"][0]
+    archived = core.resolve_local_reference(tmp_path, payload["backup_paths"][0])
+    assert archived is not None
     assert payload["backup_status"] == "ok"
     assert (archived / "src" / "main.py").read_text(encoding="utf-8") == "print('safe')\n"
     assert not (archived / ".git").exists()

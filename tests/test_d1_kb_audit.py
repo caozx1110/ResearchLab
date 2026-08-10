@@ -61,7 +61,7 @@ def _paper(root: Path, *, complete: bool = False) -> tuple[dict, Path]:
         "tag_sources": [],
         "pool_sources": [],
     }
-    unit = root / "kb/units/papers" / record["id"]
+    unit = root / "units/papers" / record["id"]
     unit.mkdir(parents=True, exist_ok=True)
     return record, unit
 
@@ -213,9 +213,9 @@ def test_audit_detects_stale_verification_and_confirmation_binding(tmp_path: Pat
 
 def test_audit_detects_incomplete_journal_and_symlink_escape_without_following(tmp_path: Path) -> None:
     root = tmp_path / "unsafe"
-    (root / "kb/.journal").mkdir(parents=True)
+    (root / ".journal").mkdir(parents=True)
     write_yaml_if_changed(
-        root / "kb/.journal/op-incomplete.yaml",
+        root / ".journal/op-incomplete.yaml",
         {
             "op_id": "op-incomplete",
             "root_op_id": "op-incomplete",
@@ -226,7 +226,7 @@ def test_audit_detects_incomplete_journal_and_symlink_escape_without_following(t
     )
     outside = tmp_path / "outside-secret.txt"
     outside.write_text("must not be read", encoding="utf-8")
-    os.symlink(outside, root / "kb/escaped-source")
+    os.symlink(outside, root / "escaped-source")
     before = _snapshot(root)
 
     report = audit_workspace(root)
@@ -243,7 +243,7 @@ def test_audit_reports_malformed_journal_without_exposing_parser_details_or_writ
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "malformed-journal"
-    journal = root / "kb/.journal"
+    journal = root / ".journal"
     journal.mkdir(parents=True)
     entry = journal / "unsafe-detail.yaml"
     entry.write_text("op_id: unsafe-detail\nstate: begin\nsecret: outside-secret-token\n", encoding="utf-8")

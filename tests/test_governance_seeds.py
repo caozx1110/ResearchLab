@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -78,7 +80,7 @@ def test_config_seed_writers_advance_catalog_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _load_config_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     timestamps = iter(
         [
             "2026-07-29T01:00:00+00:00",
@@ -110,7 +112,7 @@ def test_config_seed_writers_advance_catalog_provenance(
 
 def test_rebuild_preserves_zero_member_seeds(tmp_path: Path) -> None:
     """B2: rebuild_governance_catalogs must not drop config-manager's empty seeds."""
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _seed_governance(tmp_path)
 
     rebuild_governance_catalogs(tmp_path)
@@ -128,7 +130,7 @@ def test_rebuild_preserves_zero_member_seeds(tmp_path: Path) -> None:
 
 def test_rebuild_still_aggregates_record_backed_entries(tmp_path: Path) -> None:
     """Seed preservation must not suppress normal record-driven rebuild."""
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _seed_governance(tmp_path)
     _write_record(
         tmp_path,

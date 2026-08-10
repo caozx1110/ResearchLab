@@ -294,13 +294,13 @@ def test_read_only_help_creates_no_kb_or_agent_protocol(tmp_path: Path) -> None:
 
 def test_kb_status_is_byte_identical_for_every_workspace_file(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
-    user = workspace / "kb" / "user"
+    user = workspace / "user"
     reading = user / "reading-lists"
     reading.mkdir(parents=True)
     (user / "current-state.md").write_text("stale current state\n", encoding="utf-8")
     (user / "navigation.md").write_text("existing navigation\n", encoding="utf-8")
     (reading / "current-reading.md").write_text("existing reading list\n", encoding="utf-8")
-    (workspace / "kb" / "sentinel.bin").write_bytes(b"\x00private\xff")
+    (workspace / "sentinel.bin").write_bytes(b"\x00private\xff")
     before = {
         path.relative_to(workspace).as_posix(): path.read_bytes()
         for path in workspace.rglob("*")
@@ -434,7 +434,7 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     assert deferred.stdout == optional_setup.stdout
     assert _tree_snapshot(workspace) == before_defer
 
-    profile_path = workspace / "kb" / "config" / "user-profile.yaml"
+    profile_path = workspace / "config" / "user-profile.yaml"
     profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
     profile["resources"] = {"gpu_count": 2, "machine": "local"}
     profile["constraints"] = ["保留已有数据约束"]
@@ -494,7 +494,7 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     )
     assert snapshot.returncode == 0, snapshot.stdout + snapshot.stderr
     installed_protocol = yaml.safe_load(
-        (workspace / "kb" / ".runtime" / "installed-init-snapshot.json").read_text(encoding="utf-8")
+        (workspace / ".runtime" / "installed-init-snapshot.json").read_text(encoding="utf-8")
     )
     installed_defaults = installed_protocol["details"]["preferences"]
     assert installed_defaults["research_focus"] == "VLA"
@@ -506,7 +506,7 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     }
     assert installed_defaults["constraints"] == ["保留已有数据约束", "不使用云服务"]
 
-    runtime_path = workspace / "kb" / "config" / "runtime-preferences.yaml"
+    runtime_path = workspace / "config" / "runtime-preferences.yaml"
     runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
     runtime["autonomy"]["auto_execute_scope"] = ["ingest"]
     runtime_path.write_text(
@@ -531,7 +531,7 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     assert _tree_snapshot(workspace) == before
     runtime_after = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
     profile_after = yaml.safe_load(
-        (workspace / "kb" / "config" / "user-profile.yaml").read_text(encoding="utf-8")
+        (workspace / "config" / "user-profile.yaml").read_text(encoding="utf-8")
     )
     assert runtime_after["identity"]["default_confirmed_by"] == "Installed Researcher"
     assert "auto_screen_on_intake" not in runtime_after["paper"]

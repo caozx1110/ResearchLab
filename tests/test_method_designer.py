@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -30,7 +32,7 @@ def _make_workspace(tmp_path: Path, *, resources: dict | None = None) -> tuple[P
     root = tmp_path
     (root / ".agents").mkdir()
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     idea_id = "i-method-123456"
     repo_id = "r-method-123456"
     idea = default_record("idea", title="Resource-aware method", maturity="lightweight", source={"original_uri": "discussion"})
@@ -46,7 +48,7 @@ def _make_workspace(tmp_path: Path, *, resources: dict | None = None) -> tuple[P
     repo["payload"]["structure"]["entrypoints"] = ["train.py"]
     write_yaml_if_changed(record_path(root, "repo", repo_id), repo)
     if resources is not None:
-        write_yaml_if_changed(root / "kb" / "config" / "user-profile.yaml", {"resources": resources})
+        write_yaml_if_changed(root / "config" / "user-profile.yaml", {"resources": resources})
     return root, idea_id, repo_id
 
 
@@ -61,7 +63,7 @@ def _run_design(method, monkeypatch, root: Path, idea_id: str, program_id: str =
 
 
 def _matrix(root: Path, idea_id: str, program_id: str = "p-method") -> dict:
-    return load_yaml(root / "kb" / "programs" / program_id / "design" / f"{idea_id}-experiment-matrix.yaml", default={})
+    return load_yaml(root / "programs" / program_id / "design" / f"{idea_id}-experiment-matrix.yaml", default={})
 
 
 def test_method_defaults_to_legacy_scale_without_declared_resources(tmp_path: Path, monkeypatch) -> None:
@@ -93,7 +95,7 @@ def test_method_scales_down_and_flags_over_budget_row(tmp_path: Path, monkeypatc
     assert "Requires 2 GPUs but profile declares 1" in rows["diagnostic"]["feasibility_reason"]
     assert matrix["resource_requests"]
     assert "Resource request:" in capsys.readouterr().out
-    state = load_yaml(root / "kb" / "programs" / "p-method" / "state.yaml", default={})
+    state = load_yaml(root / "programs" / "p-method" / "state.yaml", default={})
     assert state["resource_constraints"] == resources
 
 
@@ -120,13 +122,13 @@ def test_method_prefers_program_active_repo_corpus(tmp_path: Path, monkeypatch) 
     active_repo["summary"] = "The program-selected implementation corpus."
     write_yaml_if_changed(record_path(root, "repo", active_repo_id), active_repo)
     write_yaml_if_changed(
-        root / "kb" / "programs" / "p-method" / "state.yaml",
+        root / "programs" / "p-method" / "state.yaml",
         {"program_id": "p-method", "stage": "idea-review", "active_unit_ids": [idea_id, active_repo_id]},
     )
 
     assert _run_design(method, monkeypatch, root, idea_id) == 0
 
-    choice = load_yaml(root / "kb" / "programs" / "p-method" / "design" / f"{idea_id}-repo-choice.yaml", default={})
+    choice = load_yaml(root / "programs" / "p-method" / "design" / f"{idea_id}-repo-choice.yaml", default={})
     assert choice["proposed_repo_id"] == active_repo_id
     assert "selected_repo_id" not in choice
     assert [item["repo_id"] for item in choice["candidate_repos"]] == [active_repo_id]
@@ -139,13 +141,13 @@ def test_method_falls_back_to_kb_repos_with_note(tmp_path: Path, monkeypatch, ca
     method = _load_method_module()
     root, idea_id, repo_id = _make_workspace(tmp_path)
     write_yaml_if_changed(
-        root / "kb" / "programs" / "p-method" / "state.yaml",
+        root / "programs" / "p-method" / "state.yaml",
         {"program_id": "p-method", "stage": "idea-review", "active_unit_ids": [idea_id]},
     )
 
     assert _run_design(method, monkeypatch, root, idea_id) == 0
 
-    choice = load_yaml(root / "kb" / "programs" / "p-method" / "design" / f"{idea_id}-repo-choice.yaml", default={})
+    choice = load_yaml(root / "programs" / "p-method" / "design" / f"{idea_id}-repo-choice.yaml", default={})
     assert choice["proposed_repo_id"] == repo_id
     assert "selected_repo_id" not in choice
     assert choice["candidate_corpus"]["scope"] == "kb-wide-fallback"
@@ -159,7 +161,7 @@ def test_method_prepares_agent_evidence_slots_instead_of_repo_judgement(tmp_path
 
     assert _run_design(method, monkeypatch, root, idea_id) == 0
 
-    design_root = root / "kb" / "programs" / "p-method" / "design"
+    design_root = root / "programs" / "p-method" / "design"
     choice = load_yaml(design_root / f"{idea_id}-repo-choice.yaml", default={})
     matrix = load_yaml(design_root / f"{idea_id}-experiment-matrix.yaml", default={})
     method_text = (design_root / f"{idea_id}-method.md").read_text(encoding="utf-8")
@@ -188,10 +190,10 @@ def test_method_prepares_agent_evidence_slots_instead_of_repo_judgement(tmp_path
     assert all("repo_dependency" not in item for item in matrix["experiments"])
     assert "Selected repo:" not in method_text
     assert "Status: proposal only" in method_text
-    state = load_yaml(root / "kb" / "programs" / "p-method" / "state.yaml", default={})
+    state = load_yaml(root / "programs" / "p-method" / "state.yaml", default={})
     assert state["stage"] == "idea-review"
     assert "selected_repo_id" not in state
-    assert not (root / "kb" / "programs" / "p-method" / "workflow" / "reporting-events.yaml").exists()
+    assert not (root / "programs" / "p-method" / "workflow" / "reporting-events.yaml").exists()
 
 
 def test_selected_research_focus_changes_only_bound_design_and_persists_receipt(
@@ -231,7 +233,7 @@ def test_selected_research_focus_changes_only_bound_design_and_persists_receipt(
             program_id="p-method",
             idea_id=idea_id,
             state=method.load_program_state(
-                root / "kb/programs/p-method/state.yaml", "p-method"
+                root / "programs/p-method/state.yaml", "p-method"
             ),
             repo_ids=[],
             interfaces=[],
@@ -281,7 +283,7 @@ def test_selected_research_focus_changes_only_bound_design_and_persists_receipt(
 
     assert method.main() == 0
     choice = load_yaml(
-        root / "kb/programs/p-method/design" / f"{idea_id}-repo-choice.yaml"
+        root / "programs/p-method/design" / f"{idea_id}-repo-choice.yaml"
     )
     assert choice["proposed_repo_id"] == focused_repo_id
     assert choice["proposed_repo_id"] != default_repo_id

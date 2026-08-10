@@ -1545,7 +1545,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                 source=source,
                 hash_value=human_snapshot.byte_sha256,
             )
-        stage_dir = prepared_root / "kb" / "intake-staging" / str(preliminary_record["id"])
+        stage_dir = prepared_root / ".runtime" / "intake-staging" / str(preliminary_record["id"])
         duplicate_record_relative = ""
         duplicate_record_binding_digest = ""
         superseded_record_relative = ""
@@ -2139,6 +2139,7 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
                 "source-intake-batch-add",
                 transaction_targets,
                 commit_guard=lambda: _batch_commit_guard(root, prepared_for_guard),
+                allow_operational_state=True,
             ):
                 ensure_workspace(root)
                 for item in ready:
@@ -2262,7 +2263,12 @@ def _materialize_staged_source(
 
 def _build_index_transaction(root: Path) -> tuple[Path, Path]:
     targets = _index_transaction_target_paths(root)
-    with mutation_transaction(root, "source-intake-build-index", targets):
+    with mutation_transaction(
+        root,
+        "source-intake-build-index",
+        targets,
+        allow_operational_state=True,
+    ):
         return build_index(root)
 
 
@@ -2495,6 +2501,7 @@ def _execute_intake_transaction(
             "source-intake-add",
             targets,
             commit_guard=lambda: _single_commit_guard(root, args, prepared),
+            allow_operational_state=True,
         ):
             _assert_expected_literature_stage_digest(root, args)
             superseded_record: dict | None = None

@@ -75,6 +75,7 @@ from research.core import (
 from research.git_ops import dirty_kb_paths
 from research.journal import incomplete_ops, mutation_transaction
 from research.judgements import apply_judgement_rejection, require_judgement_snapshot
+from research.path_contract import TargetClass
 from research.paths import (
     KB_GITIGNORE_LINES,
     TEXT_REWRITE_SUFFIXES,
@@ -84,6 +85,7 @@ from research.paths import (
     runtime_preferences_path,
     user_root,
 )
+from research.workspace_layout import initialize_workspace_layout
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
@@ -130,7 +132,7 @@ def _gitignore_needs_update(root: Path) -> bool:
 def workspace_creation_targets(root: Path) -> list[Path]:
     """Exact files that ensure_workspace would create or amend right now."""
     candidates = [
-        root / "kb" / "config" / "research-settings.md",
+        kb_root(root) / "config" / "research-settings.md",
         user_root(root) / "navigation.md",
         user_root(root) / "current-state.md",
         topic_taxonomy_path(root),
@@ -158,8 +160,8 @@ def index_mutation_targets(root: Path) -> list[Path]:
         [
             topic_taxonomy_path(root),
             candidate_pools_path(root),
-            root / "kb" / "index.yaml",
-            root / "kb" / "index.md",
+            kb_root(root) / "index.yaml",
+            kb_root(root) / "index.md",
             passage_search_cache_path(root),
         ]
     )
@@ -200,7 +202,7 @@ def compact_operation_targets(root: Path, plan: dict) -> list[Path]:
     for item in plan.get("items", []):
         if not isinstance(item, dict):
             continue
-        old_root = root / "kb" / "units" / f"{item.get('kind')}s" / str(item.get("old_id") or "")
+        old_root = kb_root(root) / "units" / f"{item.get('kind')}s" / str(item.get("old_id") or "")
         new_root = old_root.with_name(str(item.get("new_id") or ""))
         if old_root.exists():
             for old_path in old_root.rglob("*"):
@@ -837,6 +839,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    if args.command == "init":
+        initialize_workspace_layout(root, PROJECT_ROOT)
     if args.command not in {"audit", "current-state", "resume", "undo", "restore"}:
         print_resolved_project_roots(root)
 
@@ -859,7 +863,15 @@ def main() -> int:
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="kb.py init")
         init_paths = mutation_targets(root, index_mutation_targets(root))
-        with mutation_transaction(root, "initialize_workspace", init_paths):
+        with mutation_transaction(
+            root,
+            "initialize_workspace",
+            init_paths,
+            allowed_target_classes=(
+                TargetClass.CANONICAL_ARTIFACT,
+                TargetClass.OPERATIONAL_STATE,
+            ),
+        ):
             ensure_workspace(root)
             build_index(root)
         checkpoint_and_report(
@@ -1016,7 +1028,12 @@ def main() -> int:
             root,
             [*governance_paths, passage_search_cache_path(root)],
         )
-        with mutation_transaction(root, "rebuild_governance", transaction_paths):
+        with mutation_transaction(
+            root,
+            "rebuild_governance",
+            transaction_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             index_yaml_path, index_md_path = build_index(root)
             taxonomy_path = topic_taxonomy_path(root)

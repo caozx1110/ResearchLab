@@ -2397,6 +2397,7 @@ def main() -> int:
                     _validate_created_run_at_commit if args.command == "log-run" else
                     (_validate_batch_import_at_commit if args.command == "import-runs" else None)
                 ),
+                allow_operational_state=True,
             ):
                 result = _dispatch(args, root)
         pending = _PENDING_CHECKPOINT.get()

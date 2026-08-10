@@ -41,7 +41,7 @@ from research.common import add_project_root_argument, load_yaml
 from research.confirm import require_user_authorization
 from research.core import locate_record, project_root
 from research.journal import journal_subprocess_env
-from research.paths import search_stage_path
+from research.paths import kb_root, search_stage_path
 from research.preference_selection import resolve_operation_preferences
 from research.sources import (
     _validate_search_stage_target,
@@ -628,8 +628,8 @@ def _validate_selection_payload(root: Path, payload: Mapping[str, object]) -> di
 def _protocol_path_preflight(root: Path, requested: str) -> str:
     if not isinstance(requested, str) or SAFE_PROTOCOL_NAME.fullmatch(requested) is None:
         raise SystemExit("Literature selection protocol name is invalid.")
-    cursor = root
-    for component in ("kb", ".runtime", "literature-selection"):
+    cursor = kb_root(root)
+    for component in (".runtime", "literature-selection"):
         cursor = cursor / component
         try:
             metadata = cursor.lstat()
@@ -639,7 +639,7 @@ def _protocol_path_preflight(root: Path, requested: str) -> str:
             raise SystemExit("Literature selection protocol destination is unsafe.") from exc
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
             raise SystemExit("Literature selection protocol destination is unsafe.")
-    path = root / "kb" / ".runtime" / "literature-selection" / requested
+    path = kb_root(root) / ".runtime" / "literature-selection" / requested
     try:
         metadata = path.lstat()
     except FileNotFoundError:
@@ -654,11 +654,11 @@ def _protocol_path_preflight(root: Path, requested: str) -> str:
 def _open_protocol_directory(root: Path) -> int:
     flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(root, flags)
+        descriptor = os.open(kb_root(root), flags)
     except OSError as exc:
         raise SystemExit("Literature selection protocol workspace is unsafe.") from exc
     try:
-        for component in ("kb", ".runtime", "literature-selection"):
+        for component in (".runtime", "literature-selection"):
             try:
                 metadata = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:

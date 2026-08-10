@@ -355,8 +355,8 @@ def test_unit_binding_rejects_ambiguous_canonical_unit_id(tmp_path: Path) -> Non
         {"id": "shared-unit-id", "kind": "repo", "title": "Repo", "payload": {}},
     )
     shutil.copytree(
-        isolated / "kb" / "units" / "repos" / "shared-unit-id",
-        tmp_path / "kb" / "units" / "repos" / "shared-unit-id",
+        isolated / "units" / "repos" / "shared-unit-id",
+        tmp_path / "units" / "repos" / "shared-unit-id",
     )
     canonical = yaml.safe_load((paper_dir / "record.yaml").read_text(encoding="utf-8"))
 
@@ -405,8 +405,8 @@ def test_verify_cli_persists_only_verified_survey(tmp_path: Path, monkeypatch) -
 
     assert module.main() == 0
 
-    survey_path = tmp_path / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
-    summary_path = tmp_path / "kb" / "synthesis" / "robot-learning" / "summary.md"
+    survey_path = tmp_path / "synthesis" / "robot-learning" / "survey.yaml"
+    summary_path = tmp_path / "synthesis" / "robot-learning" / "summary.md"
     assert survey_path.exists()
     assert summary_path.exists()
     persisted = yaml.safe_load(survey_path.read_text(encoding="utf-8"))
@@ -533,7 +533,7 @@ def test_confirmed_stale_survey_is_discovered_without_mutating_old_judgement(
     module, scaffold = build_filled_survey(tmp_path)
     violations, verified = module.verify_survey_fill(scaffold, tmp_path)
     assert violations == []
-    survey_path = tmp_path / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    survey_path = tmp_path / "synthesis" / "robot-learning" / "survey.yaml"
     survey_path.parent.mkdir(parents=True, exist_ok=True)
     source_roots = {
         item["id"]: module.unit_root(tmp_path, item["kind"], item["id"])
@@ -603,7 +603,7 @@ def test_stale_survey_discovery_ignores_malformed_symlink_and_noncanonical_dupli
     module, scaffold = build_filled_survey(tmp_path)
     violations, verified = module.verify_survey_fill(scaffold, tmp_path)
     assert violations == []
-    survey_path = tmp_path / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    survey_path = tmp_path / "synthesis" / "robot-learning" / "survey.yaml"
     survey_path.parent.mkdir(parents=True, exist_ok=True)
     source_roots = {
         item["id"]: module.unit_root(tmp_path, item["kind"], item["id"])
@@ -633,13 +633,13 @@ def test_stale_survey_discovery_ignores_malformed_symlink_and_noncanonical_dupli
         "# Evidence\n\nGamma adds a new matching result.\n",
     )
 
-    malformed = tmp_path / "kb" / "synthesis" / "malformed" / "survey.yaml"
+    malformed = tmp_path / "synthesis" / "malformed" / "survey.yaml"
     malformed.parent.mkdir(parents=True)
     malformed.write_text("kind: survey_judgement\nid: [unterminated\n", encoding="utf-8")
-    duplicate = tmp_path / "kb" / "synthesis" / "duplicate" / "survey.yaml"
+    duplicate = tmp_path / "synthesis" / "duplicate" / "survey.yaml"
     duplicate.parent.mkdir(parents=True)
     duplicate.write_bytes(survey_path.read_bytes())
-    linked = tmp_path / "kb" / "synthesis" / "linked"
+    linked = tmp_path / "synthesis" / "linked"
     linked.symlink_to(survey_path.parent, target_is_directory=True)
 
     stale = discover_stale_confirmed_surveys(tmp_path)

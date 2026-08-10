@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -152,7 +154,7 @@ def _create_batch(root: Path, count: int = 2) -> tuple[dict, list[dict]]:
 
 
 def test_sheet_preview_is_checkbox_only_pure_read_and_preflights_all_items(tmp_path: Path) -> None:
-    annotation = tmp_path / "kb/obsidian/annotations/human-note.md"
+    annotation = tmp_path / "obsidian/annotations/human-note.md"
     annotation.parent.mkdir(parents=True)
     annotation.write_text("keep this human note\n", encoding="utf-8")
     created, items = _create_batch(tmp_path)
@@ -372,7 +374,7 @@ def test_export_rejects_reserved_or_hidden_display_injection(tmp_path: Path, uns
             display_items=[display],
     )
     assert exc.value.code == "unsafe_display"
-    annotations = tmp_path / "kb/obsidian/annotations"
+    annotations = tmp_path / "obsidian/annotations"
     if annotations.exists():
         assert not list(annotations.glob("Pending Review *.md"))
 
@@ -412,8 +414,8 @@ def test_intermediate_directory_swap_cannot_redirect_review_preview(
         sheet.read_text(encoding="utf-8").replace("- [ ] 暂缓", "- [x] 暂缓", 1),
         encoding="utf-8",
     )
-    batches = tmp_path / "kb/.runtime/review-batches"
-    displaced = tmp_path / "kb/.runtime/review-batches-displaced"
+    batches = tmp_path / ".runtime/review-batches"
+    displaced = tmp_path / ".runtime/review-batches-displaced"
     external = tmp_path / "external-review-batches"
     external.mkdir()
     external_registry = external / f"{created['batch_ref']}.json"
@@ -444,9 +446,9 @@ def test_intermediate_directory_swap_cannot_redirect_registry_replace(
 ) -> None:
     created, _items = _create_batch(tmp_path, count=1)
     filename = f"{created['batch_ref']}.json"
-    batches = tmp_path / "kb/.runtime/review-batches"
+    batches = tmp_path / ".runtime/review-batches"
     original_bytes = (batches / filename).read_bytes()
-    displaced = tmp_path / "kb/.runtime/review-batches-displaced"
+    displaced = tmp_path / ".runtime/review-batches-displaced"
     external = tmp_path / "external-review-batches"
     external.mkdir()
     external_registry = external / filename
@@ -481,7 +483,7 @@ def test_late_directory_rename_cleans_new_file_before_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _create_batch(tmp_path, count=1)
-    batches = tmp_path / "kb/.runtime/review-batches"
+    batches = tmp_path / ".runtime/review-batches"
     moved = tmp_path / "moved/review-batches"
     moved.parent.mkdir()
     decoy = tmp_path / "decoy-review-batches"
@@ -520,7 +522,7 @@ def test_late_directory_rename_restores_replaced_registry_before_failure(
 ) -> None:
     created, _items = _create_batch(tmp_path, count=1)
     filename = f"{created['batch_ref']}.json"
-    batches = tmp_path / "kb/.runtime/review-batches"
+    batches = tmp_path / ".runtime/review-batches"
     original_bytes = (batches / filename).read_bytes()
     moved = tmp_path / "moved/review-batches"
     moved.parent.mkdir()
@@ -561,7 +563,7 @@ def test_directory_fsync_failure_restores_registry_before_reporting_error(
 ) -> None:
     created, _items = _create_batch(tmp_path, count=1)
     filename = f"{created['batch_ref']}.json"
-    batches = tmp_path / "kb/.runtime/review-batches"
+    batches = tmp_path / ".runtime/review-batches"
     target = batches / filename
     original = target.read_bytes()
     real_fsync = review_batches_module.os.fsync
@@ -592,7 +594,7 @@ def test_failed_rollback_fsync_preserves_old_inode_backup(
 ) -> None:
     created, _items = _create_batch(tmp_path, count=1)
     filename = f"{created['batch_ref']}.json"
-    batches = tmp_path / "kb/.runtime/review-batches"
+    batches = tmp_path / ".runtime/review-batches"
     target = batches / filename
     original = target.read_bytes()
     real_fsync = review_batches_module.os.fsync
@@ -622,7 +624,7 @@ def test_concurrent_registry_replace_between_check_and_backup_fails_closed(
 ) -> None:
     created, _items = _create_batch(tmp_path, count=1)
     filename = f"{created['batch_ref']}.json"
-    batches = tmp_path / "kb/.runtime/review-batches"
+    batches = tmp_path / ".runtime/review-batches"
     target = batches / filename
     concurrent = batches / "concurrent.json"
     concurrent.write_bytes(b"CONCURRENT\n")
@@ -652,7 +654,7 @@ def test_concurrent_registry_replace_between_check_and_backup_fails_closed(
 def _write_ready_unit(root: Path, unit_id: str = "p-obsidian-roundtrip-123456") -> Path:
     (root / ".agents").mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("# isolated fixture\n", encoding="utf-8")
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     preferences = default_runtime_preferences()
     preferences["identity"]["default_confirmed_by"] = "Human Reviewer"
     write_yaml_if_changed(runtime_preferences_path(root), preferences)
@@ -716,7 +718,7 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
     export_public = capsys.readouterr()
     assert "已在 Obsidian 的人工批注区生成可编辑待确认表" in export_public.out
     assert "kb/obsidian" not in export_public.out
-    protocol = json.loads((tmp_path / "kb/.runtime/obsidian-export.json").read_text(encoding="utf-8"))
+    protocol = json.loads((tmp_path / ".runtime/obsidian-export.json").read_text(encoding="utf-8"))
     sheet_action = next(item for item in protocol["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = sheet_action["batch_ref"]
     sheet = tmp_path / sheet_action["sheet_path"]
@@ -737,7 +739,7 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
     preview_public = capsys.readouterr()
     assert "这些勾选尚未修改知识库" in preview_public.out
     assert record.read_bytes() == canonical_before
-    preview_protocol = json.loads((tmp_path / "kb/.runtime/obsidian-preview.json").read_text(encoding="utf-8"))
+    preview_protocol = json.loads((tmp_path / ".runtime/obsidian-preview.json").read_text(encoding="utf-8"))
     preview_action = next(
         item for item in preview_protocol["next_actions"] if item["action"] == "present_obsidian_review_diff"
     )
@@ -813,14 +815,14 @@ def test_kb_cli_owner_failure_rolls_back_every_canonical_write_and_keeps_batch_u
         "--root", str(tmp_path), "--agent-protocol", "rollback-export.json", "review", "--obsidian-export",
     ]) == 0
     capsys.readouterr()
-    protocol = json.loads((tmp_path / "kb/.runtime/rollback-export.json").read_text(encoding="utf-8"))
+    protocol = json.loads((tmp_path / ".runtime/rollback-export.json").read_text(encoding="utf-8"))
     action = next(item for item in protocol["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = action["batch_ref"]
     sheet = tmp_path / action["sheet_path"]
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认"), encoding="utf-8")
     sheet_before = sheet.read_bytes()
     expected_preview_digest = _preview_digest(tmp_path, batch_ref)
-    passage_cache = tmp_path / "kb/.runtime/search/passages.sqlite3"
+    passage_cache = tmp_path / ".runtime/search/passages.sqlite3"
     assert not passage_cache.exists()
     before = {first: first.read_bytes(), second: second.read_bytes()}
 
@@ -868,7 +870,7 @@ def test_checkpoint_failure_is_private_and_protocol_reports_post_apply_error(
         "--root", str(tmp_path), "--agent-protocol", "checkpoint-export.json", "review", "--obsidian-export",
     ]) == 0
     capsys.readouterr()
-    exported = json.loads((tmp_path / "kb/.runtime/checkpoint-export.json").read_text(encoding="utf-8"))
+    exported = json.loads((tmp_path / ".runtime/checkpoint-export.json").read_text(encoding="utf-8"))
     action = next(item for item in exported["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = action["batch_ref"]
     sheet = tmp_path / action["sheet_path"]
@@ -893,7 +895,7 @@ def test_checkpoint_failure_is_private_and_protocol_reports_post_apply_error(
     assert load_yaml(record, default={})["confirmation_status"] == "confirmed"
     registry = json.loads((tmp_path / f"kb/.runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
     assert registry["status"] == "consumed"
-    protocol = json.loads((tmp_path / "kb/.runtime/checkpoint-apply.json").read_text(encoding="utf-8"))
+    protocol = json.loads((tmp_path / ".runtime/checkpoint-apply.json").read_text(encoding="utf-8"))
     assert protocol["status"] == "error"
     assert protocol["exit_code"] == 1
     assert protocol["details"]["checkpoint_status"] == "failed_after_business_apply"
@@ -910,7 +912,7 @@ def test_apply_is_bound_to_previewed_choices_and_current_user_authorization(
         "--root", str(tmp_path), "--agent-protocol", "auth-export.json", "review", "--obsidian-export",
     ]) == 0
     capsys.readouterr()
-    protocol = json.loads((tmp_path / "kb/.runtime/auth-export.json").read_text(encoding="utf-8"))
+    protocol = json.loads((tmp_path / ".runtime/auth-export.json").read_text(encoding="utf-8"))
     action = next(item for item in protocol["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = action["batch_ref"]
     sheet = tmp_path / action["sheet_path"]
@@ -957,7 +959,7 @@ def test_concurrent_replay_has_exactly_one_winner(
         "--root", str(tmp_path), "--agent-protocol", "concurrent-export.json", "review", "--obsidian-export",
     ]) == 0
     capsys.readouterr()
-    protocol = json.loads((tmp_path / "kb/.runtime/concurrent-export.json").read_text(encoding="utf-8"))
+    protocol = json.loads((tmp_path / ".runtime/concurrent-export.json").read_text(encoding="utf-8"))
     action = next(item for item in protocol["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = action["batch_ref"]
     sheet = tmp_path / action["sheet_path"]

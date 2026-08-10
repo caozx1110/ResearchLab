@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import ast
 from pathlib import Path
 
@@ -113,7 +115,7 @@ def _verified_judgement_record(root: Path, *, title: str) -> dict:
 
 
 def test_detached_same_revision_record_cannot_confirm_replacement(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     path = record_path(tmp_path, "paper", "p-confirm-snapshot-123456")
     old = _verified_judgement_record(path.parent, title="OLD RECORD")
     write_record(tmp_path, old)
@@ -148,7 +150,7 @@ def test_detached_same_revision_record_cannot_confirm_replacement(tmp_path: Path
 
 
 def test_same_bytes_new_inode_rejects_persisted_confirmation(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-confirm-same-bytes-123456"
     path = record_path(tmp_path, "paper", unit_id)
     write_yaml_if_changed(path, _record(unit_id))
@@ -175,7 +177,7 @@ def test_same_bytes_new_inode_rejects_persisted_confirmation(tmp_path: Path) -> 
 
 
 def test_artifact_change_after_confirmation_before_write_is_zero_write(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     path = record_path(tmp_path, "paper", "p-confirm-snapshot-123456")
     record = _verified_judgement_record(path.parent, title="STABLE RECORD")
     write_record(tmp_path, record)
@@ -209,7 +211,7 @@ def test_artifact_change_after_confirmation_before_write_is_zero_write(tmp_path:
 
 
 def test_ancestor_replacement_after_confirmation_before_write_is_zero_write(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-confirm-ancestor-123456"
     path = record_path(tmp_path, "paper", unit_id)
     write_record(tmp_path, _record(unit_id))
@@ -238,7 +240,7 @@ def test_ancestor_replacement_after_confirmation_before_write_is_zero_write(tmp_
 
 
 def test_persisted_unit_confirmation_cannot_omit_snapshot(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-confirm-missing-snapshot-123456"
     path = record_path(tmp_path, "paper", unit_id)
     write_yaml_if_changed(path, _record(unit_id))
@@ -263,7 +265,7 @@ def test_persisted_confirmation_forces_snapshot_bound_source_capture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-confirm-roots-123456"
     write_record(tmp_path, _record(unit_id))
     detached, _ = locate_record(tmp_path, unit_id, kind="paper", fuzzy=False)
@@ -288,7 +290,7 @@ def test_persisted_confirmation_forces_snapshot_bound_source_capture(
 
 
 def test_authorized_content_change_before_write_is_rejected(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     path = record_path(tmp_path, "paper", "p-confirm-snapshot-123456")
     record = _verified_judgement_record(path.parent, title="AUTHORIZED RECORD")
     write_record(tmp_path, record)
@@ -314,7 +316,7 @@ def test_authorized_content_change_before_write_is_rejected(tmp_path: Path) -> N
 
 
 def test_confirmed_receipt_cannot_bypass_missing_snapshot_at_write(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-confirm-write-bypass-123456"
     path = record_path(tmp_path, "paper", unit_id)
     pending = _record(unit_id)
@@ -337,7 +339,7 @@ def test_confirmed_receipt_cannot_bypass_missing_snapshot_at_write(tmp_path: Pat
 
 
 def test_promote_can_confirm_with_explicit_lifecycle_updates(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-confirm-lifecycle-123456"
     write_record(tmp_path, _record(unit_id))
 
@@ -358,7 +360,7 @@ def test_promote_can_confirm_with_explicit_lifecycle_updates(tmp_path: Path) -> 
 
 
 def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
 
     with pytest.raises(SystemExit, match="--confirmed-by"):
@@ -369,7 +371,7 @@ def test_promote_to_confirmed_requires_human_provenance(tmp_path: Path) -> None:
 
 
 def test_promote_to_confirmed_uses_configured_default_confirmed_by(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
     write_yaml_if_changed(
         runtime_preferences_path(tmp_path),
@@ -391,7 +393,7 @@ def test_promote_to_confirmed_uses_configured_default_confirmed_by(tmp_path: Pat
 
 
 def test_missing_evidence_is_rejected_even_with_default_confirmed_by(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
     write_yaml_if_changed(
         runtime_preferences_path(tmp_path),
@@ -406,7 +408,7 @@ def test_missing_evidence_is_rejected_even_with_default_confirmed_by(tmp_path: P
 
 @pytest.mark.parametrize("actor", ["Claude Fable", "Opus 4.5", "通义千问", "豆包", "Kimi"])
 def test_configured_ai_default_signer_is_rejected(actor: str, tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(
         runtime_preferences_path(tmp_path),
         {"identity": {"default_confirmed_by": actor}},
@@ -423,7 +425,7 @@ def test_configured_ai_default_signer_is_rejected(actor: str, tmp_path: Path) ->
 def test_promote_non_confirmed_does_not_require_provenance(tmp_path: Path) -> None:
     """Backward-compat guard: only confirmed transitions need provenance;
     auto_confirmed / pending / rejected must still work without --confirmed-by/--evidence."""
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     for target in ("auto_confirmed", "pending_user_confirmation", "rejected"):
         write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
         path = promote_record(tmp_path, "p-confirm-123456", confirmation_status=target)
@@ -449,7 +451,7 @@ def test_promote_to_confirmed_persists_confirmation_provenance(tmp_path: Path, m
     # namespace so promote_record -> apply_confirmation observes the frozen clock.
     import research.confirm as confirm
 
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(record_path(tmp_path, "paper", "p-confirm-123456"), _record())
     monkeypatch.setattr(confirm, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")
 

@@ -500,7 +500,7 @@ def test_merge_update_reinstall_uninstall_preserve_user_workspace(tmp_path: Path
     user_skill.write_text("# User skill\n", encoding="utf-8")
     (workspace / "AGENTS.md").write_text("# User rules\n\nKeep this prose.\n", encoding="utf-8")
     (workspace / "kb").mkdir()
-    (workspace / "kb" / "notes.md").write_text("research data\n", encoding="utf-8")
+    (workspace / "notes.md").write_text("research data\n", encoding="utf-8")
     (workspace / ".venv").mkdir()
     (workspace / ".venv" / "sentinel").write_text("runtime\n", encoding="utf-8")
 
@@ -524,7 +524,7 @@ def test_merge_update_reinstall_uninstall_preserve_user_workspace(tmp_path: Path
     assert managed_file.read_text(encoding="utf-8") != "locally damaged\n"
     assert "Keep this prose." in (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert user_skill.is_file()
-    assert (workspace / "kb" / "notes.md").is_file()
+    assert (workspace / "notes.md").is_file()
     assert (workspace / ".venv" / "sentinel").is_file()
 
     uninstall = _run_installer(workspace, "uninstall")
@@ -536,7 +536,7 @@ def test_merge_update_reinstall_uninstall_preserve_user_workspace(tmp_path: Path
     assert "Keep this prose." in agents_text
     assert BEGIN_MARKER not in agents_text
     assert END_MARKER not in agents_text
-    assert (workspace / "kb" / "notes.md").read_text(encoding="utf-8") == "research data\n"
+    assert (workspace / "notes.md").read_text(encoding="utf-8") == "research data\n"
     assert (workspace / ".venv" / "sentinel").read_text(encoding="utf-8") == "runtime\n"
 
 
@@ -565,7 +565,7 @@ def test_reviewed_uninstall_plan_preserves_runtime_and_kb_lifecycle(tmp_path: Pa
     )
     assert installed.returncode == 0, installed.stdout + installed.stderr
     (workspace / "kb").mkdir()
-    (workspace / "kb/user.md").write_text("research data\n", encoding="utf-8")
+    (workspace / "user.md").write_text("research data\n", encoding="utf-8")
     (workspace / ".venv").mkdir()
     (workspace / ".venv/sentinel").write_text("runtime\n", encoding="utf-8")
     plan_path = tmp_path / "reviewed-uninstall.json"
@@ -608,7 +608,7 @@ def test_reviewed_uninstall_plan_preserves_runtime_and_kb_lifecycle(tmp_path: Pa
 
     assert applied.returncode == 0, applied.stdout + applied.stderr
     assert not (workspace / ".agents/.install-manifest.json").exists()
-    assert (workspace / "kb/user.md").read_text(encoding="utf-8") == "research data\n"
+    assert (workspace / "user.md").read_text(encoding="utf-8") == "research data\n"
     assert (workspace / ".venv/sentinel").read_text(encoding="utf-8") == "runtime\n"
     assert not any(home.iterdir())
 

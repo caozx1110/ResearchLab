@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import copy
 import importlib.util
 import json
@@ -843,7 +845,7 @@ def test_explicit_stage_id_rejects_identity_mismatch_without_mutation(
         candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
     )
     before = path.read_bytes()
-    journal_root = tmp_path / "kb/.journal"
+    journal_root = tmp_path / ".journal"
     journal_before = {item.name: item.read_bytes() for item in journal_root.glob("*.yaml")}
     with pytest.raises(SystemExit, match="identity does not match"):
         stage_search_results(
@@ -865,7 +867,7 @@ def test_stage_identity_mismatch_precedes_workspace_seed_repairs(tmp_path: Path)
         stage_id="shared-stage",
         candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
     )
-    current_state = tmp_path / "kb/user/current-state.md"
+    current_state = tmp_path / "user/current-state.md"
     current_state.unlink()
     before = path.read_bytes()
     with pytest.raises(SystemExit, match="identity does not match"):
@@ -900,8 +902,8 @@ def test_stage_identity_race_fails_before_journal_write(tmp_path: Path, monkeypa
             stage_id="shared-stage",
             candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
         )
-    assert not (tmp_path / "kb/synthesis/source-search/shared-stage.yaml").exists()
-    assert not list((tmp_path / "kb/.journal").glob("*.yaml"))
+    assert not (tmp_path / "synthesis/source-search/shared-stage.yaml").exists()
+    assert not list((tmp_path / ".journal").glob("*.yaml"))
 
 
 def test_legacy_openalex_doi_is_read_only_compatibility_identity(tmp_path: Path) -> None:
@@ -978,7 +980,7 @@ def test_blocked_no_search_tool_is_recorded_without_empty_success(
     assert str(tmp_path) not in output
     assert "http://" not in output
     assert "https://" not in output
-    stages = list((tmp_path / "kb/synthesis/source-search").glob("*.yaml"))
+    stages = list((tmp_path / "synthesis/source-search").glob("*.yaml"))
     assert len(stages) == 1
     assert load_yaml(stages[0])["stop"]["reason"] == "blocked_no_search_tool"
 
@@ -1080,7 +1082,7 @@ def test_stage_helper_binds_current_search_preferences_and_rejects_stale_resume(
     tmp_path: Path,
 ) -> None:
     module = _search_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     profile_path = config_root(tmp_path) / "user-profile.yaml"
     write_yaml_if_changed(
         profile_path,
@@ -1130,7 +1132,7 @@ def test_stage_helper_without_selection_keeps_soft_behavior_neutral_and_hard_con
     tmp_path: Path,
 ) -> None:
     module = _search_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(
         config_root(tmp_path) / "user-profile.yaml",
         {
@@ -1217,7 +1219,7 @@ def test_search_old_preference_receipt_rejects_each_scope_replay_before_stage_wr
     mutate,
 ) -> None:
     module = _search_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     base = {
         "request": "robot learning",
         "mode": "exploratory",
@@ -1256,7 +1258,7 @@ def test_search_resume_omissions_reuse_the_persisted_frozen_preference_context(
     tmp_path: Path,
 ) -> None:
     module = _search_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     initial = {
         "request": "resume frozen search",
         "mode": "exploratory",
@@ -1366,7 +1368,7 @@ def test_explicit_stage_id_cannot_escape_or_create_workspace(tmp_path: Path) -> 
 
 
 def test_symlink_stage_target_is_rejected_before_victim_or_journal_mutation(tmp_path: Path) -> None:
-    stage_dir = tmp_path / "kb/synthesis/source-search"
+    stage_dir = tmp_path / "synthesis/source-search"
     stage_dir.mkdir(parents=True)
     victim = tmp_path / "victim.yaml"
     victim.write_text("safe: true\n", encoding="utf-8")
@@ -1383,12 +1385,12 @@ def test_symlink_stage_target_is_rejected_before_victim_or_journal_mutation(tmp_
         )
 
     assert victim.read_bytes() == before
-    assert not (tmp_path / "kb/.journal").exists()
+    assert not (tmp_path / ".journal").exists()
 
 
 def test_invalid_update_does_not_repair_workspace_or_start_a_journal(tmp_path: Path) -> None:
     stage_id = "preexisting-stage"
-    path = tmp_path / "kb/synthesis/source-search" / f"{stage_id}.yaml"
+    path = tmp_path / "synthesis/source-search" / f"{stage_id}.yaml"
     path.parent.mkdir(parents=True)
     write_yaml_if_changed(
         path,
@@ -1426,8 +1428,8 @@ def test_invalid_update_does_not_repair_workspace_or_start_a_journal(tmp_path: P
         )
 
     assert path.read_bytes() == before
-    assert not (tmp_path / "kb/user/current-state.md").exists()
-    assert not (tmp_path / "kb/.journal").exists()
+    assert not (tmp_path / "user/current-state.md").exists()
+    assert not (tmp_path / ".journal").exists()
 
 
 def test_discovery_must_reference_a_real_query_even_when_query_list_is_empty(tmp_path: Path) -> None:
@@ -1778,7 +1780,7 @@ def test_literature_candidate_materialization_requires_current_user_selection(
     )
     with pytest.raises(SystemExit, match="requires user_authorization"):
         _intake_module().main()
-    assert not list((tmp_path / "kb/units/papers").glob("*/record.yaml"))
+    assert not list((tmp_path / "units/papers").glob("*/record.yaml"))
 
 
 def test_kb_root_symlink_is_rejected_before_staging(tmp_path: Path) -> None:
@@ -1859,7 +1861,7 @@ def test_literature_selection_cannot_be_rebound_to_an_explicit_source(
     )
     with pytest.raises(SystemExit, match="must be materialized from its staged source"):
         _intake_module().main()
-    assert not list((tmp_path / "kb/units/papers").glob("*/record.yaml"))
+    assert not list((tmp_path / "units/papers").glob("*/record.yaml"))
 
 
 def test_staged_candidate_cannot_be_materialized_as_a_different_source_kind(
@@ -1877,7 +1879,7 @@ def test_staged_candidate_cannot_be_materialized_as_a_different_source_kind(
     )
     before = path.read_bytes()
     journal_before = {
-        item.name: item.read_bytes() for item in (tmp_path / "kb/.journal").glob("*.yaml")
+        item.name: item.read_bytes() for item in (tmp_path / ".journal").glob("*.yaml")
     }
     monkeypatch.setattr(
         sys,
@@ -1902,9 +1904,9 @@ def test_staged_candidate_cannot_be_materialized_as_a_different_source_kind(
     with pytest.raises(SystemExit, match="recorded source kind"):
         _intake_module().main()
     assert path.read_bytes() == before
-    assert not list((tmp_path / "kb/units/repos").glob("*/record.yaml"))
+    assert not list((tmp_path / "units/repos").glob("*/record.yaml"))
     assert {
-        item.name: item.read_bytes() for item in (tmp_path / "kb/.journal").glob("*.yaml")
+        item.name: item.read_bytes() for item in (tmp_path / ".journal").glob("*.yaml")
     } == journal_before
 
 

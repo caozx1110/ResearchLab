@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import os
 import subprocess
 import sys
@@ -43,7 +45,7 @@ def test_pdf_figure_extraction_mode_surfaces_in_runtime_preferences_and_config_g
 
 def test_new_workspace_is_explicit_personal_but_pre_profile_workspace_stays_strict(tmp_path: Path) -> None:
     new_root = tmp_path / "new"
-    ensure_workspace(new_root)
+    initialize_test_workspace(new_root)
     stored = load_yaml(runtime_preferences_path(new_root))
     assert stored["governance_profile"] == "personal"
     assert stored["autonomy"]["auto_execute_scope"] == ["ingest", "build-index", "refresh", "generate-note"]

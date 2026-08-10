@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.machinery
 import importlib.util
 import json
@@ -42,7 +44,7 @@ def _workspace(tmp_path: Path, *, signer: str = "Human Reviewer") -> Path:
     root = tmp_path / "workspace"
     (root / ".agents").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# isolated preference fixture\n", encoding="utf-8")
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     runtime = default_runtime_preferences()
     runtime["identity"]["default_confirmed_by"] = signer
     write_yaml_if_changed(runtime_preferences_path(root), runtime)
@@ -85,7 +87,7 @@ def _snapshot_bytes(root: Path) -> dict[str, bytes]:
 
 def _display(root: Path, kb, name: str = "review.json") -> tuple[dict, list[dict]]:
     assert kb.main(["--root", str(root), "--agent-protocol", name, "review"]) == 0
-    protocol = json.loads((root / "kb/.runtime" / name).read_text(encoding="utf-8"))
+    protocol = json.loads((root / ".runtime" / name).read_text(encoding="utf-8"))
     action = next(item for item in protocol["next_actions"] if item["action"] == "present_review_items")
     return protocol, action["review_items"]
 
@@ -423,7 +425,7 @@ def test_mixed_preference_decisions_commit_atomically_with_exact_targets(
     assert [item["id"] for item in runtime_items] == [entries[0]["id"]]
     journal_entries = [
         load_yaml(path)
-        for path in (root / "kb/.journal").glob("*.yaml")
+        for path in (root / ".journal").glob("*.yaml")
         if load_yaml(path).get("op_type") == "kb-cli:dialogue-review-batch"
     ]
     assert len(journal_entries) == 1

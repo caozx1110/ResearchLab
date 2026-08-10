@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import hashlib
 import os
 import shutil
@@ -38,7 +40,7 @@ def _record(unit_id: str, title: str, *, summary: str = "", payload: dict | None
 
 
 def test_search_records_ranks_title_match_above_markdown_match(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-title-123456", "Dexterous Recovery", summary="short"))
     _write_record(tmp_path, _record("p-note-123456", "Other Paper", summary="short"))
     note_path = unit_root(tmp_path, "paper", "p-note-123456") / "paper-note.md"
@@ -53,7 +55,7 @@ def test_search_records_ranks_title_match_above_markdown_match(tmp_path: Path) -
 
 
 def test_search_records_finds_payload_leaf_text(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record(
@@ -73,7 +75,7 @@ def test_search_records_finds_payload_leaf_text(tmp_path: Path) -> None:
 
 
 def test_cjk_search_filters_and_scores_matching_records(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-cjk-123456", "灵巧手恢复策略"))
     _write_record(tmp_path, _record("p-other-123456", "视觉语言模型"))
 
@@ -84,7 +86,7 @@ def test_cjk_search_filters_and_scores_matching_records(tmp_path: Path) -> None:
 
 
 def test_mixed_cjk_ascii_query_tokenizes_and_searches(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-mixed-123456", "灵巧手 recovery"))
     _write_record(tmp_path, _record("p-other-123456", "视觉语言模型"))
 
@@ -97,7 +99,7 @@ def test_mixed_cjk_ascii_query_tokenizes_and_searches(tmp_path: Path) -> None:
 
 
 def test_empty_search_keeps_filter_only_behavior_for_review_queue(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-filter-123456", "Filter Paper"))
 
     hits = search_records(tmp_path, "", confirmation_status="auto_confirmed")
@@ -123,7 +125,7 @@ def _tree_bytes(root: Path) -> dict[str, str]:
 
 
 def test_passage_search_builds_fts_cache_with_heading_and_line_locator(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record("p-passages-123456", "Dexterous Paper", summary="A recovery overview."),
@@ -169,7 +171,7 @@ def test_passage_search_builds_fts_cache_with_heading_and_line_locator(tmp_path:
 
 
 def test_title_and_summary_are_indexed_as_first_class_passages(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record(
@@ -188,7 +190,7 @@ def test_title_and_summary_are_indexed_as_first_class_passages(tmp_path: Path) -
 
 
 def test_title_match_does_not_promote_unrelated_body_passages(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record("p-title-scope-123456", "Rare Query Planning", summary="A database article."),
@@ -214,7 +216,7 @@ def test_title_match_does_not_promote_unrelated_body_passages(tmp_path: Path) ->
 
 
 def test_missing_stale_and_corrupt_cache_fall_back_without_writes(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-fallback-123456", "Fallback Paper"))
     note = unit_root(tmp_path, "paper", "p-fallback-123456") / "paper-note.md"
     write_text_if_changed(note, "# Finding\n\nA deterministic impedance controller stabilizes contact.\n")
@@ -241,7 +243,7 @@ def test_missing_stale_and_corrupt_cache_fall_back_without_writes(tmp_path: Path
 
 
 def test_valid_sqlite_with_tampered_passage_rows_is_corrupt_and_cannot_hide_results(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record("p-row-tamper-123456", "Tamper Paper", summary="canonical force-feedback result"),
@@ -263,7 +265,7 @@ def test_valid_sqlite_with_tampered_passage_rows_is_corrupt_and_cannot_hide_resu
 
 
 def test_valid_sqlite_with_tampered_source_manifest_is_corrupt(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record("p-source-table-tamper-123456", "Source table", summary="canonical actuator result"),
@@ -292,7 +294,7 @@ def test_coherently_tampered_source_manifest_schema_is_corrupt(
     column: str,
     value: str,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-source-schema-123456", "Source schema", summary="manifest fallback"))
     build_index(tmp_path)
     cache = passage_search_cache_path(tmp_path)
@@ -317,7 +319,7 @@ def test_coherently_tampered_source_manifest_schema_is_corrupt(
 
 
 def test_coherently_tampered_passage_rows_are_corrupt_not_stale(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-coherent-tamper-123456", "Coherent tamper", summary="canonical needle"))
     build_index(tmp_path)
     cache = passage_search_cache_path(tmp_path)
@@ -363,7 +365,7 @@ def test_coherently_tampered_passage_rows_are_corrupt_not_stale(tmp_path: Path) 
     ],
 )
 def test_malformed_cache_scalar_is_corrupt_and_falls_back(tmp_path: Path, statement: str) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-malformed-cache-123456", "Malformed cache", summary="fallback needle"))
     build_index(tmp_path)
     connection = sqlite3.connect(passage_search_cache_path(tmp_path))
@@ -383,7 +385,7 @@ def test_standalone_obsidian_block_ids_are_locator_metadata_not_passages(
     tmp_path: Path,
     build_cache: bool,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-block-id-123456", "Block ID paper"))
     note = unit_root(tmp_path, "paper", "p-block-id-123456") / "source" / "document.md"
     write_text_if_changed(
@@ -417,7 +419,7 @@ def test_block_id_filter_uses_the_canonical_locator_grammar() -> None:
 
 
 def test_fts_unavailable_falls_back_and_reports_health(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-nofts-123456", "No FTS Paper", summary="mixed tactile recovery"))
     build_index(tmp_path)
     monkeypatch.setattr(
@@ -433,7 +435,7 @@ def test_fts_unavailable_falls_back_and_reports_health(tmp_path: Path, monkeypat
 
 
 def test_mixed_cjk_ascii_passage_fallback_and_filters(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     first = _record("p-cjk-passage-123456", "触觉策略", summary="灵巧手 recovery policy")
     first["candidate_pools"] = ["reading"]
     second = _record("p-cjk-other-123456", "视觉策略", summary="灵巧手 recovery policy")
@@ -449,7 +451,7 @@ def test_mixed_cjk_ascii_passage_fallback_and_filters(tmp_path: Path) -> None:
 
 
 def test_passage_walk_excludes_source_raw_output_obsidian_and_symlinks(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-safe-walk-123456", "Safe Walk"))
     root = unit_root(tmp_path, "paper", "p-safe-walk-123456")
     write_text_if_changed(root / "paper-note.md", "# Included\n\nvisible needle phrase\n")
@@ -468,7 +470,7 @@ def test_passage_walk_excludes_source_raw_output_obsidian_and_symlinks(tmp_path:
 
 
 def test_canonical_source_document_and_parse_cache_are_searchable_but_archives_are_not(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-fulltext-123456", "Full Text"))
     root = unit_root(tmp_path, "paper", "p-fulltext-123456")
     source = root / "source"
@@ -507,13 +509,13 @@ def test_read_path_rejects_runtime_parent_symlink_without_opening_external_cache
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record("p-parent-link-123456", "Parent Link", summary="safe fallback phrase"),
     )
     build_index(tmp_path)
-    runtime = tmp_path / "kb" / ".runtime"
+    runtime = tmp_path / ".runtime"
     outside_runtime = tmp_path / "outside-runtime"
     runtime.rename(outside_runtime)
     runtime.symlink_to(outside_runtime, target_is_directory=True)
@@ -530,7 +532,7 @@ def test_read_path_rejects_runtime_parent_symlink_without_opening_external_cache
 
 
 def test_long_markdown_block_uses_fixed_overlapping_windows(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-window-123456", "Window Paper"))
     marker = "A" * (PASSAGE_MAX_CHARS - 20) + " overlap-token " + "B" * 300
     note = unit_root(tmp_path, "paper", "p-window-123456") / "paper-note.md"
@@ -549,7 +551,7 @@ def test_passage_capture_rejects_real_unit_replacement_after_record_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-passage-race-123456"
     _write_record(tmp_path, _record(unit_id, "Snapshot-bound paper"))
     unit = unit_root(tmp_path, "paper", unit_id)
@@ -581,7 +583,7 @@ def test_record_search_rejects_unit_replacement_after_initial_record_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-record-search-race-123456"
     _write_record(tmp_path, _record(unit_id, "Snapshot-only title"))
     unit = unit_root(tmp_path, "paper", unit_id)
@@ -609,7 +611,7 @@ def test_passage_leaf_open_rejects_unit_symlink_swap_without_external_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-passage-open-race-123456"
     _write_record(tmp_path, _record(unit_id, "Open-race paper"))
     unit = unit_root(tmp_path, "paper", unit_id)
@@ -640,7 +642,7 @@ def test_passage_leaf_open_rejects_unit_symlink_swap_without_external_bytes(
 
 
 def test_failed_atomic_replace_preserves_prior_passage_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-atomic-123456", "Atomic Cache"))
     build_index(tmp_path)
     cache = passage_search_cache_path(tmp_path)
@@ -662,7 +664,7 @@ def test_failed_atomic_replace_preserves_prior_passage_cache(tmp_path: Path, mon
 
 
 def test_passage_cache_symlink_collision_is_rejected(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-collision-123456", "Collision"))
     cache = passage_search_cache_path(tmp_path)
     cache.parent.mkdir(parents=True)

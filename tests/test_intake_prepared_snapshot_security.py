@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import argparse
 import importlib.util
 import json
@@ -76,7 +78,7 @@ def test_consumed_prepared_token_cannot_be_replayed(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     prepared = intake._prepare_intake_snapshot(root, args)
     token = str(prepared["token"])
@@ -103,7 +105,7 @@ def test_expired_prepared_snapshot_rejects_without_workspace_write_and_cleans_up
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     prepared = intake._prepare_intake_snapshot(root, args)
     token = str(prepared["token"])
@@ -131,7 +133,7 @@ def test_symlink_swap_inside_prepared_stage_is_nofollow_and_zero_write(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     prepared = intake._prepare_intake_snapshot(root, args)
     token = str(prepared["token"])
@@ -160,7 +162,7 @@ def test_prepare_failure_leaves_no_workspace_or_external_stage(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     before = _snapshot(root)
     monkeypatch.setattr(
@@ -205,7 +207,7 @@ def test_source_mutation_during_preference_resolution_is_caught_by_second_revali
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     source = Path(args.source)
     prepared = intake._prepare_intake_snapshot(root, args)
@@ -226,7 +228,7 @@ def test_source_mutation_during_preference_resolution_is_caught_by_second_revali
 
     assert _snapshot(root / "kb") == before_kb
     assert not intake._prepared_dir(root, token).exists()
-    assert not list((root / "kb/units/blogs").glob("*/record.yaml"))
+    assert not list((root / "units/blogs").glob("*/record.yaml"))
 
 
 def test_snapshot_digest_enforces_file_entry_and_total_byte_budgets(

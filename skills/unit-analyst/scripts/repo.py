@@ -60,6 +60,7 @@ from research.core import (
     confirm_unit,
     load_runtime_preferences,
     locate_record,
+    kb_root,
     passage_search_cache_path,
     project_root,
     rel,
@@ -113,8 +114,8 @@ _PENDING_CHECKPOINT: ContextVar[tuple[Path, str, str, list[Path]] | None] = Cont
 
 def _index_targets(root: Path) -> list[Path]:
     return [
-        root / "kb" / "index.yaml",
-        root / "kb" / "index.md",
+        kb_root(root) / "index.yaml",
+        kb_root(root) / "index.md",
         topic_taxonomy_path(root),
         candidate_pools_path(root),
         passage_search_cache_path(root),
@@ -129,7 +130,12 @@ def _transactional(op_name: str, target_builder):
             active_token = _ACTIVE_MUTATION.set(True)
             checkpoint_token = _PENDING_CHECKPOINT.set(None)
             try:
-                with command_mutation(root, f"repo-analyst:{op_name}", targets):
+                with command_mutation(
+                    root,
+                    f"repo-analyst:{op_name}",
+                    targets,
+                    allow_operational_state=True,
+                ):
                     result = function(*args, **kwargs)
                 pending = _PENDING_CHECKPOINT.get()
             finally:

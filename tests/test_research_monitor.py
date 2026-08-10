@@ -53,7 +53,7 @@ from research.skill_validator import validate_skill
 
 @pytest.fixture(autouse=True)
 def _existing_monitor_program(tmp_path: Path) -> None:
-    (tmp_path / "kb" / "programs" / "program-vla").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "programs" / "program-vla").mkdir(parents=True, exist_ok=True)
 
 
 def _load_monitor_script():
@@ -134,7 +134,7 @@ def _monitor_selection(
 
 
 def _survey_subscription(tmp_path: Path, *, subscription_id: str = "monitor-survey") -> dict:
-    survey = tmp_path / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    survey = tmp_path / "synthesis" / "robot-learning" / "survey.yaml"
     survey.parent.mkdir(parents=True)
     survey.write_text("slug: robot-learning\nconsumer_binding: {}\n", encoding="utf-8")
     return {
@@ -154,7 +154,7 @@ def _survey_subscription(tmp_path: Path, *, subscription_id: str = "monitor-surv
 
 
 def _write_literature_stage(tmp_path: Path, stage_id: str = "source-search-vla") -> Path:
-    run_files = sorted((tmp_path / "kb/monitoring/runs").glob("*.yaml"))
+    run_files = sorted((tmp_path / "monitoring/runs").glob("*.yaml"))
     assert run_files
     binding = monitor_task_binding(load_run(tmp_path, run_files[-1].stem))
     spec = importlib.util.spec_from_file_location("monitor_literature_search_script", SEARCH_SCRIPT)
@@ -415,7 +415,7 @@ def test_monitor_request_field_mutation_rejects_stale_receipt_with_zero_subscrip
     field: str,
     mutation: object,
 ) -> None:
-    (tmp_path / "kb/programs/program-other").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "programs/program-other").mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(
         config_root(tmp_path) / "user-profile.yaml",
         {"personalization": {"research_focus": "robot learning"}},
@@ -436,13 +436,13 @@ def test_monitor_request_field_mutation_rejects_stale_receipt_with_zero_subscrip
             preference_selection_id=selection_id,
         )
 
-    assert list((tmp_path / "kb/monitoring/subscriptions").glob("*.yaml")) == []
+    assert list((tmp_path / "monitoring/subscriptions").glob("*.yaml")) == []
 
 
 def test_monitor_reference_and_canonical_preference_mutations_are_zero_write_stale_paths(
     tmp_path: Path,
 ) -> None:
-    program_state = tmp_path / "kb/programs/program-vla/state.yaml"
+    program_state = tmp_path / "programs/program-vla/state.yaml"
     write_yaml_if_changed(program_state, {"program_id": "program-vla", "status": "active"})
     profile_path = config_root(tmp_path) / "user-profile.yaml"
     write_yaml_if_changed(
@@ -652,7 +652,7 @@ def test_due_run_freezes_subscription_and_coalesces_missed_windows(tmp_path: Pat
     assert subscription["active_run_id"] == run["id"]
     assert subscription["revision"] == 2
     assert due_subscriptions(tmp_path, now=_time(31)) == []
-    assert len(list((tmp_path / "kb/monitoring/runs").glob("*.yaml"))) == 1
+    assert len(list((tmp_path / "monitoring/runs").glob("*.yaml"))) == 1
 
 
 def test_completed_run_advances_from_anchor_not_completion_time(tmp_path: Path) -> None:
@@ -694,7 +694,7 @@ def test_completed_run_advances_from_anchor_not_completion_time(tmp_path: Path) 
     assert updated["next_due_at"] == "2026-08-12T00:00:00+00:00"
     assert due_subscriptions(tmp_path, now=_time(31, 13)) == []
     events = yaml.safe_load(
-        (tmp_path / "kb/programs/program-vla/workflow/reporting-events.yaml").read_text(
+        (tmp_path / "programs/program-vla/workflow/reporting-events.yaml").read_text(
             encoding="utf-8"
         )
     )["items"]
@@ -755,7 +755,7 @@ def test_completed_outcome_stays_visible_until_a_bound_disposition(tmp_path: Pat
         "authorization_source": "",
     }
 
-    unit_record = tmp_path / "kb/units/papers/p-materialized/record.yaml"
+    unit_record = tmp_path / "units/papers/p-materialized/record.yaml"
     unit_record.parent.mkdir(parents=True)
     unit_record.write_text("id: p-materialized\nkind: paper\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="current user authorization"):
@@ -805,7 +805,7 @@ def test_materialized_target_requires_one_normalized_strict_snapshot(
     failure: str,
 ) -> None:
     unit_id = "p-materialized"
-    paper_record = tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    paper_record = tmp_path / "units" / "papers" / unit_id / "record.yaml"
     paper_record.parent.mkdir(parents=True)
     if failure == "malformed":
         paper_record.write_text(
@@ -814,7 +814,7 @@ def test_materialized_target_requires_one_normalized_strict_snapshot(
         )
     else:
         paper_record.write_text("id: p-materialized\nkind: paper\n", encoding="utf-8")
-        repo_record = tmp_path / "kb" / "units" / "repos" / unit_id / "record.yaml"
+        repo_record = tmp_path / "units" / "repos" / unit_id / "record.yaml"
         repo_record.parent.mkdir(parents=True)
         repo_record.write_text("id: p-materialized\nkind: repo\n", encoding="utf-8")
 
@@ -827,7 +827,7 @@ def test_materialized_target_rejects_replaced_unit_ancestor(
     monkeypatch,
 ) -> None:
     unit_id = "p-materialized"
-    unit_dir = tmp_path / "kb" / "units" / "papers" / unit_id
+    unit_dir = tmp_path / "units" / "papers" / unit_id
     unit_dir.mkdir(parents=True)
     (unit_dir / "record.yaml").write_text(
         "id: p-materialized\nkind: paper\ntitle: Safe title\n",
@@ -1106,7 +1106,7 @@ def test_two_concurrent_due_creators_produce_one_frozen_run(tmp_path: Path) -> N
             outcomes.append(str(exc))
 
     assert sum(item.endswith(".yaml") for item in outcomes) == 1
-    assert len(list((tmp_path / "kb/monitoring/runs").glob("*.yaml"))) == 1
+    assert len(list((tmp_path / "monitoring/runs").glob("*.yaml"))) == 1
     assert load_subscription(tmp_path, "monitor-vla")["revision"] == 2
 
 
@@ -1251,7 +1251,7 @@ def test_contradiction_requires_both_evidence_sides(tmp_path: Path) -> None:
 def test_artifact_reference_requires_digest_and_verbatim_quote(tmp_path: Path) -> None:
     subscription, run = _start_run(tmp_path)
     stage = _write_literature_stage(tmp_path)
-    artifact = tmp_path / "kb/units/papers/p-old/note.md"
+    artifact = tmp_path / "units/papers/p-old/note.md"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("The older result reports lower success.\n", encoding="utf-8")
     common = {
@@ -1446,7 +1446,7 @@ def test_finish_rejects_due_window_tamper_without_revision_change(tmp_path: Path
 def test_symlinked_subscription_and_reference_paths_are_rejected(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
-    subscriptions = tmp_path / "kb/monitoring/subscriptions"
+    subscriptions = tmp_path / "monitoring/subscriptions"
     subscriptions.parent.mkdir(parents=True)
     subscriptions.symlink_to(outside, target_is_directory=True)
     with pytest.raises(SystemExit, match="symlink|outside kb"):
@@ -1505,7 +1505,7 @@ def test_failed_completion_event_write_rolls_back_run_subscription_and_event(
     stage = _write_literature_stage(tmp_path)
     before_run = run_path(tmp_path, run["id"]).read_bytes()
     before_subscription = subscription_path(tmp_path, "monitor-vla").read_bytes()
-    event_path = tmp_path / "kb/programs/program-vla/workflow/reporting-events.yaml"
+    event_path = tmp_path / "programs/program-vla/workflow/reporting-events.yaml"
     assert not event_path.exists()
     original_write = monitoring.write_yaml_if_changed
 

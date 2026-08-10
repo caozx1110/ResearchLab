@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import os
 import re
@@ -44,7 +46,7 @@ def _load_script(skill: str, filename: str):
 def _workspace(base: Path) -> Path:
     root = base / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     write_yaml_if_changed(
         config_root(root) / "user-profile.yaml",
         {

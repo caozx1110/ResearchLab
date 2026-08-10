@@ -1,6 +1,7 @@
 """KB git repository management, checkpoints, and versioning state."""
 from __future__ import annotations
 
+import os
 import subprocess
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -13,6 +14,12 @@ from .common import (
     parse_iso_datetime,
     utc_now_iso,
     write_yaml_if_changed,
+    workspace_root_roles,
+)
+from .path_contract import (
+    TargetClass,
+    classify_data_relative_path,
+    logical_ref_to_physical_path,
 )
 from .paths import (
     ensure_kb_gitignore,
@@ -52,6 +59,7 @@ from .prefs import (
     ensure_workspace,
     load_runtime_preferences,
 )
+from .workspace_layout import WORKSPACE_LAYOUT_MARKER_RELATIVE
 
 def load_versioning_state(project_root: Path) -> dict[str, Any]:
     payload = load_yaml(versioning_state_path(project_root), default={})
@@ -259,7 +267,11 @@ def maybe_auto_checkpoint(
     state_path = versioning_state_path(project_root)
     with workspace_transaction_lock(project_root):
         _assert_no_incomplete_root(project_root)
-        with operation_lock(project_root, state_path):
+        with operation_lock(
+            project_root,
+            state_path,
+            allowed_target_classes=(TargetClass.OPERATIONAL_STATE,),
+        ):
             if trigger == "browser-save":
                 state = load_versioning_state(project_root)
                 last_commit_at = parse_iso_datetime(state.get("last_auto_commit_at"))
@@ -288,6 +300,7 @@ def maybe_auto_checkpoint(
                     undoable=False,
                     operation_role="bookkeeping",
                     coordination_scope="workspace-exclusive",
+                    allowed_target_classes=(TargetClass.OPERATIONAL_STATE,),
                 ):
                     state = load_versioning_state(project_root)
                     state["last_auto_commit_at"] = utc_now_iso()
@@ -337,13 +350,12 @@ def _normalize_git_paths(
     for raw_path in target_paths:
         if not str(raw_path).strip():
             raise SystemExit("Checkpoint target paths cannot contain empty values.")
-        path = Path(raw_path)
-        if not path.is_absolute():
-            path = (project_root / path) if path.parts[:1] == ("kb",) else (repo / path)
         try:
-            relative_path = _target_key(project_root, path)
+            relative_path = _git_relative_path(project_root, raw_path)
         except SystemExit as exc:
-            raise SystemExit("Checkpoint target must be a safe lexical path inside kb/.") from exc
+            raise SystemExit("Checkpoint target must be an explicitly owned workspace path.") from exc
+        if not relative_path:
+            continue
         if relative_path in {"", "."}:
             raise SystemExit("Checkpoint target cannot be the whole kb/ repository.")
         if relative_path == JOURNAL_DIRNAME or relative_path.startswith(f"{JOURNAL_DIRNAME}/"):
@@ -354,6 +366,70 @@ def _normalize_git_paths(
             continue
         normalized.add(relative_path)
     return sorted(normalized)
+
+
+def _git_path_is_tracked(project_root: Path, relative_path: str) -> bool:
+    if not kb_repo_exists(project_root):
+        return False
+    result = _run_git(
+        project_root,
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        _literal_git_pathspec(relative_path),
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _git_relative_path(
+    project_root: Path,
+    raw_path: Path | str,
+    *,
+    allow_untracked_root_agents: bool = False,
+) -> str:
+    """Map one explicit physical/logical target to a Git-owned root path."""
+
+    repo = kb_repo_path(project_root)
+    path = Path(raw_path)
+    if not path.is_absolute():
+        if path.parts[:1] == ("kb",):
+            try:
+                path = logical_ref_to_physical_path(
+                    workspace_root_roles(project_root).roots,
+                    path.as_posix(),
+                )
+            except ValueError as exc:
+                raise SystemExit("Checkpoint logical target is invalid.") from exc
+        else:
+            path = repo / path
+    if ".." in path.parts:
+        raise SystemExit("Checkpoint target contains parent traversal.")
+    lexical_repo = Path(os.path.abspath(os.fspath(repo)))
+    lexical_target = Path(os.path.abspath(os.fspath(path)))
+    try:
+        relative = lexical_target.relative_to(lexical_repo)
+    except ValueError as exc:
+        raise SystemExit("Checkpoint target escaped the workspace repository.") from exc
+    if relative == Path("."):
+        raise SystemExit("Checkpoint target cannot be the whole workspace repository.")
+    relative_path = relative.as_posix()
+    if relative_path == WORKSPACE_LAYOUT_MARKER_RELATIVE.as_posix():
+        return relative_path
+    try:
+        target_class = classify_data_relative_path(relative_path)
+    except ValueError as exc:
+        raise SystemExit("Checkpoint target has an invalid ownership class.") from exc
+    if target_class is TargetClass.CANONICAL_ARTIFACT:
+        return relative_path
+    if target_class is TargetClass.OPERATIONAL_STATE:
+        return ""
+    if relative_path == "AGENTS.md" and (
+        allow_untracked_root_agents
+        or _git_path_is_tracked(project_root, relative_path)
+    ):
+        return relative_path
+    raise SystemExit("Checkpoint target is reserved, operational, or unknown.")
 
 
 def dirty_kb_paths(project_root: Path) -> list[Path]:
@@ -377,11 +453,15 @@ def dirty_kb_paths(project_root: Path) -> list[Path]:
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "git status query failed"
             raise SystemExit(detail)
-        relative_paths.update(
-            item
-            for item in result.stdout.split("\0")
-            if item and not is_private_diagnostic_path(item)
-        )
+        for item in result.stdout.split("\0"):
+            if not item or is_private_diagnostic_path(item):
+                continue
+            try:
+                relative_path = _git_relative_path(project_root, item)
+            except SystemExit:
+                continue
+            if relative_path:
+                relative_paths.add(relative_path)
     repo = kb_repo_path(project_root)
     return [repo / relative_path for relative_path in sorted(relative_paths)]
 

@@ -23,6 +23,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .common import exclusive_file_lock
 from .journal import current_operation_id
+from .paths import kb_root, rel
 
 
 REVIEW_BATCH_SCHEMA = "kb-obsidian-review-batch/v1"
@@ -38,9 +39,9 @@ MAX_BATCH_ITEMS = 20
 STRICT_TTL_SECONDS = 24 * 60 * 60
 MIN_TTL_SECONDS = 60 * 60
 MAX_TTL_SECONDS = 168 * 60 * 60
-_RUNTIME_BATCHES_DIR = "kb/.runtime/review-batches"
-_SOURCE_SNAPSHOTS_DIR = "kb/.runtime/review-snapshots"
-_ANNOTATIONS_DIR = "kb/obsidian/annotations"
+_RUNTIME_BATCHES_DIR = ".runtime/review-batches"
+_SOURCE_SNAPSHOTS_DIR = ".runtime/review-snapshots"
+_ANNOTATIONS_DIR = "obsidian/annotations"
 _SLOT_MARKER_RE = re.compile(r"^<!-- kb-review-slot:([0-9a-f]{24}) -->$")
 _BATCH_MARKER_RE = re.compile(r"^<!-- kb-review-batch:([0-9a-f]{64}) -->$")
 _CHECKBOX_RE = re.compile(r"^- \[([ xX])\] (确认|拒绝|暂缓)$")
@@ -127,7 +128,7 @@ def _open_safe_directory(project_root: Path, relative: str, *, create: bool) -> 
     """
     flags = _directory_flags()
     try:
-        descriptor = os.open(project_root.resolve(), flags)
+        descriptor = os.open(project_root.absolute(), flags)
     except OSError as exc:
         raise ReviewBatchError("tampered_or_unknown", "review workspace is unavailable") from exc
     try:
@@ -688,7 +689,7 @@ def create_obsidian_review_batch(
     payload["batch_ref"] = batch_ref
     sheet_text = _render_sheet(batch_ref, str(payload["expires_at"]), slots, normalized_displays)
     sheet_name = f"Pending Review {batch_ref[:12]}.md"
-    root = project_root.resolve()
+    root = kb_root(project_root)
     registry_path = root / _RUNTIME_BATCHES_DIR / f"{batch_ref}.json"
     sheet_path = root / _ANNOTATIONS_DIR / sheet_name
     try:
@@ -718,7 +719,7 @@ def create_obsidian_review_batch(
         raise
     return {
         "batch_ref": batch_ref,
-        "sheet_relative_path": sheet_path.relative_to(project_root.resolve()).as_posix(),
+        "sheet_relative_path": rel(project_root, sheet_path),
         "expires_at": str(payload["expires_at"]),
         "item_count": len(normalized_items),
         "item_limit": effective_limit,
@@ -792,7 +793,7 @@ def _load_batch(project_root: Path, batch_ref: str, *, now: float | None = None)
 
 
 def _sheet_path(project_root: Path, batch_ref: str) -> Path:
-    return project_root.resolve() / _ANNOTATIONS_DIR / f"Pending Review {batch_ref[:12]}.md"
+    return kb_root(project_root) / _ANNOTATIONS_DIR / f"Pending Review {batch_ref[:12]}.md"
 
 
 def _parse_sheet_decisions(text: str, payload: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
@@ -851,7 +852,7 @@ def preview_obsidian_review_batch(
     now: float | None = None,
 ) -> ReviewBatchPreview:
     """Pure-read preview of checkbox intents; never consumes the batch."""
-    root = project_root.resolve()
+    root = kb_root(project_root)
     payload = _load_batch(root, batch_ref, now=now)
     sheet_path = _sheet_path(root, batch_ref)
     try:
@@ -875,7 +876,7 @@ def preview_obsidian_review_batch(
         ),
         decisions=decisions,
         review_items=tuple(dict(item) for item in payload["review_items"]),
-        sheet_relative_path=sheet_path.relative_to(root).as_posix(),
+        sheet_relative_path=rel(project_root, sheet_path),
         expires_at=str(payload.get("expires_at") or ""),
     )
 
@@ -908,7 +909,7 @@ def preflight_obsidian_review_batch(
 
 def obsidian_review_batch_runtime_targets(project_root: Path, batch_ref: str) -> tuple[Path, Path, Path]:
     """Return the exact mutable registry files after validating an unused batch."""
-    root = project_root.resolve()
+    root = kb_root(project_root)
     payload = _load_batch(root, batch_ref)
     batch_path = root / _RUNTIME_BATCHES_DIR / f"{batch_ref}.json"
     source_path = root / _SOURCE_SNAPSHOTS_DIR / f"{payload['source_snapshot_token']}.json"
@@ -917,7 +918,7 @@ def obsidian_review_batch_runtime_targets(project_root: Path, batch_ref: str) ->
 
 def _consume_obsidian_review_batch_locked(project_root: Path, batch_ref: str) -> tuple[Path, Path, Path]:
     """Consume both one-time registries inside the caller's root transaction."""
-    root = project_root.resolve()
+    root = kb_root(project_root)
     if not current_operation_id(root):
         raise ReviewBatchError("tampered_or_unknown", "review batch consumption requires a root transaction")
     payload = _load_batch(root, batch_ref)
@@ -967,8 +968,8 @@ def _consume_obsidian_review_batch_locked(project_root: Path, batch_ref: str) ->
 
 def consume_obsidian_review_batch(project_root: Path, batch_ref: str) -> tuple[Path, Path, Path]:
     """Consume an Obsidian batch while excluding source-snapshot GC races."""
-    root = project_root.resolve()
-    lock_path = root / "kb/.runtime/review-snapshots.lock"
+    root = kb_root(project_root)
+    lock_path = root / ".runtime/review-snapshots.lock"
     with exclusive_file_lock(lock_path):
         return _consume_obsidian_review_batch_locked(root, batch_ref)
 

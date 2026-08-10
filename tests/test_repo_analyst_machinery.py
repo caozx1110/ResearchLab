@@ -21,6 +21,8 @@ repo_root from the record source and loads cited files by relative path.
 """
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -352,7 +354,7 @@ def _run_cli(repo, monkeypatch, root: Path, *argv: str) -> int:
 
 def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _load_repo_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     mini = _make_mini_repo(tmp_path)
     repo_id = "r-e2e-000001"
     record = _repo_record(repo_id, mini)

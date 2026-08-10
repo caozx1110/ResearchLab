@@ -10,6 +10,8 @@ from repo_paths import REPO_ROOT
 
 from research.common import skill_script_for_command
 from research.core import project_root, skills_root
+from research.prefs import ensure_workspace
+from research.workspace_layout import initialize_workspace_layout
 
 
 def _project_root() -> Path:
@@ -94,10 +96,11 @@ def test_write_command_root_and_env_override_symlinked_agents_target(tmp_path: P
         check=False,
     )
     assert root_result.returncode == 0, root_result.stderr
-    assert (sandbox_root / "kb" / "index.yaml").exists()
-    assert not (symlink_target / "kb").exists()
+    assert (sandbox_root / "index.yaml").exists()
+    assert not (sandbox_root / "kb").exists()
+    assert not (symlink_target / "units").exists()
 
-    (sandbox_root / "kb").rename(sandbox_root / "kb-root-flag")
+    (sandbox_root / "index.yaml").unlink()
     env_result = subprocess.run(
         [sys.executable, str(script), "init"],
         cwd=sandbox_root,
@@ -107,8 +110,8 @@ def test_write_command_root_and_env_override_symlinked_agents_target(tmp_path: P
         check=False,
     )
     assert env_result.returncode == 0, env_result.stderr
-    assert (sandbox_root / "kb" / "index.yaml").exists()
-    assert not (symlink_target / "kb").exists()
+    assert (sandbox_root / "index.yaml").exists()
+    assert not (symlink_target / "units").exists()
 
 
 def test_kb_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -135,6 +138,7 @@ def test_config_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, m
     cwd = tmp_path / "elsewhere"
     root.mkdir()
     cwd.mkdir()
+    initialize_workspace_layout(root, _project_root())
     monkeypatch.chdir(cwd)
     monkeypatch.setattr(sys, "argv", ["config.py", "--root", str(root), "init"])
 
@@ -159,7 +163,10 @@ def test_owner_json_and_write_success_hide_resolved_paths(tmp_path: Path) -> Non
         / "eval_research_value.py"
     )
     eval_root = tmp_path / "eval-workspace"
-    dataset = eval_root / "kb" / "eval" / "research-value" / "dataset" / "smoke.yaml"
+    eval_root.mkdir()
+    initialize_workspace_layout(eval_root, real_root)
+    ensure_workspace(eval_root)
+    dataset = eval_root / "eval" / "research-value" / "dataset" / "smoke.yaml"
     dataset.parent.mkdir(parents=True)
     dataset.write_text("program_id: smoke\nquestions: []\n", encoding="utf-8")
     evaluation = subprocess.run(
@@ -182,12 +189,15 @@ def test_owner_json_and_write_success_hide_resolved_paths(tmp_path: Path) -> Non
         / "create_retrospective.py"
     )
     project = tmp_path / "retrospective-workspace"
+    project.mkdir()
+    initialize_workspace_layout(project, real_root)
+    ensure_workspace(project)
     retrospective = subprocess.run(
         [
             sys.executable,
             str(retrospective_script),
             "--root",
-            str(project / "kb" / "memory" / "skill-evolution"),
+            str(project / "memory" / "skill-evolution"),
             "--slug",
             "public-output",
             "--task-summary",
@@ -208,6 +218,15 @@ def test_kb_git_init_reports_state_without_repository_path(tmp_path: Path) -> No
     script = real_root / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     root = tmp_path / "git-workspace"
     root.mkdir()
+    initialized = subprocess.run(
+        [sys.executable, str(script), "--root", str(root), "init"],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": str(real_root / "runtime" / "lib")},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert initialized.returncode == 0, initialized.stderr
     result = subprocess.run(
         [sys.executable, str(script), "--root", str(root), "git-init", "--no-initial-commit"],
         cwd=root,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import copy
 import importlib.util
 import json
@@ -36,7 +38,7 @@ def _workspace(tmp_path: Path, idea) -> Path:
     root = tmp_path / "workspace"
     (root / ".agents").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     write_yaml_if_changed(
         config_root(root) / "user-profile.yaml",
         {

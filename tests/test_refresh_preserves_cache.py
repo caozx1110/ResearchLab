@@ -32,7 +32,7 @@ def _load(mod_path: Path, name: str):
 
 def _make_unit(tmp: Path, pages: int) -> tuple[Path, str]:
     pid = "p-fa-test-00000000"
-    ud = tmp / "kb" / "units" / "papers" / pid
+    ud = tmp / "units" / "papers" / pid
     ud.mkdir(parents=True)
     chunks = [
         {"label": f"src.pdf:page-{i}", "text": f"page {i} body text sentence.", "locator_kind": "page", "locator": f"page={i}"}

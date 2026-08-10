@@ -89,7 +89,7 @@ _SAFE_IDENTIFIER_RE = re.compile(r"[^a-z0-9_.-]+")
 _AUTOMATIC_RUNTIME_CAPTURE = object()
 
 _DETAIL_SCHEMA = "skill-diagnostic-detail/v1"
-_DETAIL_DIRECTORY = "kb/memory/skill-evolution/.private/details"
+_DETAIL_DIRECTORY = "memory/skill-evolution/.private/details"
 _DETAIL_REF_PREFIX = "memory/skill-evolution/.private/details"
 _DETAIL_MAX_BYTES = 64 * 1024
 _DETAIL_HISTORY_LIMIT = 5

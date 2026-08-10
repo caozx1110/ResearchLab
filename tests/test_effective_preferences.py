@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import json
 from pathlib import Path
 
@@ -200,7 +202,7 @@ from research.prefs import default_runtime_preferences, ensure_workspace
 def _configured_workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     write_yaml_if_changed(
         config_root(root) / "user-profile.yaml",
         {

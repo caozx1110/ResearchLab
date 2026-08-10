@@ -61,7 +61,7 @@ def _record(root: Path, unit_id: str, title: str, *, topic: str = "robotics") ->
 
 def _write_program(root: Path, *unit_ids: str) -> None:
     write_yaml_if_changed(
-        root / "kb/programs/humanoid-vla/state.yaml",
+        root / "programs/humanoid-vla/state.yaml",
         {
             "id": "humanoid-vla-state",
             "program_id": "humanoid-vla",
@@ -77,7 +77,7 @@ def _write_program(root: Path, *unit_ids: str) -> None:
 
 def _write_taxonomy(root: Path) -> None:
     write_yaml_if_changed(
-        root / "kb/config/topic-taxonomy.yaml",
+        root / "config/topic-taxonomy.yaml",
         {
             "id": "topic-taxonomy",
             "topics": {"robotics": {"id": "robotics", "aliases": ["Robotics"]}},
@@ -87,7 +87,7 @@ def _write_taxonomy(root: Path) -> None:
 
 
 def _journal_entries(root: Path) -> list[Path]:
-    return sorted((root / "kb/.journal").glob("*.yaml"))
+    return sorted((root / ".journal").glob("*.yaml"))
 
 
 def test_link_records_stores_one_forward_edge_with_block_locator(tmp_path: Path) -> None:
@@ -193,10 +193,10 @@ def test_projector_builds_native_pages_bases_and_precise_backlinks(tmp_path: Pat
     assert manifest["schema"] == "research-kb-obsidian/v1"
     assert manifest["renderer_revision"] == OBSIDIAN_RENDERER_REVISION
     assert manifest["record_count"] == 2
-    assert (tmp_path / "kb/obsidian/inbox").is_dir()
-    assert (tmp_path / "kb/obsidian/annotations").is_dir()
-    assert not (tmp_path / "kb/.obsidian").exists()
-    assert "obsidian/managed/" in (tmp_path / "kb/.gitignore").read_text(encoding="utf-8")
+    assert (tmp_path / "obsidian/inbox").is_dir()
+    assert (tmp_path / "obsidian/annotations").is_dir()
+    assert not (tmp_path / ".obsidian").exists()
+    assert "obsidian/managed/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert record_path(tmp_path, "paper", alpha["id"]).read_bytes() == canonical_before[alpha["id"]]
     assert record_path(tmp_path, "paper", beta["id"]).read_bytes() == canonical_before[beta["id"]]
 
@@ -230,7 +230,7 @@ def test_bases_are_byte_stable_after_obsidian_1_12_save_normalization(tmp_path: 
 
 def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Path) -> None:
     paper = _record(tmp_path, "p-paper-12345678", "Readable Paper")
-    document = tmp_path / "kb/units/papers/p-paper-12345678/source/document.md"
+    document = tmp_path / "units/papers/p-paper-12345678/source/document.md"
     document.parent.mkdir(parents=True, exist_ok=True)
     document.write_text("# Full paper\n\n^source-page-1\n\nReadable source.\n", encoding="utf-8")
     source_map = document.parent / "source-map.yaml"
@@ -410,7 +410,7 @@ def test_projection_preserves_markdown_literals_and_keeps_property_links_on_one_
 def test_unit_and_home_put_reading_health_and_next_action_before_technical_metadata(tmp_path: Path) -> None:
     record = _record(tmp_path, "p-paper-12345678", "Readable Paper")
     record["summary"] = "Lightweight paper intake for `Readable Paper`."
-    document = tmp_path / "kb/units/papers/p-paper-12345678/source/document.md"
+    document = tmp_path / "units/papers/p-paper-12345678/source/document.md"
     document.parent.mkdir(parents=True, exist_ok=True)
     document.write_text("# Paper\n\nReadable.\n", encoding="utf-8")
     conversion = document.parent / "conversion.yaml"
@@ -505,7 +505,7 @@ def test_empty_summary_fallback_matches_analysis_stage(
     expected_summary: str,
 ) -> None:
     write_yaml_if_changed(
-        tmp_path / "kb/config/user-profile.yaml",
+        tmp_path / "config/user-profile.yaml",
         {"preferences": {"language_preference": "zh-CN"}},
     )
     record = default_record("repo", title="Stage-consistent summary", maturity="complete")
@@ -546,7 +546,7 @@ def test_empty_summary_fallback_matches_analysis_stage(
 
 def test_chinese_profile_localizes_projection_and_repo_quick_access(tmp_path: Path) -> None:
     write_yaml_if_changed(
-        tmp_path / "kb/config/user-profile.yaml",
+        tmp_path / "config/user-profile.yaml",
         {"preferences": {"language_preference": "zh-CN"}},
     )
     record = default_record("repo", title="Click", maturity="lightweight")
@@ -554,7 +554,7 @@ def test_chinese_profile_localizes_projection_and_repo_quick_access(tmp_path: Pa
     record["status"] = "active"
     record["confirmation_status"] = "auto_confirmed"
     record["needs_human_confirmation"] = False
-    snapshot = tmp_path / "kb/units/repos/r-click-12345678/source/click"
+    snapshot = tmp_path / "units/repos/r-click-12345678/source/click"
     snapshot.mkdir(parents=True)
     (snapshot / "README.md").write_text("# Click\n", encoding="utf-8")
     (snapshot / "pyproject.toml").write_text("[project]\nname='click'\n", encoding="utf-8")
@@ -678,7 +678,7 @@ def test_status_fails_for_missing_target_and_unresolved_locator(tmp_path: Path) 
     ]
     write_yaml_if_changed(record_path(tmp_path, "paper", alpha["id"]), alpha)
     write_yaml_if_changed(
-        tmp_path / "kb/programs/test-program/state.yaml",
+        tmp_path / "programs/test-program/state.yaml",
         {"program_id": "test-program", "active_unit_ids": ["p-missing-active-12345678"]},
     )
 
@@ -723,7 +723,7 @@ def test_update_preserves_human_notes_cleans_only_manifest_owned_stale_files(tmp
     alpha = _record(tmp_path, "p-alpha-12345678", "Alpha")
     _record(tmp_path, "p-beta-12345678", "Beta")
     update_obsidian_projection(tmp_path)
-    annotation = tmp_path / "kb/obsidian/annotations/my-note.md"
+    annotation = tmp_path / "obsidian/annotations/my-note.md"
     annotation.write_text("Human note [[obsidian/managed/units/p-alpha-12345678]].\n", encoding="utf-8")
 
     record_path(tmp_path, "paper", "p-beta-12345678").unlink()
@@ -778,10 +778,10 @@ def test_update_rebuilds_manifest_owned_regular_base_from_renderer(
     renderer_bytes = base.read_bytes()
     canonical_path = record_path(tmp_path, "paper", record["id"])
     canonical_before = canonical_path.read_bytes()
-    annotation = tmp_path / "kb/obsidian/annotations/manual.md"
+    annotation = tmp_path / "obsidian/annotations/manual.md"
     annotation.write_text("human note\n", encoding="utf-8")
     annotation_before = annotation.read_bytes()
-    obsidian_config = tmp_path / "kb/.obsidian/preferences.json"
+    obsidian_config = tmp_path / ".obsidian/preferences.json"
     obsidian_config.parent.mkdir()
     obsidian_config.write_text('{"theme":"system"}\n', encoding="utf-8")
     config_before = obsidian_config.read_bytes()
@@ -932,7 +932,7 @@ def test_post_intake_refresh_managed_drift_preserves_canonical_success_and_proje
     assert "资料已轻量加入知识库" in public.out
     assert "Obsidian 视图暂未刷新" in public.err
     assert "human-managed-drift" not in public.out + public.err
-    protocol = load_yaml(tmp_path / "kb/.runtime/drift-refresh.json", default={})
+    protocol = load_yaml(tmp_path / ".runtime/drift-refresh.json", default={})
     assert protocol["status"] == "needs_user_input"
     assert protocol["details"]["obsidian_refresh"] == {
         "failure_kind": "safety_check_failed",
@@ -945,7 +945,7 @@ def test_update_refuses_unowned_generated_file_but_never_scans_human_area(tmp_pa
     update_obsidian_projection(tmp_path)
     unowned = obsidian_managed_root(tmp_path) / "manual.md"
     unowned.write_text("must survive\n", encoding="utf-8")
-    annotation = tmp_path / "kb/obsidian/annotations/manual.md"
+    annotation = tmp_path / "obsidian/annotations/manual.md"
     annotation.write_text("human annotation\n", encoding="utf-8")
 
     report = obsidian_projection_status(tmp_path)
@@ -957,7 +957,7 @@ def test_update_refuses_unowned_generated_file_but_never_scans_human_area(tmp_pa
 
 
 def test_status_reports_unowned_managed_content_before_first_projection(tmp_path: Path) -> None:
-    unowned = tmp_path / "kb/obsidian/managed/manual.md"
+    unowned = tmp_path / "obsidian/managed/manual.md"
     unowned.parent.mkdir(parents=True)
     unowned.write_text("must survive\n", encoding="utf-8")
 
@@ -1008,7 +1008,7 @@ def test_canonical_symlinks_fail_closed_without_reading_or_writing_targets(tmp_p
     assert not (outside / "obsidian").exists()
 
     safe_root = tmp_path / "safe-workspace"
-    unit = safe_root / "kb/units/papers/p-linked-12345678"
+    unit = safe_root / "units/papers/p-linked-12345678"
     unit.mkdir(parents=True)
     outside_record = tmp_path / "outside-record.yaml"
     outside_record.write_text("id: p-linked-12345678\nkind: paper\ntitle: Outside\n", encoding="utf-8")
@@ -1057,8 +1057,8 @@ def test_projection_update_is_undoable_without_touching_canonical_record(tmp_pat
     undo_last_operation(tmp_path)
 
     assert not obsidian_managed_root(tmp_path).exists()
-    assert not (tmp_path / "kb/obsidian/inbox").exists()
-    assert not (tmp_path / "kb/obsidian/annotations").exists()
+    assert not (tmp_path / "obsidian/inbox").exists()
+    assert not (tmp_path / "obsidian/annotations").exists()
     assert canonical_path.read_bytes() == canonical_before
 
 

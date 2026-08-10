@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -29,7 +31,7 @@ def test_idea_select_keeps_content_confirmation_pending(tmp_path: Path, monkeypa
     idea = _load_idea_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     record = default_record("idea", title="Selectable Idea", maturity="lightweight", source={"original_uri": "discussion"})
     record["id"] = "i-selectable-123456"
     record["status"] = "pending"

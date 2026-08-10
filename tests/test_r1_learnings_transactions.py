@@ -43,7 +43,7 @@ def _file_snapshot(root: Path) -> dict[str, bytes]:
 
 
 def _journal_entries(root: Path, op_type: str) -> list[dict]:
-    journal_root = root / "kb" / ".journal"
+    journal_root = root / ".journal"
     entries = [
         entry
         for entry in (load_yaml(path, default={}) for path in journal_root.glob("*.yaml"))

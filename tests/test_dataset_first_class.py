@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.machinery
 import importlib.util
 import subprocess
@@ -117,7 +119,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
         ".agents/skills/unit-analyst/scripts/dataset.py",
         "dataset_analyst_checkpoint_fill",
     )
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     record = default_record("dataset", title="Checkpoint Dataset", maturity="lightweight")
     dataset_id = record["id"]
     record_file = write_record(tmp_path, record)
@@ -192,7 +194,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
 
 
 def test_repo_dataset_migration_is_dry_run_then_journaled_and_undoable(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     repo = default_record(
         "repo",
         title="HIW-500",
@@ -218,7 +220,7 @@ def test_repo_dataset_migration_is_dry_run_then_journaled_and_undoable(tmp_path:
         encoding="utf-8",
     )
     parse_cache_bytes = parse_cache.read_bytes()
-    program_state = tmp_path / "kb/programs/humanoid-review/state.yaml"
+    program_state = tmp_path / "programs/humanoid-review/state.yaml"
     program_state.parent.mkdir(parents=True)
     program_state.write_text(
         yaml.safe_dump({"program_id": "humanoid-review", "active_unit_ids": [repo["id"]]}),
@@ -268,7 +270,7 @@ def test_repo_html_snapshot_is_not_a_structure_scan_target(tmp_path: Path) -> No
             "backup_kind": "url",
         },
     )
-    snapshot = tmp_path / "kb/units/repos/r-remote/source/snapshot.md"
+    snapshot = tmp_path / "units/repos/r-remote/source/snapshot.md"
     snapshot.parent.mkdir(parents=True)
     snapshot.write_text("dataset card", encoding="utf-8")
 

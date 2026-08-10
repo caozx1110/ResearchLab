@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 from pathlib import Path
 
 from research.common import load_yaml, write_yaml_if_changed
@@ -34,7 +36,7 @@ def _sample_record(unit_id: str, kind: str, title: str) -> dict:
 
 
 def test_build_index_scans_records_once(tmp_path: Path, monkeypatch) -> None:
-    core.ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _sample_record("p-one-123456", "paper", "One Paper"))
 
     original_iter_records = core.iter_records
@@ -53,7 +55,7 @@ def test_build_index_scans_records_once(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_build_index_output_stays_byte_stable(tmp_path: Path, monkeypatch) -> None:
-    core.ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _sample_record("p-alpha-123456", "paper", "Alpha Paper"))
     _write_record(tmp_path, _sample_record("r-beta-123456", "repo", "Beta Repo"))
     monkeypatch.setattr(index_mod, "utc_now_iso", lambda: "2026-07-04T00:00:00+00:00")

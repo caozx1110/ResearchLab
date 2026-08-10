@@ -15,6 +15,7 @@ from typing import Any
 from .common import load_yaml, utc_now_iso
 from .confirm import has_complete_confirmation_receipt
 from .evidence import record_external_source_contract
+from .paths import kb_root
 from .records import (
     CanonicalUnitSnapshot,
     iter_records,
@@ -157,7 +158,7 @@ def survey_artifact_path(root: Path, slug: str, mode: str = "survey") -> Path:
         or clean_mode not in {"survey", "review", "taxonomy"}
     ):
         raise ValueError("survey identity is not canonical")
-    return root / "kb" / "synthesis" / clean_slug / f"{clean_mode}.yaml"
+    return kb_root(root) / "synthesis" / clean_slug / f"{clean_mode}.yaml"
 
 
 def survey_source_roots(root: Path, record: dict[str, Any], artifact_path: Path) -> dict[str, Path]:
@@ -167,7 +168,7 @@ def survey_source_roots(root: Path, record: dict[str, Any], artifact_path: Path)
     verification_root = trusted_project_path(
         root,
         artifact_path.parent,
-        allowed_root=root / "kb" / "synthesis",
+        allowed_root=kb_root(root) / "synthesis",
         require="dir",
     )
     return trusted_claim_source_roots(root, record, verification_root=verification_root)
@@ -318,12 +319,12 @@ def composite_survey_state_path(root: Path, *, slug: str, composite_id: str) -> 
     for label, value in (("slug", safe_slug), ("composite id", safe_id)):
         if not value or Path(value).name != value or value in {".", ".."}:
             raise ValueError(f"composite survey {label} is not canonical")
-    return root / "kb" / "synthesis" / safe_slug / "composite-requests" / f"{safe_id}.yaml"
+    return kb_root(root) / "synthesis" / safe_slug / "composite-requests" / f"{safe_id}.yaml"
 
 
 def pending_composite_survey_states(root: Path) -> list[dict[str, Any]]:
     """Discover current durable survey routes without mutating or interpreting them."""
-    synthesis = root / "kb" / "synthesis"
+    synthesis = kb_root(root) / "synthesis"
     if not synthesis.exists():
         return []
     if synthesis.is_symlink() or not synthesis.is_dir():
@@ -576,7 +577,7 @@ def _trusted_artifact(
     canonical = trusted_project_path(
         root,
         path,
-        allowed_root=root / "kb",
+        allowed_root=kb_root(root),
         require="file",
     )
     return {
@@ -647,7 +648,7 @@ def _normalized_unit_refs(value: object) -> list[dict[str, str]]:
 def _record_for_ref(root: Path, unit: dict[str, str]) -> tuple[dict[str, Any], Path]:
     try:
         record, path = locate_record(root, unit["id"], kind=unit["kind"], fuzzy=False)
-        path = trusted_project_path(root, path, allowed_root=root / "kb" / "units", require="file")
+        path = trusted_project_path(root, path, allowed_root=kb_root(root) / "units", require="file")
     except (OSError, SystemExit, ValueError) as exc:
         raise ValueError(f"canonical unit is missing or unsafe: {unit['kind']}/{unit['id']}") from exc
     if str(record.get("id") or "") != unit["id"] or str(record.get("kind") or "") != unit["kind"]:
@@ -665,7 +666,7 @@ def _search_stage(root: Path, stage_id: object) -> tuple[dict[str, Any], Path]:
         path = trusted_project_path(
             root,
             search_stage_path(root, safe_id),
-            allowed_root=root / "kb" / "synthesis" / "source-search",
+            allowed_root=kb_root(root) / "synthesis" / "source-search",
             require="file",
         )
         _stage_search_results_unlocked(
@@ -717,7 +718,7 @@ def _survey_for_ref(root: Path, ref: dict[str, Any]) -> tuple[dict[str, Any], Pa
         path = trusted_project_path(
             root,
             survey_artifact_path(root, slug, mode),
-            allowed_root=root / "kb" / "synthesis",
+            allowed_root=kb_root(root) / "synthesis",
             require="file",
         )
     except ValueError as exc:
@@ -1012,7 +1013,7 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
             event_facts: list[dict[str, str]] = []
             for program_id in ref["program_ids"]:
                 events_path = program_reporting_events_path(root, program_id)
-                events_path = trusted_project_path(root, events_path, allowed_root=root / "kb" / "programs", require="file")
+                events_path = trusted_project_path(root, events_path, allowed_root=kb_root(root) / "programs", require="file")
                 event_doc = load_yaml(events_path, default={})
                 events = [item for item in event_doc.get("items", []) if isinstance(item, dict)] if isinstance(event_doc, dict) else []
                 matches = [

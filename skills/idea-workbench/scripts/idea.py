@@ -3817,6 +3817,7 @@ def main() -> int:
             f"idea-workbench:{args.command}",
             targets,
             preflight=lambda: _idea_transaction_preflight(args, root),
+            allow_operational_state=True,
         ):
             result = _dispatch(args, root)
         pending = _PENDING_CHECKPOINT.get()

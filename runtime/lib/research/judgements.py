@@ -25,6 +25,7 @@ from .paper_draft_runtime import (
     paper_draft_section_currentness_violations,
     paper_draft_section_path,
 )
+from .paths import kb_root
 from .confirm import has_complete_confirmation_receipt
 from .evidence import (
     CONFIRMABLE_CONTENT_FIELDS,
@@ -211,7 +212,7 @@ def _safe_relative_path(root: Path, path: Path) -> str:
     resolved = trusted_project_path(
         resolved_root,
         path,
-        allowed_root=resolved_root / "kb",
+        allowed_root=kb_root(resolved_root),
         require="file",
     )
     return resolved.relative_to(resolved_root).as_posix()
@@ -237,21 +238,21 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
     expected_owner = UNIT_OWNER_BY_KIND.get(kind)
     expected_path: Path | None = None
     if expected_owner:
-        expected_path = root / "kb" / "units" / UNIT_DIR_BY_KIND[kind] / subject_id / "record.yaml"
+        expected_path = kb_root(root) / "units" / UNIT_DIR_BY_KIND[kind] / subject_id / "record.yaml"
     elif kind == "program_decision":
         program_id = _text(record.get("program_id"))
         expected_owner = "research-orchestrator"
         if not program_id:
             violations.append("program decision has no program_id")
         else:
-            expected_path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+            expected_path = kb_root(root) / "programs" / program_id / "workflow" / "decisions.yaml"
     elif kind == "idea_discussion_conclusion":
         idea_id = _text(record.get("idea_id"))
         expected_owner = "idea-workbench"
         if not idea_id:
             violations.append("discussion conclusion has no idea_id")
         else:
-            expected_path = root / "kb" / "units" / "ideas" / idea_id / "discussion-judgements.yaml"
+            expected_path = kb_root(root) / "units" / "ideas" / idea_id / "discussion-judgements.yaml"
     elif kind == "method_selection":
         program_id = _text(record.get("program_id"))
         idea_id = _text(record.get("idea_id"))
@@ -261,7 +262,7 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
         else:
             if subject_id != f"method-selection:{program_id}:{idea_id}":
                 violations.append("method selection id does not match program_id/idea_id")
-            expected_path = root / "kb" / "programs" / program_id / "design" / f"{idea_id}-repo-choice.yaml"
+            expected_path = kb_root(root) / "programs" / program_id / "design" / f"{idea_id}-repo-choice.yaml"
         payload = record.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         selection = payload.get("method_selection")
@@ -310,13 +311,13 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
             safe_artifact = trusted_project_path(
                 root,
                 artifact_path,
-                allowed_root=root / "kb",
+                allowed_root=kb_root(root),
                 require="file",
             )
             safe_expected = trusted_project_path(
                 root,
                 expected_path,
-                allowed_root=root / "kb",
+                allowed_root=kb_root(root),
                 require="file",
             )
         except ValueError:
@@ -351,7 +352,7 @@ def _verification_root(root: Path, record: dict[str, Any], artifact_path: Path) 
     return trusted_project_path(
         root,
         artifact_path.parent,
-        allowed_root=root / "kb",
+        allowed_root=kb_root(root),
         require="dir",
     )
 
@@ -643,7 +644,7 @@ def _safe_candidate_file(root: Path, path: Path) -> Path | None:
         return trusted_project_path(
             root,
             path,
-            allowed_root=root / "kb",
+            allowed_root=kb_root(root),
             require="file",
         )
     except ValueError:
@@ -696,16 +697,16 @@ class _SideJudgementDiscoverySnapshot:
 
 
 def _side_container_specs(root: Path) -> Iterable[tuple[Path, str, bool]]:
-    for path in sorted((root / "kb" / "programs").glob("*/workflow/decisions.yaml")):
+    for path in sorted((kb_root(root) / "programs").glob("*/workflow/decisions.yaml")):
         yield path, "research-orchestrator", True
-    for path in sorted((root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml")):
+    for path in sorted((kb_root(root) / "units" / "ideas").glob("*/discussion-judgements.yaml")):
         yield path, "idea-workbench", True
-    for path in sorted((root / "kb" / "programs").glob("*/design/*-repo-choice.yaml")):
+    for path in sorted((kb_root(root) / "programs").glob("*/design/*-repo-choice.yaml")):
         yield path, "method-designer", False
-    for path in sorted((root / "kb" / "synthesis").glob("*/*.yaml")):
+    for path in sorted((kb_root(root) / "synthesis").glob("*/*.yaml")):
         if not path.name.endswith("-fill.yaml"):
             yield path, "literature-synthesizer", False
-    for path in sorted((root / "kb" / "programs").glob("*/reports/paper-draft/sections/*.yaml")):
+    for path in sorted((kb_root(root) / "programs").glob("*/reports/paper-draft/sections/*.yaml")):
         yield path, "report-author", False
 
 
@@ -1435,7 +1436,7 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
             trusted_project_path(
                 project_root,
                 candidate,
-                allowed_root=project_root / "kb",
+                allowed_root=kb_root(project_root),
                 require="file",
             )
         )
@@ -1443,21 +1444,21 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
     if unit is not None:
         candidates.append(unit)
     if subject_kind == "program_decision":
-        candidates.extend((project_root / "kb" / "programs").glob("*/workflow/decisions.yaml"))
+        candidates.extend((kb_root(project_root) / "programs").glob("*/workflow/decisions.yaml"))
     if subject_kind == "idea_discussion_conclusion":
-        candidates.extend((project_root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml"))
+        candidates.extend((kb_root(project_root) / "units" / "ideas").glob("*/discussion-judgements.yaml"))
     if subject_kind == "survey_judgement":
-        candidates.extend((project_root / "kb" / "synthesis").glob("*/*.yaml"))
+        candidates.extend((kb_root(project_root) / "synthesis").glob("*/*.yaml"))
     if subject_kind == "paper_draft_section":
         candidates.extend(
-            (project_root / "kb" / "programs").glob("*/reports/paper-draft/sections/*.yaml")
+            (kb_root(project_root) / "programs").glob("*/reports/paper-draft/sections/*.yaml")
         )
     for path in candidates:
         try:
             safe_path = trusted_project_path(
                 project_root,
                 path,
-                allowed_root=project_root / "kb",
+                allowed_root=kb_root(project_root),
                 require="file",
             )
         except ValueError:

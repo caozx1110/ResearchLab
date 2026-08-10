@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.machinery
 import importlib.util
 import os
@@ -49,9 +51,9 @@ def _load_blog_module():
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     for area in ("inbox", "annotations"):
-        (root / "kb" / "obsidian" / area).mkdir(parents=True, exist_ok=True)
+        (root / "obsidian" / area).mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -86,7 +88,7 @@ def test_human_note_freezes_exact_bytes_with_provenance_and_exact_checkpoint(
 ) -> None:
     intake = _load_intake_module()
     root = _workspace(tmp_path)
-    note = root / "kb" / "obsidian" / "inbox" / "My Note.md"
+    note = root / "obsidian" / "inbox" / "My Note.md"
     original = "# 我的观察\n\n这个控制器在接触切换时更稳定。\n".encode("utf-8")
     note.write_bytes(original)
     checkpoint_targets: list[Path] = []
@@ -106,13 +108,13 @@ def test_human_note_freezes_exact_bytes_with_provenance_and_exact_checkpoint(
     backup_paths = [root / value for value in record["source"]["backup_paths"]]
     assert any(path.read_bytes() == original for path in backup_paths)
     parse_cache = load_yaml(
-        root / "kb" / "units" / "blogs" / record["id"] / "parse-cache.yaml",
+        root / "units" / "blogs" / record["id"] / "parse-cache.yaml",
         default={},
     )
     assert any("这个控制器在接触切换时更稳定" in str(row.get("text") or "") for row in parse_cache["chunks"])
     assert note.read_bytes() == original
     assert note not in checkpoint_targets
-    assert all(not str(path).startswith(str(root / "kb" / "obsidian")) for path in checkpoint_targets)
+    assert all(not str(path).startswith(str(root / "obsidian")) for path in checkpoint_targets)
 
 
 @pytest.mark.parametrize(
@@ -136,7 +138,7 @@ def test_human_note_rejects_unsafe_or_review_inputs_without_canonical_write(
 ) -> None:
     intake = _load_intake_module()
     root = _workspace(tmp_path)
-    inbox = root / "kb" / "obsidian" / "inbox"
+    inbox = root / "obsidian" / "inbox"
     target = inbox / filename
     if case == "nested":
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +168,7 @@ def test_human_note_rejects_unsafe_or_review_inputs_without_canonical_write(
         _run_human_note(intake, root, monkeypatch, filename=filename)
 
     assert list(iter_records(root, kind="blog")) == []
-    assert not list((root / "kb" / ".runtime" / "intake-prepared").glob("*"))
+    assert not list((root / ".runtime" / "intake-prepared").glob("*"))
 
 
 def test_human_note_is_idempotent_within_origin_but_not_merged_into_generic_source(
@@ -175,7 +177,7 @@ def test_human_note_is_idempotent_within_origin_but_not_merged_into_generic_sour
 ) -> None:
     intake = _load_intake_module()
     root = _workspace(tmp_path)
-    note = root / "kb" / "obsidian" / "inbox" / "My Note.md"
+    note = root / "obsidian" / "inbox" / "My Note.md"
     note.write_text("# Same bytes\n\nA human observation.\n", encoding="utf-8")
     monkeypatch.setattr(intake, "checkpoint_and_report", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -209,7 +211,7 @@ def test_human_note_runs_existing_blog_prepare_and_agent_fill_remains_pending(
     intake = _load_intake_module()
     blog = _load_blog_module()
     root = _workspace(tmp_path)
-    note = root / "kb" / "obsidian" / "annotations" / "Controller Note.md"
+    note = root / "obsidian" / "annotations" / "Controller Note.md"
     note.write_text(
         "# 接触控制观察\n\n控制器在脚掌切换接触时保持了更平滑的力矩变化。\n",
         encoding="utf-8",
@@ -224,7 +226,7 @@ def test_human_note_runs_existing_blog_prepare_and_agent_fill_remains_pending(
         filename="Controller Note.md",
     ) == 0
     record = list(iter_records(root, kind="blog"))[0]
-    unit_dir = root / "kb" / "units" / "blogs" / record["id"]
+    unit_dir = root / "units" / "blogs" / record["id"]
 
     monkeypatch.setattr(
         sys,
@@ -278,7 +280,7 @@ def test_human_note_late_drift_rolls_back_canonical_materialization(
 ) -> None:
     intake = _load_intake_module()
     root = _workspace(tmp_path)
-    note = root / "kb" / "obsidian" / "inbox" / "My Note.md"
+    note = root / "obsidian" / "inbox" / "My Note.md"
     note.write_text("# Before\n\nStable bytes.\n", encoding="utf-8")
     monkeypatch.setattr(intake, "checkpoint_and_report", lambda *_args, **_kwargs: {})
     original_materialize = intake._materialize_staged_source

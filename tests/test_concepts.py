@@ -18,6 +18,7 @@ from research.paths import record_path, unit_root
 from research.records import canonical_record_snapshot_for_identity, default_record, normalize_record_snapshot
 from research.common import write_yaml_if_changed
 from research.confirm import apply_confirmation
+from repo_paths import initialize_test_workspace
 
 
 SOURCE_ROWS = (
@@ -28,6 +29,7 @@ SOURCE_ROWS = (
 
 
 def _write_confirmed_sources(root: Path) -> list[dict]:
+    initialize_test_workspace(root)
     records = []
     for kind, unit_id, title, quote in SOURCE_ROWS:
         directory = unit_root(root, kind, unit_id)
@@ -186,7 +188,7 @@ def test_concept_confirm_index_find_and_obsidian_page(tmp_path: Path) -> None:
     results = search_passages(tmp_path, "Action Chunking", limit=10)["results"]
     assert any(item["unit_id"] == record["id"] for item in results)
     update_obsidian_projection(tmp_path)
-    page = tmp_path / "kb" / "obsidian" / "managed" / "units" / f"{record['id']}.md"
+    page = tmp_path / "obsidian" / "managed" / "units" / f"{record['id']}.md"
     text = page.read_text(encoding="utf-8")
     assert "## Definition" in text
     assert "Action chunking predicts temporally consistent blocks of actions." in text

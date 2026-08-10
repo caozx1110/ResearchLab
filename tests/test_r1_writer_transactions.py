@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from datetime import datetime as RealDateTime
@@ -40,7 +42,7 @@ def _raise_after_text(path: Path, text: str) -> None:
 def _workspace(root: Path) -> None:
     (root / ".agents").mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(root)
+    initialize_test_workspace(root)
 
 
 def _confirmed_survey_source(root: Path) -> None:

@@ -11,7 +11,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from repo_paths import RESEARCH_LIB_ROOT, SKILLS_ROOT
+from repo_paths import RESEARCH_LIB_ROOT, SKILLS_ROOT, initialize_test_workspace
 
 LIB = RESEARCH_LIB_ROOT
 if str(LIB) not in sys.path:
@@ -32,8 +32,9 @@ def _paper_module():
 
 
 def _make_unit(tmp: Path, pages: int) -> tuple[Path, str, list[dict], Path]:
+    initialize_test_workspace(tmp)
     pid = "p-autopost-00000000"
-    ud = tmp / "kb" / "units" / "papers" / pid
+    ud = tmp / "units" / "papers" / pid
     ud.mkdir(parents=True)
     chunks = [
         {"label": f"src.pdf:page-{i}", "text": f"Page {i} discusses method component {i} in detail.", "locator_kind": "page", "locator": f"page={i}"}

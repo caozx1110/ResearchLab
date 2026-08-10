@@ -368,7 +368,7 @@ def test_orchestrator_transaction_uses_complete_checkpoint_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     orchestrator = _load_script("research-orchestrator", "orchestrate.py", "r1_convergence_scope")
-    attached_record = tmp_path / "kb" / "units" / "papers" / "p-attached" / "record.yaml"
+    attached_record = tmp_path / "units" / "papers" / "p-attached" / "record.yaml"
     observed: dict[str, object] = {}
 
     @contextmanager
@@ -472,7 +472,7 @@ def test_write_record_canonical_transaction_preserves_cas_and_rolls_back(
     assert restored["revision"] == 2
     write_ops = [
         load_yaml(entry)
-        for entry in (tmp_path / "kb" / ".journal").glob("*.yaml")
+        for entry in (tmp_path / ".journal").glob("*.yaml")
         if load_yaml(entry).get("op_type") == "write_record"
     ]
     assert any(entry.get("state") == "abort" for entry in write_ops)
@@ -481,12 +481,12 @@ def test_write_record_canonical_transaction_preserves_cas_and_rolls_back(
 def test_nested_write_record_is_a_transaction_descendant(tmp_path: Path) -> None:
     record = records.default_record("blog", title="Nested canonical write", maturity="lightweight")
     record["id"] = "b-nested-canonical"
-    path = tmp_path / "kb" / "units" / "blogs" / record["id"] / "record.yaml"
+    path = tmp_path / "units" / "blogs" / record["id"] / "record.yaml"
 
     with journal.mutation_transaction(tmp_path, "outer-command", [path]) as outer_op_id:
         confirm.write_record(tmp_path, record)
 
-    entries = [load_yaml(entry) for entry in (tmp_path / "kb" / ".journal").glob("*.yaml")]
+    entries = [load_yaml(entry) for entry in (tmp_path / ".journal").glob("*.yaml")]
     inner = next(entry for entry in entries if entry.get("op_type") == "write_record")
     outer = next(entry for entry in entries if entry.get("op_id") == outer_op_id)
     assert outer["state"] == "commit"
@@ -504,7 +504,7 @@ def test_navigator_current_state_is_strictly_read_only(
     navigator = _load_script("research-navigator", "navigate.py", "r1_convergence_read_only")
     (tmp_path / ".agents" / "lib").mkdir(parents=True)
     (tmp_path / "AGENTS.md").write_text("# Test workspace\n", encoding="utf-8")
-    state = tmp_path / "kb" / "programs" / "program-one" / "state.yaml"
+    state = tmp_path / "programs" / "program-one" / "state.yaml"
     state.parent.mkdir(parents=True)
     state.write_text("program_id: program-one\nstage: analysis\n", encoding="utf-8")
     before = {
@@ -530,4 +530,4 @@ def test_navigator_current_state_is_strictly_read_only(
     }
     assert after == before
     assert "program-one" in capsys.readouterr().out
-    assert not (tmp_path / "kb" / "user" / "current-state.md").exists()
+    assert not (tmp_path / "user" / "current-state.md").exists()

@@ -227,7 +227,7 @@ def write_terminal_search(root: Path, *, candidate_id: str = "paper-a") -> Path:
 
 def bind_materialized_candidate(module, root: Path, stage_path: Path) -> dict:
     record = write_confirmed_source(module, root)
-    record_path = root / "kb/units/papers/p-alpha/record.yaml"
+    record_path = root / "units/papers/p-alpha/record.yaml"
     current = load_yaml(record_path)
     current["status"] = "active"
     current["source"] = {"original_uri": "https://example.test/alpha"}
@@ -267,7 +267,7 @@ def build_verified_survey(root: Path, *, program_id: str = "", source: dict | No
     module = load_synthesizer()
     source = source or write_confirmed_source(module, root)
     if program_id:
-        (root / "kb" / "programs" / program_id).mkdir(parents=True, exist_ok=True)
+        (root / "programs" / program_id).mkdir(parents=True, exist_ok=True)
     scaffold = module.build_survey_scaffold(
         [source],
         root=root,
@@ -303,7 +303,7 @@ def build_verified_survey(root: Path, *, program_id: str = "", source: dict | No
     scaffold["comparison_matrix"]["methods"][0]["source_unit_ids"] = ["p-alpha"]
     violations, verified = module.verify_survey_fill(scaffold, root)
     assert violations == [], violations
-    survey_path = root / "kb/synthesis/robot-learning/survey.yaml"
+    survey_path = root / "synthesis/robot-learning/survey.yaml"
     survey_path.parent.mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(survey_path, verified)
     (survey_path.parent / "summary.md").write_text(module.render_verified_summary(verified), encoding="utf-8")
@@ -359,7 +359,7 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
     assert state["current_stage"] == "search"
     assert state["revision"] == binding["revision"] == 2
     assert composite_survey_state_violations(state) == []
-    assert not (tmp_path / "kb/synthesis/robot-learning/survey-fill.yaml").exists()
+    assert not (tmp_path / "synthesis/robot-learning/survey-fill.yaml").exists()
 
     orchestrator = load_orchestrator()
     snapshot = orchestrator.portfolio_candidate_snapshot(tmp_path)
@@ -394,7 +394,7 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
     assert "Agent 需要比较当前" in public
     assert "知识库还是空的" not in public
     protocol = json.loads(
-        (tmp_path / "kb/.runtime/next-after-restart.json").read_text(encoding="utf-8")
+        (tmp_path / ".runtime/next-after-restart.json").read_text(encoding="utf-8")
     )
     assert protocol["status"] == "agent_action_required"
     assert protocol["details"]["candidate_count"] >= 1
@@ -513,7 +513,7 @@ def test_systematic_prepare_with_matching_unit_still_starts_frozen_search_compos
     assert state["selection_filters"]["discovery_mode"] == "systematic"
     frozen = json.loads(state["selection_filters"]["search_protocol"])
     assert frozen["scope"]["inclusion"] == ["robot learning"]
-    assert not (tmp_path / "kb/synthesis/robot-learning/survey-fill.yaml").exists()
+    assert not (tmp_path / "synthesis/robot-learning/survey-fill.yaml").exists()
 
 
 @pytest.mark.parametrize(
@@ -569,7 +569,7 @@ def test_synthesis_old_preference_receipt_rejects_each_consumed_field_without_wr
     replay = copy.deepcopy(base)
     mutate(replay)
     assert module.synthesis_preference_context(**replay) != module.synthesis_preference_context(**base)
-    synthesis_dir = tmp_path / "kb/synthesis"
+    synthesis_dir = tmp_path / "synthesis"
     before = {
         path.relative_to(synthesis_dir): path.read_bytes()
         for path in synthesis_dir.rglob("*")
@@ -621,7 +621,7 @@ def test_synthesis_prepare_rejects_old_receipt_when_current_unit_snapshot_change
         selection_id=selection_id,
         context=context,
     )
-    record_path = tmp_path / "kb/units/papers/p-alpha/record.yaml"
+    record_path = tmp_path / "units/papers/p-alpha/record.yaml"
     if mutation == "added":
         write_confirmed_source(module, tmp_path, unit_id="p-beta")
     elif mutation == "removed":
@@ -633,7 +633,7 @@ def test_synthesis_prepare_rejects_old_receipt_when_current_unit_snapshot_change
         else:
             changed["confirmation_status"] = "pending_user_confirmation"
         write_yaml_if_changed(record_path, changed)
-    synthesis_dir = tmp_path / "kb/synthesis"
+    synthesis_dir = tmp_path / "synthesis"
     before = {
         path.relative_to(synthesis_dir): path.read_bytes()
         for path in synthesis_dir.rglob("*")
@@ -795,7 +795,7 @@ def test_synthesis_prepare_binds_frozen_protocol_bytes_not_its_path(
     with pytest.raises(SystemExit, match="another task"):
         module.main()
 
-    assert not (tmp_path / "kb/synthesis/robot-learning").exists()
+    assert not (tmp_path / "synthesis/robot-learning").exists()
 
 
 def test_composite_cli_updates_with_revision_cas_and_is_resumable(
@@ -933,7 +933,7 @@ def test_composite_all_seven_stages_bind_current_canonical_artifacts(
         outputs=stage_refs["selection"],
         root=tmp_path,
     )
-    assert not list((tmp_path / "kb/units").rglob("record.yaml"))
+    assert not list((tmp_path / "units").rglob("record.yaml"))
 
     unit_refs = [{"kind": "paper", "id": "p-alpha"}]
     stage_refs["source_intake"] = [
@@ -1088,14 +1088,14 @@ def test_composite_all_seven_stages_bind_current_canonical_artifacts(
     )
     state_path.parent.mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(state_path, state)
-    record_path = tmp_path / "kb/units/papers/p-alpha/record.yaml"
+    record_path = tmp_path / "units/papers/p-alpha/record.yaml"
     changed = load_yaml(record_path)
     changed["payload"]["source_search"]["selections"][0]["user_authorization"] = (
         "Changed authorization bytes."
     )
     write_yaml_if_changed(record_path, changed)
     before_state = state_path.read_bytes()
-    journal = tmp_path / "kb/.journal"
+    journal = tmp_path / ".journal"
     before_journal = {
         item.name: item.read_bytes() for item in journal.glob("*.yaml")
     }
@@ -1431,7 +1431,7 @@ def test_public_dialogue_batch_routes_survey_to_its_owner(tmp_path: Path, capsys
     ) == 0
     capsys.readouterr()
     protocol = json.loads(
-        (tmp_path / "kb/.runtime/survey-review.json").read_text(encoding="utf-8")
+        (tmp_path / ".runtime/survey-review.json").read_text(encoding="utf-8")
     )
     item = next(
         row
@@ -1485,7 +1485,7 @@ def test_confirmed_program_survey_emits_a_current_reportable_event(tmp_path: Pat
         authorization_source="user_message",
         rejection_reason="",
     )
-    events_path = tmp_path / "kb/programs/program-survey/workflow/reporting-events.yaml"
+    events_path = tmp_path / "programs/program-survey/workflow/reporting-events.yaml"
     assert events_path in plan["target_paths"]
     module.apply_review_batch_decision(
         tmp_path,
@@ -1670,9 +1670,9 @@ def test_confirmed_survey_stales_on_every_bound_change(tmp_path: Path, mutation:
         record["payload"]["claims"][0]["text"] += " Changed."
         write_yaml_if_changed(survey_path, record)
     elif mutation == "upstream_evidence":
-        (tmp_path / "kb/units/papers/p-alpha/note.md").write_text("changed evidence bytes", encoding="utf-8")
+        (tmp_path / "units/papers/p-alpha/note.md").write_text("changed evidence bytes", encoding="utf-8")
     else:
-        source_path = tmp_path / "kb/units/papers/p-alpha/record.yaml"
+        source_path = tmp_path / "units/papers/p-alpha/record.yaml"
         source = load_yaml(source_path)
         source["confirmation"]["evidence"].append("changed receipt bytes")
         write_yaml_if_changed(source_path, source)
@@ -1739,7 +1739,7 @@ def test_confirm_cli_transaction_restores_survey_on_summary_failure(tmp_path: Pa
 
 
 def test_legacy_needs_agent_repair_is_readable_but_not_reviewable(tmp_path: Path) -> None:
-    legacy_path = tmp_path / "kb/synthesis/legacy/survey.yaml"
+    legacy_path = tmp_path / "synthesis/legacy/survey.yaml"
     legacy_path.parent.mkdir(parents=True)
     legacy = {
         "mode": "survey",

@@ -279,7 +279,7 @@ def test_report_main_verify_failure_is_actionable_without_schema_terms(
 
 
 def _write_confirmed_paper_with_figure(root: Path, program_id: str, unit_id: str) -> str:
-    unit_root = root / "kb" / "units" / "papers" / unit_id
+    unit_root = root / "units" / "papers" / unit_id
     unit_root.mkdir(parents=True)
     evidence_text = "Success rate improves by 8 points."
     write_yaml_if_changed(unit_root / "parse-cache.yaml", {"chunks": [{"label": "page-3", "text": evidence_text}]})
@@ -364,7 +364,7 @@ def _write_confirmed_paper_with_figure(root: Path, program_id: str, unit_id: str
 
 
 def _write_confirmed_decision(root: Path, program_id: str) -> None:
-    program_root = root / "kb" / "programs" / program_id
+    program_root = root / "programs" / program_id
     evidence_path = program_root / "workflow" / "decision-evidence.md"
     evidence_path.write_text("direct benchmark evidence", encoding="utf-8")
     decision = {
@@ -425,10 +425,10 @@ def _workspace(tmp_path: Path) -> tuple[Path, str, str, str]:
     program_id = "program-editorial"
     unit_id = "p-editorial-123456"
     experiment_id = "x-editorial-123456"
-    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow = root / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
     write_yaml_if_changed(
-        root / "kb" / "programs" / program_id / "state.yaml",
+        root / "programs" / program_id / "state.yaml",
         {
             "program_id": program_id,
             "question": "证据约束的评估是否达到预期？",
@@ -607,7 +607,7 @@ def test_stale_figure_or_input_race_never_overwrites_previous_output(
     report.verify_editorial_report(root, program_id, "ppt-materials")
     old_output = output_path.read_bytes()
 
-    asset_path = next((root / "kb" / "units" / "papers" / unit_id / "figures" / "assets").glob("*.png"))
+    asset_path = next((root / "units" / "papers" / unit_id / "figures" / "assets").glob("*.png"))
     asset_path.write_bytes(b"tampered figure bytes")
     with pytest.raises(report.EditorialError, match="manifest inputs changed"):
         report.verify_editorial_report(root, program_id, "ppt-materials")
@@ -625,7 +625,7 @@ def test_stale_figure_or_input_race_never_overwrites_previous_output(
     fill = load_yaml(fill_path)
     fill["sections"]["executive_summary"][0]["text"] = "这段新正文不应在 stale race 后覆盖旧产物。"
     write_yaml_if_changed(fill_path, fill)
-    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    events_path = root / "programs" / program_id / "workflow" / "reporting-events.yaml"
     original_write = report.write_text_if_changed
     raced = False
 

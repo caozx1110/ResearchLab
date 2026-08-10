@@ -71,6 +71,7 @@ from research.core import (
     confirm_unit,
     load_runtime_preferences,
     locate_record,
+    kb_root,
     passage_search_cache_path,
     checkpoint_and_report,
     candidate_pools_path,
@@ -119,8 +120,8 @@ _MAX_VERIFY_FILL_BYTES = 16 * 1024 * 1024
 
 def _index_targets(root: Path) -> list[Path]:
     return [
-        root / "kb" / "index.yaml",
-        root / "kb" / "index.md",
+        kb_root(root) / "index.yaml",
+        kb_root(root) / "index.md",
         topic_taxonomy_path(root),
         candidate_pools_path(root),
         passage_search_cache_path(root),
@@ -191,7 +192,12 @@ def _transactional(op_name: str, target_builder):
             active_token = _ACTIVE_MUTATION.set(True)
             checkpoint_token = _PENDING_CHECKPOINT.set(None)
             try:
-                with command_mutation(root, f"paper-analyst:{op_name}", targets):
+                with command_mutation(
+                    root,
+                    f"paper-analyst:{op_name}",
+                    targets,
+                    allow_operational_state=True,
+                ):
                     result = function(*args, **kwargs)
                 pending = _PENDING_CHECKPOINT.get()
             finally:
@@ -1935,7 +1941,7 @@ def paper_preference_context(
 ) -> dict[str, object]:
     """Owner-recomputed content binding for one paper preference operation."""
     canonical_unit_root = unit_root or (
-        root / "kb" / "units" / "papers" / str(record.get("id") or "")
+        kb_root(root) / "units" / "papers" / str(record.get("id") or "")
     )
     cache_path = _cache_path(canonical_unit_root)
     operation = str(args.command)
@@ -2338,7 +2344,12 @@ def _dispatch_loaded_command(
         # (prewarm-cache) may re-parse.
         force_cache = bool(getattr(args, "force", False))
         if force_cache or not cache_path.exists():
-            with command_mutation(root, "paper-analyst:prewarm-cache", [cache_path]):
+            with command_mutation(
+                root,
+                "paper-analyst:prewarm-cache",
+                [cache_path],
+                allow_operational_state=True,
+            ):
                 source_chunks, cache_path = _load_or_refresh_cache(
                     root,
                     record,

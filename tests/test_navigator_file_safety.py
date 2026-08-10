@@ -79,14 +79,14 @@ def test_build_kb_browser_root_overrides_discovery(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(sys, "argv", ["build_kb_browser.py", "--root", str(explicit_root)])
 
     assert build_kb_browser.main() == 0
-    assert (explicit_root / "kb" / "user" / "kb" / "index.html").exists()
-    assert not (discovered_root / "kb" / "user" / "kb" / "index.html").exists()
+    assert (explicit_root / "user" / "index.html").exists()
+    assert not (discovered_root / "user" / "index.html").exists()
 
 
 def test_resolve_project_path_accepts_workspace_relative_path(tmp_path: Path) -> None:
     target = _resolve_project_path(tmp_path, "kb/user/navigation.md")
 
-    assert target == (tmp_path / "kb/user/navigation.md").resolve()
+    assert target == (tmp_path / "user/navigation.md").resolve()
 
 
 @pytest.mark.parametrize("raw_path", ["../outside.md", "/tmp/outside.md"])
@@ -96,7 +96,7 @@ def test_resolve_project_path_rejects_escape_paths(tmp_path: Path, raw_path: str
 
 
 def test_is_writable_text_allows_plain_markdown(tmp_path: Path) -> None:
-    path = tmp_path / "kb/units/papers/p-test-123456/note.md"
+    path = tmp_path / "units/papers/p-test-123456/note.md"
 
     assert _is_writable_text(tmp_path, path)
 

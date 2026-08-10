@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import json
 import os
@@ -47,7 +49,7 @@ def _load_script(skill: str, script_name: str, module_name: str):
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     return root
 
 
@@ -69,7 +71,7 @@ def _canonical_snapshot(root: Path) -> dict[str, bytes]:
 
 def _root_journals(root: Path) -> list[dict]:
     rows = []
-    for path in sorted((root / "kb" / ".journal").glob("*.yaml")):
+    for path in sorted((root / ".journal").glob("*.yaml")):
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         if isinstance(payload, dict) and int(payload.get("transaction_depth") or 0) == 0:
             rows.append(payload)
@@ -99,7 +101,7 @@ def test_batch_add_materializes_two_items_under_one_root_operation(
 
     assert payload["created_count"] == 2
     assert payload["duplicate_count"] == 0
-    records = list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    records = list((root / "units" / "blogs").glob("*/record.yaml"))
     assert len(records) == 2
     roots = [row for row in _root_journals(root) if row.get("op_type") == "source-intake-batch-add"]
     assert len(roots) == 1
@@ -108,11 +110,11 @@ def test_batch_add_materializes_two_items_under_one_root_operation(
     checkpoint_targets = {Path(path) for path in checkpoints[0]["target_paths"]}
     assert checkpoint_targets == {
         *(path.parent for path in records),
-        *(root / "kb" / ".runtime" / "intake-staging" / "legacy-failed-units" / path.parent.name for path in records),
-        root / "kb" / "config" / "topic-taxonomy.yaml",
-        root / "kb" / "config" / "candidate-pools.yaml",
-        root / "kb" / "index.yaml",
-        root / "kb" / "index.md",
+        *(root / ".runtime" / "intake-staging" / "legacy-failed-units" / path.parent.name for path in records),
+        root / "config" / "topic-taxonomy.yaml",
+        root / "config" / "candidate-pools.yaml",
+        root / "index.yaml",
+        root / "index.md",
     }
 
 
@@ -134,7 +136,7 @@ def test_batch_add_merges_same_byte_inputs_in_request_order(
     assert payload["duplicate_count"] == 1
     assert [item["status"] for item in payload["results"]] == ["created", "merged"]
     assert payload["results"][0]["unit_id"] == payload["results"][1]["unit_id"]
-    assert len(list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))) == 1
+    assert len(list((root / "units" / "blogs").glob("*/record.yaml"))) == 1
 
 
 def test_batch_add_current_canonical_duplicate_is_idempotent_skip(
@@ -198,7 +200,7 @@ def test_batch_add_stale_second_prepared_token_writes_no_canonical_item(
         intake._run_batch_add(root, [_item("blog", first), _item("blog", second)])
 
     assert _canonical_snapshot(root) == before
-    assert not list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    assert not list((root / "units" / "blogs").glob("*/record.yaml"))
     assert all(
         row.get("op_type") != "source-intake-batch-add" for row in _root_journals(root)
     )
@@ -232,7 +234,7 @@ def test_batch_add_late_write_failure_rolls_back_every_canonical_item(
         intake._run_batch_add(root, [_item("blog", first), _item("blog", second)])
 
     assert _canonical_snapshot(root) == before
-    assert not list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    assert not list((root / "units" / "blogs").glob("*/record.yaml"))
     roots = [row for row in _root_journals(root) if row.get("op_type") == "source-intake-batch-add"]
     assert len(roots) == 1
     assert roots[0]["state"] == "abort"
@@ -267,7 +269,7 @@ def test_batch_add_late_source_drift_rolls_back_every_canonical_item(
         intake._run_batch_add(root, [_item("blog", first), _item("blog", second)])
 
     assert _canonical_snapshot(root) == before
-    assert not list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    assert not list((root / "units" / "blogs").glob("*/record.yaml"))
     roots = [row for row in _root_journals(root) if row.get("op_type") == "source-intake-batch-add"]
     assert len(roots) == 1
     assert roots[0]["state"] == "abort"
@@ -479,8 +481,8 @@ def test_rebuild_governance_checkpoints_exact_catalog_and_index_paths(
     assert governance_catalog_drift(root)["stale"] is False
     assert len(checkpoints) == 1
     assert set(checkpoints[0]["target_paths"]) == {
-        root / "kb" / "config" / "topic-taxonomy.yaml",
-        root / "kb" / "config" / "candidate-pools.yaml",
-        root / "kb" / "index.yaml",
-        root / "kb" / "index.md",
+        root / "config" / "topic-taxonomy.yaml",
+        root / "config" / "candidate-pools.yaml",
+        root / "index.yaml",
+        root / "index.md",
     }

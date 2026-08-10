@@ -12,6 +12,7 @@ from research.confirm import apply_confirmation, write_record
 from research.context_pack import build_context_pack, serialized_context_pack_size
 from research.evidence import build_verification_receipt
 from research.records import canonical_record_snapshot_for_record, normalize_record_snapshot
+from repo_paths import initialize_test_workspace
 
 
 def _claim(unit_id: str, number: int, quote: str, *, refs: int = 1) -> dict[str, Any]:
@@ -42,7 +43,8 @@ def _write_judgement(
     quote_padding: int = 0,
     duplicate_claim_ids: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
-    unit_root = root / "kb" / "units" / "papers" / unit_id
+    initialize_test_workspace(root)
+    unit_root = root / "units" / "papers" / unit_id
     unit_root.mkdir(parents=True, exist_ok=True)
     quotes = [f"evidence-{number}-" + ("证" * quote_padding) for number in range(1, claim_count + 1)]
     evidence_path = unit_root / "evidence.md"
@@ -171,7 +173,7 @@ def test_context_pack_excludes_pending_stale_and_forged_formal_content(tmp_path:
     stale_evidence, _ = _write_judgement(tmp_path, stale_id, confirmed=True)
     stale_evidence.write_text("changed after confirmation\n", encoding="utf-8")
     _write_judgement(tmp_path, forged_id, confirmed=False)
-    forged_path = tmp_path / "kb" / "units" / "papers" / forged_id / "record.yaml"
+    forged_path = tmp_path / "units" / "papers" / forged_id / "record.yaml"
     forged = yaml.safe_load(forged_path.read_text(encoding="utf-8"))
     forged["confirmation_status"] = "confirmed"
     forged["needs_human_confirmation"] = False
@@ -210,11 +212,11 @@ def test_context_pack_duplicate_claim_ids_fail_closed(tmp_path: Path) -> None:
 def test_context_pack_duplicate_canonical_unit_ids_fail_closed(tmp_path: Path) -> None:
     unit_id = "p-context-collision-123456"
     _write_judgement(tmp_path, unit_id, confirmed=False)
-    paper_path = tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    paper_path = tmp_path / "units" / "papers" / unit_id / "record.yaml"
     duplicate = yaml.safe_load(paper_path.read_text(encoding="utf-8"))
     duplicate["kind"] = "blog"
     write_yaml_if_changed(
-        tmp_path / "kb" / "units" / "blogs" / unit_id / "record.yaml",
+        tmp_path / "units" / "blogs" / unit_id / "record.yaml",
         duplicate,
     )
 

@@ -35,7 +35,7 @@ import yaml
 from research.bibliography import BibliographyError, bibliography_from_records
 from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, utc_now_iso, write_text_if_changed, write_yaml_if_changed
 from research.confirm import apply_confirmation
-from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
+from research.core import command_mutation, ensure_workspace, checkpoint_and_report, kb_root, project_root, user_root
 from research.evidence import build_verification_receipt, read_claims, validate_claims
 from research.figures import FigureIndexError, load_current_figure_index
 from research.judgements import (
@@ -701,7 +701,7 @@ def _collect_unit_ids(value: Any, *, key: str = "") -> set[str]:
 
 
 def program_unit_ids(root: Path, program_id: str, events: list[dict[str, Any]]) -> list[str]:
-    state = load_yaml(root / "kb" / "programs" / program_id / "state.yaml", default={})
+    state = load_yaml(kb_root(root) / "programs" / program_id / "state.yaml", default={})
     unit_ids = _collect_unit_ids(state)
     unit_ids.update(_collect_unit_ids(events))
     return sorted(unit_ids)
@@ -2136,7 +2136,7 @@ def export_paper_draft(root: Path, program_id: str) -> int:
 
     if not publication_is_current():
         raise PaperDraftRuntimeError("发布需要七节全部唯一、当前且已确认。")
-    output_root = root / "kb" / "output" / program_id
+    output_root = kb_root(root) / "output" / program_id
     markdown_path = output_root / "paper-draft.md"
     latex_path = output_root / "paper-draft.tex"
     bibliography_path = output_root / "references.bib"
@@ -2209,7 +2209,7 @@ def _editorial_root(root: Path, program_id: str, output_kind: str) -> Path:
     clean = _safe_editorial_program_id(program_id)
     if output_kind not in {"weekly", "ppt-materials"}:
         raise EditorialError("unsupported editorial output kind")
-    return root / "kb" / "programs" / clean / "reports" / "editorial" / output_kind
+    return kb_root(root) / "programs" / clean / "reports" / "editorial" / output_kind
 
 
 def _editorial_paths(root: Path, program_id: str, output_kind: str) -> tuple[Path, Path, Path]:
@@ -2217,7 +2217,7 @@ def _editorial_paths(root: Path, program_id: str, output_kind: str) -> tuple[Pat
     manifest_path = control_root / "manifest.yaml"
     fill_path = control_root / "fill.yaml"
     output_path = (
-        root / "kb" / "programs" / _safe_editorial_program_id(program_id) / "reports" / "weekly.md"
+        kb_root(root) / "programs" / _safe_editorial_program_id(program_id) / "reports" / "weekly.md"
         if output_kind == "weekly"
         else user_root(root) / "report-materials" / f"{program_id}-ppt-materials.md"
     )
@@ -2787,7 +2787,7 @@ def main() -> int:
             bibliography = load_bibliography_inputs(root, args.program_id)
         except BibliographyError as exc:
             raise SystemExit(f"无法导出引用：{exc}") from exc
-        path = root / "kb" / "output" / args.program_id / "references.bib"
+        path = kb_root(root) / "output" / args.program_id / "references.bib"
 
         def require_bibliography_current_at_commit() -> None:
             if not bibliography.is_current():
@@ -2818,7 +2818,7 @@ def main() -> int:
             target_paths=[path],
         )
         return 0
-    reports_root = root / "kb" / "programs" / args.program_id / "reports"
+    reports_root = kb_root(root) / "programs" / args.program_id / "reports"
     inputs = load_report_inputs(
         root,
         args.program_id,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import os
 import sys
@@ -30,7 +32,7 @@ def _load_idea_module():
 def _setup(tmp_path: Path, idea) -> tuple[str, str]:
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     idea_record = default_record("idea", title="Evidence Idea", maturity="lightweight", source={"original_uri": "discussion"})
     idea_record["id"] = "i-evidence-123456"
     idea_record["payload"]["problem"]["problem_definition"] = "Improve transfer."
@@ -102,7 +104,7 @@ def _multi_setup(root: Path, idea, *, count: int = 3) -> tuple[list[str], str, P
     root.mkdir()
     (root / ".agents").mkdir()
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     source_id = "r-concurrency-source"
     source = default_record("repo", title="Concurrency Source", maturity="complete", source={"original_uri": "fixture"})
     source["id"] = source_id

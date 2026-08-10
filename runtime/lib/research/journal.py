@@ -12,10 +12,16 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Sequence
+from typing import Callable, Collection, Iterator, Mapping, Sequence
 
-from .common import utc_now_iso
+from .common import utc_now_iso, workspace_root_roles
+from .path_contract import TargetClass, classify_data_relative_path
 from .paths import kb_root
+from .workspace_layout import (
+    WORKSPACE_LAYOUT_MARKER_RELATIVE,
+    WorkspaceLayoutError,
+    require_current_workspace_layout,
+)
 from . import yaml_io
 
 
@@ -28,6 +34,11 @@ KNOWN_JOURNAL_STATES = {"begin", "commit", "abort", "abort_failed"}
 ROOT_COMMIT_GUARD_ERROR = (
     "带提交校验的正式发布不能嵌套在另一项写操作中；"
     "请等外层操作完成后重试。"
+)
+BUSINESS_TARGET_CLASSES = (TargetClass.CANONICAL_ARTIFACT,)
+RECOVERABLE_TARGET_CLASSES = (
+    TargetClass.CANONICAL_ARTIFACT,
+    TargetClass.OPERATIONAL_STATE,
 )
 
 # Each entry is (resolved project root, operation id).  ContextVar keeps nested
@@ -63,9 +74,18 @@ def journal_entry_path(project_root: Path, op_id: str) -> Path:
     return journal_root(project_root) / f"{op_id}.yaml"
 
 
-def operation_lock_path(project_root: Path, target_path: Path) -> Path:
+def operation_lock_path(
+    project_root: Path,
+    target_path: Path,
+    *,
+    allowed_target_classes: Collection[TargetClass] = BUSINESS_TARGET_CLASSES,
+) -> Path:
     _ensure_journal_runtime(project_root)
-    key = _target_key(project_root, target_path)
+    key = _target_key(
+        project_root,
+        target_path,
+        allowed_classes=allowed_target_classes,
+    )
     name = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return journal_root(project_root) / "locks" / f"{name}.lock"
 
@@ -611,14 +631,35 @@ def journal_runtime_lock(project_root: Path, relative_path: str) -> Iterator[int
                 os.close(descriptor)
 
 
-def operation_lock_name(project_root: Path, target_path: Path) -> str:
-    key = _target_key(project_root, target_path)
+def operation_lock_name(
+    project_root: Path,
+    target_path: Path,
+    *,
+    allowed_target_classes: Collection[TargetClass] = BUSINESS_TARGET_CLASSES,
+) -> str:
+    key = _target_key(
+        project_root,
+        target_path,
+        allowed_classes=allowed_target_classes,
+    )
     return f"locks/{hashlib.sha256(key.encode('utf-8')).hexdigest()}.lock"
 
 
 @contextmanager
-def operation_lock(project_root: Path, target_path: Path) -> Iterator[int]:
-    with journal_runtime_lock(project_root, operation_lock_name(project_root, target_path)) as descriptor:
+def operation_lock(
+    project_root: Path,
+    target_path: Path,
+    *,
+    allowed_target_classes: Collection[TargetClass] = BUSINESS_TARGET_CLASSES,
+) -> Iterator[int]:
+    with journal_runtime_lock(
+        project_root,
+        operation_lock_name(
+            project_root,
+            target_path,
+            allowed_target_classes=allowed_target_classes,
+        ),
+    ) as descriptor:
         yield descriptor
 
 
@@ -935,6 +976,14 @@ def _validate_target_key(key: object) -> str:
         raise SystemExit("Journal target key is not canonical.")
     if key == JOURNAL_DIRNAME or key.startswith(f"{JOURNAL_DIRNAME}/"):
         raise SystemExit("Journal runtime paths cannot be mutation targets.")
+    if key == WORKSPACE_LAYOUT_MARKER_RELATIVE.as_posix():
+        raise SystemExit("Workspace layout marker cannot be a mutation target.")
+    try:
+        target_class = classify_data_relative_path(key)
+    except ValueError as exc:
+        raise SystemExit("Journal target key has an invalid ownership class.") from exc
+    if target_class in {TargetClass.RESERVED, TargetClass.UNKNOWN}:
+        raise SystemExit("Journal target key is reserved or unknown.")
     return key
 
 
@@ -956,7 +1005,12 @@ def _assert_safe_target_ancestors(root: Path, key: str) -> None:
             raise SystemExit("Journal target has a non-directory ancestor inside kb/.")
 
 
-def _target_key(project_root: Path, path: Path) -> str:
+def _target_key(
+    project_root: Path,
+    path: Path,
+    *,
+    allowed_classes: Collection[TargetClass] = BUSINESS_TARGET_CLASSES,
+) -> str:
     """Map a declared path to a lexical key without dereferencing its leaf."""
     declared = Path(path)
     if ".." in declared.parts:
@@ -974,6 +1028,9 @@ def _target_key(project_root: Path, path: Path) -> str:
     if relative is None:
         raise SystemExit("Journal target must be lexically inside kb/.")
     key = _validate_target_key(relative.as_posix())
+    target_class = classify_data_relative_path(key)
+    if target_class not in frozenset(allowed_classes):
+        raise SystemExit("Journal target class is not allowed for this owner.")
     _assert_safe_target_ancestors(canonical_root, key)
     return key
 
@@ -1959,8 +2016,18 @@ def begin_op(
     coordination_scope: str = "none",
     parent_op_id: str | None = None,
     attach_to_active: bool = True,
+    allowed_target_classes: Collection[TargetClass] = BUSINESS_TARGET_CLASSES,
 ) -> str:
-    keys = sorted({_target_key(project_root, Path(path)) for path in target_paths})
+    keys = sorted(
+        {
+            _target_key(
+                project_root,
+                Path(path),
+                allowed_classes=allowed_target_classes,
+            )
+            for path in target_paths
+        }
+    )
     if not keys:
         raise SystemExit("Journal operation requires at least one explicit target path.")
     for index, key in enumerate(keys):
@@ -2243,6 +2310,7 @@ def journaled_op(
     parent_op_id: str | None = None,
     attach_to_active: bool = True,
     commit_guard: Callable[[], None] | None = None,
+    allowed_target_classes: Collection[TargetClass] = BUSINESS_TARGET_CLASSES,
 ) -> Iterator[str]:
     """Journal one mutation and optionally validate at its commit boundary.
 
@@ -2261,6 +2329,7 @@ def journaled_op(
         or (attach_to_active and current_operation_id(project_root))
     ):
         raise SystemExit(ROOT_COMMIT_GUARD_ERROR)
+    layout_snapshot = workspace_root_roles(project_root)
     op_id = begin_op(
         project_root,
         op_type,
@@ -2270,6 +2339,7 @@ def journaled_op(
         coordination_scope=coordination_scope,
         parent_op_id=parent_op_id,
         attach_to_active=attach_to_active,
+        allowed_target_classes=allowed_target_classes,
     )
     stack = _ACTIVE_OP_STACK.get()
     token = _ACTIVE_OP_STACK.set((*stack, (_project_context_key(project_root), op_id)))
@@ -2277,6 +2347,10 @@ def journaled_op(
         yield op_id
         if commit_guard is not None:
             commit_guard()
+        try:
+            require_current_workspace_layout(layout_snapshot)
+        except WorkspaceLayoutError as exc:
+            raise SystemExit(str(exc)) from exc
         commit_op(project_root, op_id)
     except BaseException as exc:
         abort_op(project_root, op_id, restore=True, error=str(exc))
@@ -2306,6 +2380,7 @@ def _recovery_journaled_op(
             operation_role="recovery",
             coordination_scope="workspace-exclusive",
             attach_to_active=False,
+            allowed_target_classes=RECOVERABLE_TARGET_CLASSES,
         ) as op_id:
             yield op_id
 
@@ -2320,6 +2395,8 @@ def mutation_transaction(
     operation_role: str = "user",
     preflight: Callable[[], None] | None = None,
     commit_guard: Callable[[], None] | None = None,
+    allowed_target_classes: Collection[TargetClass] = BUSINESS_TARGET_CLASSES,
+    allow_operational_state: bool = False,
 ) -> Iterator[str]:
     """Coordinate and journal one command-level mutation transaction.
 
@@ -2328,7 +2405,21 @@ def mutation_transaction(
     targets must be covered by the root's declared path set.  Valid descendants
     inherit the root's workspace lock and are recovered by its before-image.
     """
-    keys = sorted({_target_key(project_root, Path(path)) for path in target_paths})
+    effective_target_classes = (
+        (*allowed_target_classes, TargetClass.OPERATIONAL_STATE)
+        if allow_operational_state
+        else tuple(allowed_target_classes)
+    )
+    keys = sorted(
+        {
+            _target_key(
+                project_root,
+                Path(path),
+                allowed_classes=effective_target_classes,
+            )
+            for path in target_paths
+        }
+    )
     if not keys:
         raise SystemExit("Mutation transaction requires at least one explicit target path.")
     targets = [_target_path(project_root, key) for key in keys]
@@ -2352,6 +2443,7 @@ def mutation_transaction(
             operation_role=operation_role,
             coordination_scope="inherited",
             commit_guard=commit_guard,
+            allowed_target_classes=effective_target_classes,
         ) as op_id:
             yield op_id
         return
@@ -2365,7 +2457,13 @@ def mutation_transaction(
         _assert_no_incomplete_root(project_root)
         with ExitStack() as locks:
             for path in targets:
-                locks.enter_context(operation_lock(project_root, path))
+                locks.enter_context(
+                    operation_lock(
+                        project_root,
+                        path,
+                        allowed_target_classes=effective_target_classes,
+                    )
+                )
             if preflight is not None:
                 preflight()
             with journaled_op(
@@ -2376,5 +2474,6 @@ def mutation_transaction(
                 operation_role=operation_role,
                 coordination_scope="workspace-exclusive",
                 commit_guard=commit_guard,
+                allowed_target_classes=effective_target_classes,
             ) as op_id:
                 yield op_id

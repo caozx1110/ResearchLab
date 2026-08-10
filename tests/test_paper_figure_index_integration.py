@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import re
 import sys
@@ -46,9 +48,9 @@ def test_extract_figures_publishes_stable_hash_index_without_downgrading_paper(
     paper = _paper_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     paper_id = "p-figure-integration-abcdef"
-    unit_root = root / "kb" / "units" / "papers" / paper_id
+    unit_root = root / "units" / "papers" / paper_id
     source = unit_root / "source" / "paper.pdf"
     _pdf(source)
     record = {
@@ -128,7 +130,7 @@ def test_extract_figures_publishes_stable_hash_index_without_downgrading_paper(
         for result in search["results"]
     )
     update_obsidian_projection(root)
-    page_path = root / "kb" / "obsidian" / "managed" / "units" / f"{paper_id}.md"
+    page_path = root / "obsidian" / "managed" / "units" / f"{paper_id}.md"
     page = page_path.read_text(encoding="utf-8")
     assert ref_key in page
     assert "Figure 1. Stable pipeline overview" in page

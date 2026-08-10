@@ -32,7 +32,7 @@ if __name__ == "__main__":
 
 from research.common import add_project_root_argument, append_program_reporting_event, load_yaml, normalize_list, program_reporting_events_path, utc_now_iso, write_text_if_changed, write_yaml_if_changed, yaml_default
 from research.confirm import apply_confirmation
-from research.core import checkpoint_and_report, iter_records, locate_record, project_root, rel
+from research.core import checkpoint_and_report, iter_records, kb_root, locate_record, project_root, rel
 from research.evidence import EvidenceSourceSnapshot, JUDGEMENT_CLAIM_TYPES, build_verification_receipt, validate_claims
 from research.journal import mutation_transaction
 from research.judgements import apply_judgement_rejection, readiness_violations, require_judgement_snapshot
@@ -56,7 +56,7 @@ REQUIRED_METHOD_CLAIMS = {
 
 
 def profile_resources(root: Path) -> dict[str, Any]:
-    profile = load_yaml(root / "kb" / "config" / "user-profile.yaml", default={})
+    profile = load_yaml(kb_root(root) / "config" / "user-profile.yaml", default={})
     if not isinstance(profile, dict):
         return {}
     resources = profile.get("resources", {})
@@ -65,7 +65,7 @@ def profile_resources(root: Path) -> dict[str, Any]:
 
 def profile_constraints(root: Path) -> list[str]:
     """Load only the canonical hard constraint field, never adjacent soft preferences."""
-    profile = load_yaml(root / "kb" / "config" / "user-profile.yaml", default={})
+    profile = load_yaml(kb_root(root) / "config" / "user-profile.yaml", default={})
     if not isinstance(profile, dict):
         return []
     constraints = profile.get("constraints", [])
@@ -324,14 +324,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def method_paths(root: Path, program_id: str, idea_id: str) -> dict[str, Path]:
-    design_root = root / "kb" / "programs" / program_id / "design"
+    design_root = kb_root(root) / "programs" / program_id / "design"
     return {
         "design_root": design_root,
         "method": design_root / f"{idea_id}-method.md",
         "choice": design_root / f"{idea_id}-repo-choice.yaml",
         "interfaces": design_root / f"{idea_id}-interfaces.yaml",
         "matrix": design_root / f"{idea_id}-experiment-matrix.yaml",
-        "state": root / "kb" / "programs" / program_id / "state.yaml",
+        "state": kb_root(root) / "programs" / program_id / "state.yaml",
         "events": program_reporting_events_path(root, program_id),
     }
 
@@ -624,7 +624,7 @@ def method_source_roots(
         return trusted_claim_source_roots(
             root,
             subject,
-            verification_root=root / "kb" / "programs" / program_id / "design",
+            verification_root=kb_root(root) / "programs" / program_id / "design",
         )
     except ValueError as exc:
         raise SystemExit(

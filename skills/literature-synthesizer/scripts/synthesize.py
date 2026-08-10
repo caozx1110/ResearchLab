@@ -148,7 +148,7 @@ def validated_synthesis_program_ids(root: Path, program_ids: list[str] | None) -
     for program_id in linked:
         if Path(program_id).name != program_id or program_id in {".", ".."}:
             raise ValueError("survey program id is not canonical")
-        program = root / "kb" / "programs" / program_id
+        program = kb_root(root) / "programs" / program_id
         if program.is_symlink() or not program.is_dir():
             raise ValueError(f"survey program does not exist: {program_id}")
     return linked
@@ -214,7 +214,7 @@ def _assert_composite_path_safe(root: Path, path: Path) -> None:
         cursor = cursor / part
         if cursor.is_symlink() or (cursor.exists() and not cursor.is_dir()):
             raise SystemExit("Composite survey state has an unsafe ancestor.")
-    allowed = (root / "kb" / "synthesis").resolve()
+    allowed = (kb_root(root) / "synthesis").resolve()
     try:
         path.resolve().relative_to(allowed)
     except ValueError as exc:
@@ -310,7 +310,7 @@ def ensure_evidence_gap_composite(
     for program_id in linked_program_ids:
         if Path(program_id).name != program_id or program_id in {".", ".."}:
             raise SystemExit("Survey program id is not canonical.")
-        program = root / "kb" / "programs" / program_id
+        program = kb_root(root) / "programs" / program_id
         if program.is_symlink() or not program.is_dir():
             raise SystemExit(f"Survey program does not exist: {program_id}")
     request_filters = {
@@ -774,7 +774,7 @@ def verify_survey_fill(payload: dict, root: Path) -> tuple[list[str], dict]:
             ):
                 violations.append("program_ids: contains an invalid program id")
                 continue
-            program = root / "kb" / "programs" / program_id
+            program = kb_root(root) / "programs" / program_id
             if program.is_symlink() or not program.is_dir():
                 violations.append(f"program_ids: program does not exist: {program_id}")
 
@@ -1010,7 +1010,7 @@ def _require_current_survey(root: Path, record: dict, path: Path) -> None:
 def _survey_reporting_paths(root: Path, record: dict) -> list[Path]:
     paths: list[Path] = []
     for program_id in record.get("program_ids", []):
-        program = root / "kb" / "programs" / str(program_id)
+        program = kb_root(root) / "programs" / str(program_id)
         if program.is_symlink() or not program.is_dir():
             raise ValueError(f"survey program is no longer available: {program_id}")
         paths.append(program_reporting_events_path(root, str(program_id)))

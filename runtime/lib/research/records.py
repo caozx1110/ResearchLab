@@ -16,6 +16,7 @@ from .common import (
     load_yaml,
     parse_iso_datetime,
     utc_now_iso,
+    workspace_root_roles,
 )
 from .evidence import (
     EvidenceArtifactSnapshot,
@@ -32,6 +33,11 @@ from .ids import (
     build_unit_id,
 )
 from .journal import mutation_transaction
+from .path_contract import (
+    TargetClass,
+    assert_no_follow_target,
+    logical_ref_to_physical_path,
+)
 from .relations import normalize_links
 from .paths import (
     UNIT_KIND_DIRS,
@@ -41,6 +47,7 @@ from .paths import (
     _text_list,
     _unique_text_list,
     kind_dir,
+    kb_root,
     record_path,
     unit_root,
     units_root,
@@ -300,7 +307,7 @@ def _read_record_snapshot(
     return CanonicalRecordSnapshot(
         kind=kind,
         unit_id=unit_id,
-        path=root_path / "kb" / "units" / UNIT_KIND_DIRS[kind] / unit_id / "record.yaml",
+        path=root_path / "units" / UNIT_KIND_DIRS[kind] / unit_id / "record.yaml",
         raw_bytes=raw_bytes,
         modified_time_ns=opened_after.st_mtime_ns,
         record=payload,
@@ -385,12 +392,12 @@ def _open_exact_unit_chain(
 ) -> tuple[Path, list[_AnchoredDirectory]] | None:
     if kind not in UNIT_KIND_DIRS or _SAFE_UNIT_DIRECTORY.fullmatch(unit_id) is None:
         return None
-    root_path = project_root.absolute()
+    root_path = workspace_root_roles(project_root).roots.data_root
     root_directory = _open_root_directory(root_path)
     if root_directory is None:
         return None
     chain = [root_directory]
-    for component in ("kb", "units", UNIT_KIND_DIRS[kind], unit_id):
+    for component in ("units", UNIT_KIND_DIRS[kind], unit_id):
         child = _open_child_directory(chain[-1], component)
         if child is None:
             for directory in reversed(chain):
@@ -431,11 +438,30 @@ def _canonical_project_parts(relative_path: str | Path) -> tuple[str, tuple[str,
     return Path(*parts).as_posix(), tuple(parts)
 
 
+def _canonical_and_physical_project_parts(
+    project_root: Path,
+    relative_path: str | Path,
+) -> tuple[str, tuple[str, ...]]:
+    """Map a stable logical or data-root-relative ref to safe physical parts."""
+    canonical, parts = _canonical_project_parts(relative_path)
+    roots = workspace_root_roles(project_root).roots
+    if parts[0] == "kb":
+        physical = logical_ref_to_physical_path(roots, canonical)
+    else:
+        physical = roots.data_root.joinpath(*parts)
+    assessment = assert_no_follow_target(
+        roots,
+        physical,
+        allowed_classes=(TargetClass.CANONICAL_ARTIFACT,),
+    )
+    return assessment.logical_ref, tuple(assessment.data_relative_path.parts)
+
+
 def _open_project_directory_chain(
     project_root: Path,
     relative_parts: Sequence[str],
 ) -> tuple[Path, list[_AnchoredDirectory]] | None:
-    root_path = project_root.absolute()
+    root_path = workspace_root_roles(project_root).roots.data_root
     root_directory = _open_root_directory(root_path)
     if root_directory is None:
         return None
@@ -459,8 +485,8 @@ def snapshot_project_file(
     if not isinstance(max_bytes, int) or max_bytes < 0 or max_bytes > _ARTIFACT_MAX_BYTES:
         raise ValueError("project file byte ceiling is outside the supported bound")
     try:
-        canonical, parts = _canonical_project_parts(relative_path)
-    except ValueError:
+        canonical, parts = _canonical_and_physical_project_parts(project_root, relative_path)
+    except (ValueError, SystemExit):
         return None
     opened = _open_project_directory_chain(project_root, parts[:-1])
     if opened is None:
@@ -499,7 +525,7 @@ def snapshot_project_file(
         return ProjectFileSnapshot(
             project_root=root_path,
             relative_path=canonical,
-            path=root_path / canonical,
+            path=root_path.joinpath(*parts),
             raw_bytes=raw_bytes,
             byte_sha256=hashlib.sha256(raw_bytes).hexdigest(),
             modified_time_ns=file_identity[4],
@@ -544,7 +570,7 @@ def _read_project_artifact_from_chain(
 ) -> EvidenceArtifactSnapshot | None:
     try:
         canonical, parts = _canonical_artifact_parts(artifact)
-    except ValueError:
+    except (ValueError, SystemExit):
         return None
     chain = list(base_chain)
     opened_children: list[_AnchoredDirectory] = []
@@ -605,7 +631,10 @@ def snapshot_project_evidence_source(
     ):
         return None
     try:
-        canonical_base, base_parts = _canonical_project_parts(base_relative_path)
+        canonical_base, base_parts = _canonical_and_physical_project_parts(
+            project_root,
+            base_relative_path,
+        )
         requested = sorted({_canonical_artifact_parts(item)[0] for item in artifacts})
     except ValueError:
         return None
@@ -704,7 +733,7 @@ def snapshot_project_evidence_source(
             source_unit_id=source_unit_id,
             kind=kind,
             artifacts=captured,
-            path=root_path / canonical_base,
+            path=root_path.joinpath(*base_parts),
             validate_current=validate_current,
         )
     finally:
@@ -761,7 +790,7 @@ def _read_artifact_from_unit_chain(
             artifact=canonical,
             raw_bytes=raw_bytes,
             byte_sha256=hashlib.sha256(raw_bytes).hexdigest(),
-            path=(root_path / "kb" / "units" / UNIT_KIND_DIRS[kind] / unit_id / canonical),
+            path=(root_path / "units" / UNIT_KIND_DIRS[kind] / unit_id / canonical),
             directory_identities=tuple(item.identity for item in opened_children),
             file_identity=file_identity,
         )
@@ -880,7 +909,6 @@ def _snapshot_unit_tree_artifacts(
                     byte_sha256=hashlib.sha256(raw_bytes).hexdigest(),
                     path=(
                         root_path
-                        / "kb"
                         / "units"
                         / UNIT_KIND_DIRS[kind]
                         / unit_id
@@ -1160,7 +1188,7 @@ def _snapshot_precanonical_unit_evidence(
             source_unit_id=unit_id,
             kind=kind,
             artifacts=captured_artifacts,
-            path=root_path / "kb" / "units" / UNIT_KIND_DIRS[kind] / unit_id,
+            path=root_path / "units" / UNIT_KIND_DIRS[kind] / unit_id,
             validate_current=validate_current,
         )
     finally:
@@ -1176,13 +1204,16 @@ def iter_canonical_record_snapshots(
     kinds = [kind] if kind else list(UNIT_KIND_DIRS)
     if any(item_kind not in UNIT_KIND_DIRS for item_kind in kinds):
         raise SystemExit(f"Unsupported unit kind: {kind}")
-    root_path = project_root.absolute()
+    try:
+        root_path = workspace_root_roles(project_root).roots.data_root
+    except SystemExit:
+        return []
     root_directory = _open_root_directory(root_path)
     if root_directory is None:
         return []
     base_chain = [root_directory]
     try:
-        for component in ("kb", "units"):
+        for component in ("units",):
             child = _open_child_directory(base_chain[-1], component)
             if child is None:
                 return []
@@ -1379,6 +1410,7 @@ def command_mutation(
     target_paths: Sequence[Path],
     *,
     commit_guard: Callable[[], None] | None = None,
+    allow_operational_state: bool = False,
 ) -> Iterator[None]:
     """Delegate command-scoped recovery and locking to the canonical transaction."""
     with mutation_transaction(
@@ -1386,6 +1418,11 @@ def command_mutation(
         op_type,
         target_paths,
         commit_guard=commit_guard,
+        allowed_target_classes=(
+            (TargetClass.CANONICAL_ARTIFACT, TargetClass.OPERATIONAL_STATE)
+            if allow_operational_state
+            else (TargetClass.CANONICAL_ARTIFACT,)
+        ),
     ):
         yield
 
@@ -1398,20 +1435,28 @@ def trusted_project_path(
     require: str,
 ) -> Path:
     """Return an existing canonical path only when no component is a symlink."""
-    project = project_root.resolve()
-    candidate = path if path.is_absolute() else project / path
+    snapshot = workspace_root_roles(project_root)
+    roots = snapshot.roots
+    if path.is_absolute():
+        candidate = path
+    else:
+        try:
+            _logical, physical_parts = _canonical_and_physical_project_parts(
+                project_root,
+                path,
+            )
+        except (ValueError, SystemExit) as exc:
+            raise ValueError("canonical path is outside the active data root") from exc
+        candidate = roots.data_root.joinpath(*physical_parts)
     try:
-        relative = candidate.relative_to(project)
+        assessment = assert_no_follow_target(
+            roots,
+            candidate,
+            allowed_classes=(TargetClass.CANONICAL_ARTIFACT,),
+        )
     except ValueError as exc:
-        raise ValueError("canonical path escapes the project root") from exc
-    if any(part in {"", ".", ".."} for part in relative.parts):
-        raise ValueError("canonical path contains an unsafe component")
-    cursor = project
-    for part in relative.parts:
-        cursor = cursor / part
-        if cursor.is_symlink():
-            raise ValueError("canonical path contains a symlink component")
-    resolved = candidate.resolve()
+        raise ValueError("canonical path is outside the active data root") from exc
+    resolved = assessment.physical_path.resolve()
     allowed = allowed_root.resolve()
     try:
         resolved.relative_to(allowed)
@@ -1449,11 +1494,11 @@ def trusted_program_root(project_root: Path, program_id: str) -> Path:
     identifier = str(program_id or "").strip()
     if not identifier or Path(identifier).name != identifier or identifier in {".", ".."}:
         raise ValueError("program id is not a canonical path component")
-    program_root = project_root / "kb" / "programs" / identifier
+    program_root = kb_root(project_root) / "programs" / identifier
     return trusted_project_path(
         project_root,
         program_root,
-        allowed_root=project_root / "kb" / "programs",
+        allowed_root=kb_root(project_root) / "programs",
         require="dir",
     )
 

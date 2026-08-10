@@ -32,6 +32,7 @@ from research.sources import (
     mark_search_candidate,
     stage_search_results,
 )
+from research.workspace_layout import initialize_workspace_layout
 
 
 def _project_root() -> Path:
@@ -52,6 +53,7 @@ def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
     (root / ".agents" / "lib").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    initialize_workspace_layout(root, REPO_ROOT)
     return root
 
 
@@ -82,7 +84,7 @@ def _effective_preference_selection(root: Path, task_context: dict[str, object])
         else:
             excluded.append(row)
     selection_id = "prefsel-portfolio01"
-    path = root / "kb" / "config" / "effective-preferences" / f"{selection_id}.yaml"
+    path = root / "config" / "effective-preferences" / f"{selection_id}.yaml"
     if not path.exists():
         record_effective_selection(
             root,
@@ -125,7 +127,7 @@ def _decision(root: Path, snapshot: dict, action_ids: list[str], *, decision_id:
 
 def _verified_program_decision(orchestrate, root: Path, *, confirmed: bool = False) -> tuple[dict, Path]:
     _program(orchestrate, root, "program-a")
-    evidence_path = root / "kb" / "programs" / "program-a" / "decision-evidence.md"
+    evidence_path = root / "programs" / "program-a" / "decision-evidence.md"
     evidence_path.write_text("The benchmark supports route A.\n", encoding="utf-8")
     claims = [
         {
@@ -394,7 +396,7 @@ def test_unit_linked_only_to_noncanonical_program_remains_visible(
 ) -> None:
     orchestrate = _load_orchestrator(f"orchestrator_orphan_{orphan_kind}")
     root = _workspace(tmp_path)
-    programs = root / "kb" / "programs"
+    programs = root / "programs"
     programs.mkdir(parents=True)
     if orphan_kind == "symlink":
         outside = tmp_path / "outside-program"
@@ -523,7 +525,7 @@ def test_terminal_monitor_run_is_excluded_and_bad_active_link_fails_closed(tmp_p
     snapshot = orchestrate.portfolio_candidate_snapshot(root)
     assert all(item["action_type"] != "resume-monitor-run" for item in snapshot["candidates"])
 
-    subscription_path_value = root / "kb/monitoring/subscriptions/monitor-active.yaml"
+    subscription_path_value = root / "monitoring/subscriptions/monitor-active.yaml"
     broken = load_yaml(subscription_path_value)
     broken["active_run_id"] = "missing-run"
     write_yaml_if_changed(subscription_path_value, broken)
@@ -763,7 +765,7 @@ def test_monitor_and_composite_owned_literature_stages_are_not_double_counted(
 def test_literature_stage_enumeration_rejects_symlink_leaf(tmp_path: Path) -> None:
     orchestrate = _load_orchestrator("orchestrator_literature_symlink")
     root = _workspace(tmp_path)
-    stage_root = root / "kb/synthesis/source-search"
+    stage_root = root / "synthesis/source-search"
     stage_root.mkdir(parents=True)
     outside = tmp_path / "outside.yaml"
     outside.write_text("id: escaped\n", encoding="utf-8")
@@ -921,8 +923,8 @@ def test_literature_stage_enumeration_revalidates_ancestor_chain(
         query="ancestor race",
         stop_reason="in_progress",
     )
-    stage_root = root / "kb/synthesis/source-search"
-    displaced = root / "kb/synthesis/source-search-displaced"
+    stage_root = root / "synthesis/source-search"
+    displaced = root / "synthesis/source-search-displaced"
     replacement = tmp_path / "replacement-source-search"
     replacement.mkdir()
     original_listdir = orchestrate.os.listdir
@@ -1688,7 +1690,7 @@ def test_candidate_snapshot_skips_symlinked_program_directory(tmp_path: Path) ->
         outside / "state.yaml",
         {"program_id": "outside", "stage": "active", "next_actions": ["Exfiltrate"]},
     )
-    (root / "kb" / "programs" / "linked").symlink_to(outside, target_is_directory=True)
+    (root / "programs" / "linked").symlink_to(outside, target_is_directory=True)
 
     snapshot = orchestrate.portfolio_candidate_snapshot(root)
 
