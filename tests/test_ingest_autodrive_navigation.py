@@ -12,7 +12,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 
 def _project_root() -> Path:
@@ -30,6 +30,7 @@ def _load(skill: str, script_name: str, mod_name: str):
 
 
 def test_paper_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     paper = _load("unit-analyst", "paper.py", "paper_nav_under_test")
     cache = tmp_path / "units" / "papers" / "p-demo-1234" / "parse-cache.yaml"
     fill = tmp_path / "units" / "papers" / "p-demo-1234" / "note-fill.yaml"
@@ -51,6 +52,7 @@ def test_paper_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
 
 
 def test_blog_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     blog = _load("unit-analyst", "blog.py", "blog_nav_under_test")
     cache = tmp_path / "units" / "blogs" / "b-demo-1234" / "parse-cache.yaml"
     fill = tmp_path / "units" / "blogs" / "b-demo-1234" / "blog-fill.yaml"
@@ -68,6 +70,7 @@ def test_blog_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
 
 
 def test_repo_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     repo = _load("unit-analyst", "repo.py", "repo_nav_under_test")
     fill = tmp_path / "units" / "repos" / "r-demo-1234" / "capability-fill.yaml"
     fill.parent.mkdir(parents=True, exist_ok=True)

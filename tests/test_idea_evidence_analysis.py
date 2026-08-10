@@ -15,6 +15,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, ensure_workspace, record_path
 from research.evidence import EvidenceSourceSnapshot, verification_receipt_violations
 from research.git_ops import undo_last_operation
+from research.paths import rel
 from research.records import canonical_record_snapshot_for_record
 
 
@@ -170,7 +171,7 @@ def _replace_with_same_bytes_new_inode(path: Path) -> None:
 
 
 def _journal_entry_snapshot(root: Path) -> dict[str, bytes]:
-    journal = root / "kb/.journal"
+    journal = root / ".journal"
     if not journal.exists():
         return {}
     return {
@@ -1081,13 +1082,13 @@ def test_generation_coherent_three_file_rewrite_cannot_materialize(
         "--bundle-id", "idea-bundle-anchor",
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools/idea-bundle-anchor"
+    working = root / "synthesis/idea-pools/idea-bundle-anchor"
     index_path = working / "index.yaml"
     prepared_before = index_path.read_bytes() if index_path.exists() else b""
     source_unit = record_path(root, "repo", source_id).parent
     late_path = source_unit / "generation-late.txt"
     late_path.write_text("Late generation evidence.\n", encoding="utf-8")
-    relative = late_path.relative_to(root).as_posix()
+    relative = rel(root, late_path)
     binding = idea.regular_file_binding(late_path, logical_identity=relative, trusted_root=root)
     corpus_path = working / "generation-evidence-corpus.yaml"
     corpus = load_yaml(corpus_path, default={})
@@ -1104,7 +1105,7 @@ def test_generation_coherent_three_file_rewrite_cannot_materialize(
     write_yaml_if_changed(corpus_path, corpus)
     corpus_binding = idea.regular_file_binding(
         corpus_path,
-        logical_identity=corpus_path.relative_to(root).as_posix(),
+        logical_identity=rel(root, corpus_path),
         trusted_root=root,
     )
     fill_path = working / "generation-fill.yaml"
@@ -1139,10 +1140,10 @@ def test_generation_coherent_three_file_rewrite_cannot_materialize(
         "next_actions": ["Reject the coherent rewrite"],
     })
     write_yaml_if_changed(fill_path, fill)
-    before_ids = {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")}
+    before_ids = {path.parent.name for path in (root / "units/ideas").glob("*/record.yaml")}
     with pytest.raises(SystemExit):
         _run(idea, monkeypatch, *common, "--phase", "verify")
-    after_ids = {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")}
+    after_ids = {path.parent.name for path in (root / "units/ideas").glob("*/record.yaml")}
     assert after_ids == before_ids
     assert index_path.read_bytes() == prepared_before
 
@@ -1195,7 +1196,7 @@ def test_generation_prepared_index_drift_is_not_overwritten(
         "--bundle-id", "idea-bundle-sentinel",
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools/idea-bundle-sentinel"
+    working = root / "synthesis/idea-pools/idea-bundle-sentinel"
     fill_path = working / "generation-fill.yaml"
     fill = load_yaml(fill_path, default={})
     fill["candidates"][0].update({
@@ -1211,11 +1212,11 @@ def test_generation_prepared_index_drift_is_not_overwritten(
     prepared["sentinel"] = f"do-not-overwrite-{round_index}"
     write_yaml_if_changed(index_path, prepared)
     sentinel_bytes = index_path.read_bytes()
-    before_ids = {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")}
+    before_ids = {path.parent.name for path in (root / "units/ideas").glob("*/record.yaml")}
     with pytest.raises(SystemExit):
         _run(idea, monkeypatch, *common, "--phase", "verify")
     assert index_path.read_bytes() == sentinel_bytes
-    assert {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")} == before_ids
+    assert {path.parent.name for path in (root / "units/ideas").glob("*/record.yaml")} == before_ids
 
 
 def test_generation_prepared_binding_rejects_same_bytes_atomic_replacement(
@@ -1229,7 +1230,7 @@ def test_generation_prepared_binding_rejects_same_bytes_atomic_replacement(
         "--bundle-id", "idea-bundle-cas",
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools/idea-bundle-cas"
+    working = root / "synthesis/idea-pools/idea-bundle-cas"
     fill_path = working / "generation-fill.yaml"
     fill = load_yaml(fill_path, default={})
     fill["candidates"][0].update({
@@ -1253,10 +1254,10 @@ def test_generation_prepared_binding_rejects_same_bytes_atomic_replacement(
         return original_preflight(args, project_root)
 
     monkeypatch.setattr(idea, "_idea_transaction_preflight", replace_before_locked_preflight)
-    before_ids = {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")}
+    before_ids = {path.parent.name for path in (root / "units/ideas").glob("*/record.yaml")}
     with pytest.raises(SystemExit):
         _run(idea, monkeypatch, *common, "--phase", "verify")
-    assert {path.parent.name for path in (root / "kb/units/ideas").glob("*/record.yaml")} == before_ids
+    assert {path.parent.name for path in (root / "units/ideas").glob("*/record.yaml")} == before_ids
 
 
 def test_generation_prepared_state_retries_then_materializes_and_becomes_terminal(
@@ -1270,7 +1271,7 @@ def test_generation_prepared_state_retries_then_materializes_and_becomes_termina
         "--bundle-id", "idea-bundle-lifecycle",
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools/idea-bundle-lifecycle"
+    working = root / "synthesis/idea-pools/idea-bundle-lifecycle"
     index_path = working / "index.yaml"
     prepared_snapshot = _path_snapshot([index_path])
     assert load_yaml(index_path, default={})["status"] == "prepared"
@@ -1311,7 +1312,7 @@ def test_generation_prepare_rebuilds_missing_fill_and_checkpoints_exact_target(
         "--bundle-id", bundle_id,
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools" / bundle_id
+    working = root / "synthesis/idea-pools" / bundle_id
     index_path = working / "index.yaml"
     fill_path = working / "generation-fill.yaml"
     prepared_bytes = index_path.read_bytes()
@@ -1355,7 +1356,7 @@ def test_generation_ownerless_mixed_tuple_is_rejected_before_journal(
         "--bundle-id", bundle_id,
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools" / bundle_id
+    working = root / "synthesis/idea-pools" / bundle_id
     index_path = working / "index.yaml"
     fill_path = working / "generation-fill.yaml"
     orientation_path = working / "generation-orientation.yaml"
@@ -1402,7 +1403,7 @@ def test_generation_exact_legacy_tuple_can_refresh_to_new_owner(
         "--bundle-id", bundle_id,
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools" / bundle_id
+    working = root / "synthesis/idea-pools" / bundle_id
     index_path = working / "index.yaml"
     fill_path = working / "generation-fill.yaml"
     orientation_path = working / "generation-orientation.yaml"
@@ -1444,7 +1445,7 @@ def test_prepared_generation_bundle_rejects_generic_bundle_entrypoints(
         "--bundle-id", bundle_id,
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    index_path = root / "kb/synthesis/idea-pools" / bundle_id / "index.yaml"
+    index_path = root / "synthesis/idea-pools" / bundle_id / "index.yaml"
     if drift_schema_and_status:
         drifted = load_yaml(index_path, default={})
         drifted["schema"] = "drifted-away-from-prepared-schema"
@@ -1486,7 +1487,7 @@ def test_generic_bundle_symlink_paths_fail_before_journal_without_touching_victi
     _multi_setup(root, idea, count=1)
     pool = "unsafe-pool"
     bundle_id = "unsafe-pool"
-    pools_root = root / "kb/synthesis/idea-pools"
+    pools_root = root / "synthesis/idea-pools"
     pools_root.mkdir(parents=True, exist_ok=True)
     bundle = pools_root / bundle_id
     victim = root / "victim-bundle"
@@ -1545,7 +1546,7 @@ def test_generic_bundle_locked_preflight_rejects_index_symlink_swap(
     idea.ensure_bundle(
         root, bundle_id, title="safe before swap", source="", pool=pool, strategy="review"
     )
-    bundle = root / "kb/synthesis/idea-pools" / bundle_id
+    bundle = root / "synthesis/idea-pools" / bundle_id
     index_path = bundle / "index.yaml"
     victim = root / "locked-swap-victim.yaml"
     write_yaml_if_changed(victim, {"sentinel": "preserve"})
@@ -1579,7 +1580,7 @@ def test_generic_bundle_regular_path_still_supports_review_assist(
     assert _run(
         idea, monkeypatch, "review-assist", "--idea-id", idea_ids[0]
     ) == 0
-    bundles = [path for path in (root / "kb/synthesis/idea-pools").iterdir() if path.is_dir()]
+    bundles = [path for path in (root / "synthesis/idea-pools").iterdir() if path.is_dir()]
     assert len(bundles) == 1
     assert (bundles[0] / "index.yaml").is_file()
     assert not (bundles[0] / "index.yaml").is_symlink()
@@ -1598,7 +1599,7 @@ def test_legacy_v1_generation_is_one_time_and_records_value_free_provenance(
         "--bundle-id", bundle_id,
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools" / bundle_id
+    working = root / "synthesis/idea-pools" / bundle_id
     corpus_path = working / "generation-evidence-corpus.yaml"
     corpus = load_yaml(corpus_path, default={})
     corpus["schema"] = "idea-evidence-corpus/v1"
@@ -1669,7 +1670,7 @@ def test_generation_post_write_failure_restores_prepared_owner_and_retries(
         "--bundle-id", bundle_id,
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools" / bundle_id
+    working = root / "synthesis/idea-pools" / bundle_id
     index_path = working / "index.yaml"
     fill_path = working / "generation-fill.yaml"
     fill = load_yaml(fill_path, default={})
@@ -1684,7 +1685,7 @@ def test_generation_post_write_failure_restores_prepared_owner_and_retries(
     prepared_bytes = index_path.read_bytes()
     before_ids = {
         path.parent.name
-        for path in (root / "kb/units/ideas").glob("*/record.yaml")
+        for path in (root / "units/ideas").glob("*/record.yaml")
     }
     original_build_index = idea.build_index
     monkeypatch.setattr(
@@ -1699,7 +1700,7 @@ def test_generation_post_write_failure_restores_prepared_owner_and_retries(
     assert index_path.read_bytes() == prepared_bytes
     assert {
         path.parent.name
-        for path in (root / "kb/units/ideas").glob("*/record.yaml")
+        for path in (root / "units/ideas").glob("*/record.yaml")
     } == before_ids
     monkeypatch.setattr(idea, "build_index", original_build_index)
     assert _run(idea, monkeypatch, *common, "--phase", "verify") == 0
@@ -1754,7 +1755,7 @@ def test_undo_generation_materialization_restores_prepared_bundle_and_retries(
         "--bundle-id", bundle_id,
     )
     assert _run(idea, monkeypatch, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools" / bundle_id
+    working = root / "synthesis/idea-pools" / bundle_id
     index_path = working / "index.yaml"
     fill_path = working / "generation-fill.yaml"
     fill = load_yaml(fill_path, default={})

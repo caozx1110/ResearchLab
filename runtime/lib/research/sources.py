@@ -5117,7 +5117,14 @@ def _record_blocks_source_retry(project_root: Path, record: dict[str, Any]) -> b
         return False
     backup_kind = str(source.get("backup_kind") or "").strip()
     backup_paths = [str(item).strip() for item in source.get("backup_paths", []) if str(item).strip()]
-    existing = [(project_root / item) for item in backup_paths if (project_root / item).exists()]
+    existing: list[Path] = []
+    for item in backup_paths:
+        try:
+            candidate = _source_reference_path(project_root, item)
+        except (SystemExit, ValueError):
+            continue
+        if candidate.exists() and not candidate.is_symlink():
+            existing.append(candidate)
     if backup_kind == "directory":
         return any(path.is_dir() for path in existing)
     return bool(str(source.get("file_hash") or "").strip()) and bool(existing)

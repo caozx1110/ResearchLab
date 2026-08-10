@@ -14,7 +14,7 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, record_path, write_record
-from research.paths import config_root, runtime_preferences_path
+from research.paths import config_root, rel, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences, ensure_workspace
 
@@ -367,7 +367,7 @@ def test_all_intake_kinds_reject_wrong_receipts_without_workspace_writes(
 
     assert _workspace_snapshot(root) == before
     assert not intake._prepared_dir(root, token).exists()
-    assert not list((root / "kb").glob(".runtime/intake-staging/**/*"))
+    assert not list(root.glob(".runtime/intake-staging/**/*"))
 
 
 def test_no_receipt_uses_only_hard_fallback_and_persists_value_free_digests(
@@ -555,11 +555,11 @@ def test_complete_local_paper_revision_archives_degraded_unconfirmed_unit_withou
     old["source"].update(
         {
             "backup_kind": "file",
-            "backup_paths": [old_original.relative_to(root).as_posix()],
+            "backup_paths": [rel(root, old_original)],
             "file_hash": intake.hashlib.sha256(old_original.read_bytes()).hexdigest(),
             "backup_status": "degraded",
             "source_type": "arxiv-html",
-            "markdown_path": old_document.relative_to(root).as_posix(),
+            "markdown_path": rel(root, old_document),
             "materialization": {"status": "degraded"},
         }
     )
@@ -680,7 +680,7 @@ def test_verified_degraded_paper_requires_decision_before_source_revision(
     old["source"].update(
         {
             "backup_kind": "file",
-            "backup_paths": [original.relative_to(root).as_posix()],
+            "backup_paths": [rel(root, original)],
             "file_hash": intake.hashlib.sha256(original.read_bytes()).hexdigest(),
             "backup_status": "degraded",
             "source_type": "arxiv-html",

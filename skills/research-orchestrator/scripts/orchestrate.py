@@ -61,6 +61,7 @@ from research.index import governance_catalog_drift
 from research.judgements import BoundJudgementSnapshot, apply_judgement_rejection, confirmation_binding, discover_pending_judgements, discover_stale_confirmed_surveys, judgement_confirmation_is_current, judgement_snapshot_binding, load_bound_judgement_snapshot, readiness_violations, require_judgement_snapshot
 from research.journal import mutation_transaction
 from research.monitoring import active_monitor_runs, due_subscriptions, unresolved_monitor_outcomes
+from research.paths import rel
 from research.preference_selection import (
     resolve_operation_preferences,
     resolve_task_preferences,
@@ -1016,7 +1017,7 @@ def legacy_decision_items(root: Path, program_id: str) -> list[dict[str, Any]]:
                     }
                 },
                 "legacy_import": {
-                    "source": path.relative_to(root).as_posix(),
+                    "source": rel(root, path),
                     "original_confirmation_status": original_confirmation,
                     "trust": "pending_unverified",
                 },
@@ -1120,7 +1121,7 @@ def print_normalized_unit_id(requested_id: str, resolved_id: str, path: Path, ro
     if requested_id == resolved_id:
         return
     print(f"normalized unit id: {requested_id} -> {resolved_id}")
-    print(f"canonical unit record: {path.relative_to(root)}")
+    print(f"canonical unit record: {rel(root, path)}")
 
 
 def ensure_unit_program_link(root: Path, program_id: str, unit_id: str) -> tuple[str, str]:
@@ -2450,7 +2451,7 @@ def _program_decision_reference_plan(
                     "kind": "program_decision",
                     "id": decision_id,
                     "owner": "research-orchestrator",
-                    "path": artifact_path.relative_to(root).as_posix(),
+                    "path": rel(root, artifact_path),
                 },
             )
         except (OSError, ValueError) as exc:
@@ -2477,7 +2478,7 @@ def _program_decision_reference_plan(
         binding = judgement_snapshot_binding(
             record,
             owner=bound.owner,
-            path=bound.path.relative_to(root).as_posix(),
+            path=rel(root, bound.path),
             bound_snapshot=bound,
         )
         binding["confirmation_digest"] = _canonical_digest(record.get("confirmation") or {})
@@ -2985,11 +2986,11 @@ def refresh_state_counts(root: Path, program_id: str, payload: dict, *, material
     payload.setdefault("workflow_files", {})
     payload["workflow_files"].update(
         {
-            "open_questions": open_questions_path(root, program_id).relative_to(root).as_posix(),
-            "evidence_requests": evidence_requests_path(root, program_id).relative_to(root).as_posix(),
-            "decisions": decisions_path(root, program_id).relative_to(root).as_posix(),
-            "decision_log": decision_log_path(root, program_id).relative_to(root).as_posix(),
-            "reporting_events": reporting_events_path(root, program_id).relative_to(root).as_posix(),
+            "open_questions": rel(root, open_questions_path(root, program_id)),
+            "evidence_requests": rel(root, evidence_requests_path(root, program_id)),
+            "decisions": rel(root, decisions_path(root, program_id)),
+            "decision_log": rel(root, decision_log_path(root, program_id)),
+            "reporting_events": rel(root, reporting_events_path(root, program_id)),
         }
     )
     payload["counts"] = {
@@ -3322,7 +3323,7 @@ def _program_decision_context(
         selected,
         expected_snapshot=expected_snapshot,
         owner="research-orchestrator",
-        path=decisions_yaml.relative_to(root).as_posix(),
+        path=rel(root, decisions_yaml),
         root=root,
     )
     return items, selected, decisions_yaml
@@ -3430,12 +3431,12 @@ def apply_review_batch_decision(
                 "summary": str(decision_payload.get("rationale") or ""),
                 "stage": str(decision_payload.get("stage") or ""),
                 "tags": ["decision", "confirmed"],
-                "artifacts": [decisions_yaml.relative_to(root).as_posix(), log_path.relative_to(root).as_posix()],
+                "artifacts": [rel(root, decisions_yaml), rel(root, log_path)],
                 "epistemic_type": "judgement",
                 "information_types": ["inference", "evaluation"],
                 "confirmation_status": "confirmed",
                 "confirmation_binding": confirmation_binding(
-                    selected, owner="research-orchestrator", path=decisions_yaml.relative_to(root).as_posix()
+                    selected, owner="research-orchestrator", path=rel(root, decisions_yaml)
                 ),
             },
             generated_by="research-orchestrator",
@@ -3491,7 +3492,7 @@ def main() -> int:
                     "summary": args.goal,
                     "stage": "init",
                     "tags": ["program-state"],
-                    "artifacts": [state_path(root, args.program_id).relative_to(root).as_posix()],
+                    "artifacts": [rel(root, state_path(root, args.program_id))],
                 },
                 generated_by="research-orchestrator",
             )
@@ -3623,9 +3624,9 @@ def main() -> int:
                 # Programmatic callers (e.g. the kb status dispatcher) stay
                 # read-only; they already receive the snapshot and template.
                 if draft_path.is_file() and not draft_path.is_symlink():
-                    draft_relative = draft_path.relative_to(root).as_posix()
+                    draft_relative = rel(root, draft_path)
             elif snapshot["candidate_count"] > 0:
-                draft_relative = draft_path.relative_to(root).as_posix()
+                draft_relative = rel(root, draft_path)
                 kept_existing_draft = not _write_selection_draft(
                     root, draft_path, snapshot, profile=profile
                 )
@@ -3826,13 +3827,13 @@ def main() -> int:
                     "title": args.question,
                     "summary": "Created a durable program query note.",
                     "stage": str(state.get("stage") or ""),
-                    "artifacts": [query_path.relative_to(root).as_posix()],
+                    "artifacts": [rel(root, query_path)],
                     "tags": ["query", "program"],
                 },
                 generated_by="research-orchestrator",
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
-        print(query_path.relative_to(root))
+        print(rel(root, query_path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: query program {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id, query_path),
@@ -3856,7 +3857,7 @@ def main() -> int:
                 default_status="open",
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: add open question {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
@@ -3876,7 +3877,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] answered {item.get('id')}")
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: answer open question {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
@@ -3896,7 +3897,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] dropped {item.get('id')}")
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: drop open question {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
@@ -3931,12 +3932,12 @@ def main() -> int:
                     "summary": args.needed,
                     "stage": current_state.get("stage", ""),
                     "tags": ["evidence-request", args.source_type],
-                    "artifacts": [path.relative_to(root).as_posix()],
+                    "artifacts": [rel(root, path)],
                 },
                 generated_by="research-orchestrator",
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: request evidence {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
@@ -3980,7 +3981,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] fulfilled {item.get('id')}")
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: resolve evidence {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
@@ -4000,7 +4001,7 @@ def main() -> int:
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
         print(f"[ok] dropped {item.get('id')}")
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: drop evidence {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
@@ -4030,7 +4031,7 @@ def main() -> int:
                     alternatives=normalize_list(args.alternative),
                     evidence=normalize_list(args.evidence),
                 )
-            print(fill_path.relative_to(root))
+            print(rel(root, fill_path))
             checkpoint_and_report(
                 root,
                 trigger="milestone",
@@ -4083,8 +4084,8 @@ def main() -> int:
                     "stage": item["payload"]["decision"]["stage"],
                     "tags": ["decision", "pending"],
                     "artifacts": [
-                        decisions_yaml.relative_to(root).as_posix(),
-                        path.relative_to(root).as_posix(),
+                        rel(root, decisions_yaml),
+                        rel(root, path),
                         *item["evidence"],
                     ],
                     "epistemic_type": "judgement",
@@ -4093,7 +4094,7 @@ def main() -> int:
                     "confirmation_binding": confirmation_binding(
                         item,
                         owner="research-orchestrator",
-                        path=decisions_yaml.relative_to(root).as_posix(),
+                        path=rel(root, decisions_yaml),
                     ),
                 },
                 generated_by="research-orchestrator",
@@ -4106,7 +4107,7 @@ def main() -> int:
                 "confirmation_status": args.confirmation_status,
             }
             write_state(root, args.program_id, state)
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: log decision {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
@@ -4139,7 +4140,7 @@ def main() -> int:
                     selected,
                     expected_snapshot=args.expected_snapshot,
                     owner="research-orchestrator",
-                    path=decisions_path(root, args.program_id).relative_to(root).as_posix(),
+                    path=rel(root, decisions_path(root, args.program_id)),
                     root=root,
                 )
             except ValueError as exc:
@@ -4162,7 +4163,7 @@ def main() -> int:
             binding = confirmation_binding(
                 selected,
                 owner="research-orchestrator",
-                path=decisions_yaml.relative_to(root).as_posix(),
+                path=rel(root, decisions_yaml),
             )
             append_program_reporting_event(
                 root,
@@ -4175,8 +4176,8 @@ def main() -> int:
                     "stage": str(decision_payload.get("stage") or ""),
                     "tags": ["decision", "confirmed"],
                     "artifacts": [
-                        decisions_yaml.relative_to(root).as_posix(),
-                        path.relative_to(root).as_posix(),
+                        rel(root, decisions_yaml),
+                        rel(root, path),
                     ],
                     "epistemic_type": "judgement",
                     "information_types": ["inference", "evaluation"],
@@ -4193,7 +4194,7 @@ def main() -> int:
                 "confirmation_status": "confirmed",
             }
             write_state(root, args.program_id, state)
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint_and_report(
             root,
             trigger="milestone",
@@ -4228,7 +4229,7 @@ def main() -> int:
                     selected,
                     expected_snapshot=args.expected_snapshot,
                     owner="research-orchestrator",
-                    path=decisions_yaml.relative_to(root).as_posix(),
+                    path=rel(root, decisions_yaml),
                     root=root,
                 )
             except ValueError as exc:
@@ -4245,7 +4246,7 @@ def main() -> int:
                 "confirmation_status": "rejected",
             }
             write_state(root, args.program_id, state)
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint_and_report(
             root,
             trigger="milestone",
@@ -4272,7 +4273,7 @@ def main() -> int:
                 generated_by="research-orchestrator",
             )
             write_state(root, args.program_id, load_state(root, args.program_id))
-        print(path.relative_to(root))
+        print(rel(root, path))
         checkpoint = checkpoint_and_report(
             root, trigger="milestone", message=f"milestone: add reporting event {args.program_id}",
             target_paths=program_checkpoint_paths(root, args.program_id),
