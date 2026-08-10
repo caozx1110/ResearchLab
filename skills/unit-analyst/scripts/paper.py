@@ -4,7 +4,7 @@ agent fills the understanding (`docs/DESIGN.md`, "Prepare / fill / verify").
 
 The script is deliberately *not* allowed to understand the paper. It (a) parses the
 source into a parse-cache, (b) emits a **fillable structure** (screening scaffold /
-5-element note skeleton) whose judgement fields are left blank for a runtime agent,
+versioned multidimensional note skeleton) whose judgement fields are left blank for a runtime agent,
 and (c) **verifies** every judgement the agent fills carries legit verbatim evidence
 (research.evidence) before it clears the substance gate (research.confirm) and is
 persisted. There is no keyword-count → grade heuristic anywhere: any "novelty=strong"
@@ -95,6 +95,15 @@ from research.preference_selection import (
     operation_contract,
     resolve_task_preferences,
     selection_binding,
+)
+from research.paper_notes import (
+    PAPER_DEEP_READ_SCHEMA,
+    PAPER_NOTE_CLAIM_SCHEMA,
+    PAPER_NOTE_FILL_SCHEMA,
+    PAPER_SECTION_SPECS,
+    PAPER_TYPES,
+    paper_section_contract,
+    required_paper_sections,
 )
 from research.source_navigation import (
     SourceReadingTarget,
@@ -228,7 +237,6 @@ def _transactional(op_name: str, target_builder):
 
     return decorate
 
-PAPER_TYPES: tuple[str, ...] = ("method_system", "benchmark", "survey")
 SCREENING_DIMENSION_RATINGS: dict[str, tuple[str, ...]] = {
     # institutions is descriptive only; it must never become a prestige score.
     "institutions": ("identified", "not_disclosed", "unclear"),
@@ -240,11 +248,11 @@ SCREENING_DIMENSION_RATINGS: dict[str, tuple[str, ...]] = {
 }
 
 # --------------------------------------------------------------------------- #
-# Fill contracts (.agents/lib/research/SCHEMAS.md#paper-element-sets).         #
+# Read-only v1 fill compatibility (.agents/lib/research/SCHEMAS.md).           #
 #                                                                             #
-# A runtime agent classifies the paper inside the deep-read fill and fills the  #
-# selected five elements; the type and every element are judgement-class       #
-# claims and MUST carry >=1 evidence_ref. The script only validates and routes. #
+# New prepares use paper-note-fill/v2 and the required matrix imported above.  #
+# These five-element constants remain solely so schema-less historical fills    #
+# and records can still be verified without migration or silent reinterpretation. #
 # --------------------------------------------------------------------------- #
 ELEMENT_SETS: dict[str, tuple[str, ...]] = {
     "method_system": ("motivation", "method", "experiment", "limitation", "insight"),
@@ -742,21 +750,10 @@ def build_note_scaffold(
     digest_chunks: int,
     digest_chars: int,
 ) -> dict:
-    """Produce one unified deep-read scaffold; the script authors no judgement."""
+    """Produce one v2 multidimensional scaffold; the script authors no judgement."""
     digest = _evidence_digest(source_chunks, cache_locator_kind, chunk_limit=digest_chunks, excerpt_chars=digest_chars)
-    element_sets = {
-        paper_type: [
-            {
-                "element": name,
-                "claim_type": ELEMENT_CLAIM_TYPE[name],
-                "content": "",
-                "evidence_refs": [],
-            }
-            for name in required_elements
-        ]
-        for paper_type, required_elements in ELEMENT_SETS.items()
-    }
     return {
+        "schema": PAPER_NOTE_FILL_SCHEMA,
         "paper_id": record["id"],
         "kind": "paper",
         "paper_type": "",
@@ -766,20 +763,33 @@ def build_note_scaffold(
         "phase": "prepare",
         "fill_contract": {
             "description": (
-                "Agent selects paper_type, explains it with verbatim evidence, and fills only that type's "
-                "five-element branch. Every selected element needs >=1 verbatim evidence_ref; all unselected "
-                "branches stay blank. Verification writes the canonical type and note only after every claim passes."
+                "Agent selects one paper type, explains it with verbatim evidence, then fills every common "
+                "and selected type-specific section. Each assessed section has a summary plus one or more "
+                "independent evidence-backed claims; a genuinely inapplicable section uses the explicit "
+                "evidence-backed not_applicable shape."
             ),
             "paper_type": f"agent fills one of {'|'.join(PAPER_TYPES)}",
             "paper_type_reason": "agent explains the evidence-grounded classification",
             "paper_type_evidence_refs": "agent attaches >=1 verbatim evidence_ref",
-            "element_sets": {name: list(elements) for name, elements in ELEMENT_SETS.items()},
-            "element_claim_types": dict(ELEMENT_CLAIM_TYPE),
+            "section_matrix": paper_section_contract(),
+            "assessed": {
+                "summary": "non-empty agent synthesis",
+                "not_applicable_reason": "",
+                "not_applicable_evidence_refs": [],
+                "claims": "one or more independent claims using the section claim_types",
+            },
+            "not_applicable": {
+                "summary": "",
+                "not_applicable_reason": "non-empty reviewable reason",
+                "not_applicable_evidence_refs": "one or more verbatim refs",
+                "claims": [],
+            },
+            "claim_identity": "section-local lowercase slug; canonical id is derived deterministically",
             "evidence_ref_format": EVIDENCE_REF_FORMAT,
         },
         "evidence_digest": digest,
-        # --- agent fills type fields + exactly one branch below ---
-        "element_sets": element_sets,
+        # The runtime Agent fills exactly the common + selected type section set.
+        "sections": [],
     }
 
 
@@ -811,6 +821,21 @@ def _all_note_evidence_items(fill: Any) -> list[dict]:
     items: list[dict] = [
         {"evidence_refs": fill.get("paper_type_evidence_refs") or []}
     ]
+    if str(fill.get("schema") or "") == PAPER_NOTE_FILL_SCHEMA:
+        sections = fill.get("sections")
+        for section in sections if isinstance(sections, list) else []:
+            if not isinstance(section, dict):
+                continue
+            items.append(
+                {
+                    "evidence_refs": section.get("not_applicable_evidence_refs")
+                    or []
+                }
+            )
+            claims = section.get("claims")
+            if isinstance(claims, list):
+                items.extend(claim for claim in claims if isinstance(claim, dict))
+        return items
     branches = fill.get("element_sets")
     if isinstance(branches, dict):
         for branch in branches.values():
@@ -831,8 +856,14 @@ def _claim_from_element(name: str, element: dict) -> dict:
     }
 
 
-def _claim_from_paper_type(paper_type: str, reason: str, evidence_refs: object) -> dict:
-    return {
+def _claim_from_paper_type(
+    paper_type: str,
+    reason: str,
+    evidence_refs: object,
+    *,
+    v2: bool = False,
+) -> dict:
+    claim = {
         "id": "claim-paper-type",
         # Both semantic values are copied from the Agent fill. Deterministic
         # serialization keeps the type visible in generic claim/review projection;
@@ -843,9 +874,247 @@ def _claim_from_paper_type(paper_type: str, reason: str, evidence_refs: object) 
         "evidence_refs": evidence_refs if isinstance(evidence_refs, list) else [],
         "paper_type": paper_type,
     }
+    if v2:
+        claim.update(
+            {
+                "paper_note_schema": PAPER_NOTE_CLAIM_SCHEMA,
+                "paper_section_id": "paper_type",
+                "paper_section_status": "assessed",
+                "paper_local_claim_id": "classification",
+            }
+        )
+    return claim
 
 
-def verify_note_fill(fill: Any, unit_dir: Path, record: dict | None = None) -> tuple[list[str], list[dict]]:
+_V2_LOCAL_CLAIM_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,47}$")
+
+
+def _v2_canonical_claim_id(section_id: str, local_id: str) -> str:
+    return f"claim-paper-v2-{section_id.replace('_', '-')}-{local_id}"
+
+
+def _v2_sections_by_id(fill: Mapping[str, Any]) -> tuple[dict[str, dict], list[str]]:
+    raw_sections = fill.get("sections")
+    if not isinstance(raw_sections, list):
+        return {}, ["sections: must be a list"]
+    sections: dict[str, dict] = {}
+    violations: list[str] = []
+    for index, raw_section in enumerate(raw_sections, start=1):
+        if not isinstance(raw_section, dict):
+            violations.append(f"sections[{index}]: section must be a mapping")
+            continue
+        section_id = str(raw_section.get("section_id") or "").strip()
+        if not section_id:
+            violations.append(f"sections[{index}].section_id: missing")
+            continue
+        if section_id in sections:
+            violations.append(f"sections.{section_id}: duplicate section")
+            continue
+        sections[section_id] = raw_section
+    return sections, violations
+
+
+def _v2_claim(
+    *,
+    section_id: str,
+    section_status: str,
+    local_id: str,
+    text: str,
+    claim_type: str,
+    evidence_refs: object,
+) -> dict:
+    return {
+        "id": _v2_canonical_claim_id(section_id, local_id),
+        "text": clean_text(text),
+        "claim_type": claim_type,
+        "confirmation_status": "pending_user_confirmation",
+        "evidence_refs": evidence_refs if isinstance(evidence_refs, list) else [],
+        "paper_note_schema": PAPER_NOTE_CLAIM_SCHEMA,
+        "paper_section_id": section_id,
+        "paper_section_status": section_status,
+        "paper_local_claim_id": local_id,
+    }
+
+
+def _verify_v2_note_fill(
+    fill: Mapping[str, Any],
+    unit_dir: Path,
+    record: dict | None,
+) -> tuple[list[str], list[dict]]:
+    violations: list[str] = []
+    if str(fill.get("schema") or "") != PAPER_NOTE_FILL_SCHEMA:
+        violations.append(f"schema: expected {PAPER_NOTE_FILL_SCHEMA}")
+    if str(fill.get("kind") or "") != "paper":
+        violations.append("kind: expected paper")
+    paper_id = str(fill.get("paper_id") or "").strip()
+    if not paper_id:
+        violations.append("paper_id: missing")
+    if isinstance(record, dict) and paper_id != str(record.get("id") or ""):
+        violations.append("paper_id: fill belongs to another paper unit")
+
+    declared_type = str(fill.get("paper_type") or "").strip().lower()
+    if declared_type not in PAPER_TYPES:
+        violations.append(f"paper_type: agent must fill one of {'|'.join(PAPER_TYPES)}")
+    selected_type = declared_type if declared_type in PAPER_TYPES else PAPER_TYPES[0]
+    type_reason = clean_text(str(fill.get("paper_type_reason") or ""))
+    type_refs = fill.get("paper_type_evidence_refs")
+    if not type_reason:
+        violations.append("paper_type_reason: empty")
+    if not isinstance(type_refs, list) or not type_refs:
+        violations.append("paper_type_evidence_refs: requires at least one verbatim evidence ref")
+    type_claim = _claim_from_paper_type(
+        selected_type,
+        type_reason,
+        type_refs,
+        v2=True,
+    )
+    claims: list[dict] = [type_claim]
+    for violation in verify_claim_evidence(type_claim, unit_dir):
+        violations.append(f"paper_type: {violation}")
+
+    sections, section_violations = _v2_sections_by_id(fill)
+    violations.extend(section_violations)
+    required_specs = required_paper_sections(selected_type)
+    required_ids = [spec.section_id for spec in required_specs]
+    required_set = set(required_ids)
+    raw_sections = fill.get("sections")
+    actual_order = [
+        str(section.get("section_id") or "").strip()
+        for section in (raw_sections if isinstance(raw_sections, list) else [])
+        if isinstance(section, dict)
+    ]
+    if actual_order != required_ids:
+        violations.append(
+            "sections: order must exactly match the common and selected paper-type matrix"
+        )
+    for section_id in required_ids:
+        if section_id not in sections:
+            violations.append(f"sections.{section_id}: missing required section")
+    for section_id in sorted(set(sections) - required_set):
+        if section_id in PAPER_SECTION_SPECS:
+            violations.append(
+                f"sections.{section_id}: section does not belong to selected paper_type {selected_type}"
+            )
+        else:
+            violations.append(f"sections.{section_id}: unknown section")
+
+    canonical_ids = {"claim-paper-type"}
+    for spec in required_specs:
+        section = sections.get(spec.section_id)
+        if not isinstance(section, dict):
+            continue
+        for field_name in (
+            "status",
+            "summary",
+            "not_applicable_reason",
+            "not_applicable_evidence_refs",
+            "claims",
+        ):
+            if field_name not in section:
+                violations.append(f"sections.{spec.section_id}.{field_name}: missing")
+        status = str(section.get("status") or "").strip().lower()
+        summary = clean_text(str(section.get("summary") or ""))
+        na_reason = clean_text(str(section.get("not_applicable_reason") or ""))
+        na_refs = section.get("not_applicable_evidence_refs")
+        raw_claims = section.get("claims")
+        if status == "assessed":
+            if not summary:
+                violations.append(f"sections.{spec.section_id}.summary: assessed section requires a summary")
+            if na_reason:
+                violations.append(
+                    f"sections.{spec.section_id}.not_applicable_reason: must be empty when assessed"
+                )
+            if not isinstance(na_refs, list) or na_refs:
+                violations.append(
+                    f"sections.{spec.section_id}.not_applicable_evidence_refs: must be an empty list when assessed"
+                )
+            if not isinstance(raw_claims, list) or not raw_claims:
+                violations.append(
+                    f"sections.{spec.section_id}.claims: assessed section requires at least one claim"
+                )
+                continue
+            local_ids: set[str] = set()
+            for claim_index, raw_claim in enumerate(raw_claims, start=1):
+                prefix = f"sections.{spec.section_id}.claims[{claim_index}]"
+                if not isinstance(raw_claim, dict):
+                    violations.append(f"{prefix}: claim must be a mapping")
+                    continue
+                local_id = str(raw_claim.get("id") or "").strip()
+                if _V2_LOCAL_CLAIM_ID_RE.fullmatch(local_id) is None:
+                    violations.append(f"{prefix}.id: must be a stable lowercase slug")
+                    continue
+                if local_id in local_ids:
+                    violations.append(f"{prefix}.id: duplicate section-local claim id")
+                    continue
+                local_ids.add(local_id)
+                canonical_id = _v2_canonical_claim_id(spec.section_id, local_id)
+                if canonical_id in canonical_ids:
+                    violations.append(f"{prefix}.id: duplicate canonical claim id")
+                    continue
+                canonical_ids.add(canonical_id)
+                text = clean_text(str(raw_claim.get("text") or ""))
+                claim_type = str(raw_claim.get("claim_type") or "").strip()
+                refs = raw_claim.get("evidence_refs")
+                if not text:
+                    violations.append(f"{prefix}.text: empty")
+                if claim_type not in spec.claim_types:
+                    violations.append(
+                        f"{prefix}.claim_type: expected one of {'|'.join(spec.claim_types)}"
+                    )
+                if not isinstance(refs, list) or not refs:
+                    violations.append(f"{prefix}.evidence_refs: requires at least one verbatim ref")
+                claim = _v2_claim(
+                    section_id=spec.section_id,
+                    section_status=status,
+                    local_id=local_id,
+                    text=text,
+                    claim_type=claim_type,
+                    evidence_refs=refs,
+                )
+                claims.append(claim)
+                for violation in verify_claim_evidence(claim, unit_dir):
+                    violations.append(f"{prefix}: {violation}")
+        elif status == "not_applicable":
+            if summary:
+                violations.append(f"sections.{spec.section_id}.summary: must be empty when not_applicable")
+            if not na_reason:
+                violations.append(
+                    f"sections.{spec.section_id}.not_applicable_reason: required when not_applicable"
+                )
+            if not isinstance(na_refs, list) or not na_refs:
+                violations.append(
+                    f"sections.{spec.section_id}.not_applicable_evidence_refs: requires at least one verbatim ref"
+                )
+            if not isinstance(raw_claims, list) or raw_claims:
+                violations.append(f"sections.{spec.section_id}.claims: must be an empty list when not_applicable")
+            local_id = "not-applicable"
+            canonical_id = _v2_canonical_claim_id(spec.section_id, local_id)
+            if canonical_id in canonical_ids:
+                violations.append(f"sections.{spec.section_id}: duplicate canonical N/A claim")
+                continue
+            canonical_ids.add(canonical_id)
+            claim = _v2_claim(
+                section_id=spec.section_id,
+                section_status=status,
+                local_id=local_id,
+                text=na_reason,
+                claim_type=spec.claim_types[-1],
+                evidence_refs=na_refs,
+            )
+            claims.append(claim)
+            for violation in verify_claim_evidence(claim, unit_dir):
+                violations.append(f"sections.{spec.section_id}.not_applicable: {violation}")
+        else:
+            violations.append(
+                f"sections.{spec.section_id}.status: expected assessed|not_applicable"
+            )
+
+    for violation in validate_claims(claims):
+        violations.append(f"claim-structure: {violation}")
+    return violations, claims
+
+
+def _verify_v1_note_fill(fill: Any, unit_dir: Path, record: dict | None = None) -> tuple[list[str], list[dict]]:
     """Validate an agent-filled type-specific note. Returns (violations, claims).
 
     Violations name the offending element. All selected elements must be present, carry
@@ -956,8 +1225,149 @@ def verify_note_fill(fill: Any, unit_dir: Path, record: dict | None = None) -> t
     return violations, claims
 
 
-def _apply_note_fill_to_payload(record: dict, claims: list[dict]) -> None:
-    """Route verified element content into canonical payload fields (in place)."""
+def verify_note_fill(
+    fill: Any,
+    unit_dir: Path,
+    record: dict | None = None,
+) -> tuple[list[str], list[dict]]:
+    """Dispatch new v2 fills while retaining schema-less v1 read compatibility."""
+
+    if isinstance(fill, Mapping) and str(fill.get("schema") or ""):
+        if str(fill.get("schema") or "") != PAPER_NOTE_FILL_SCHEMA:
+            return [f"schema: unsupported paper note fill {fill.get('schema')!r}"], []
+        return _verify_v2_note_fill(fill, unit_dir, record)
+    return _verify_v1_note_fill(fill, unit_dir, record)
+
+
+def _v2_claim_texts_by_section(claims: list[dict]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for claim in claims:
+        if str(claim.get("paper_note_schema") or "") != PAPER_NOTE_CLAIM_SCHEMA:
+            continue
+        section_id = str(claim.get("paper_section_id") or "")
+        if section_id == "paper_type" or section_id not in PAPER_SECTION_SPECS:
+            continue
+        text = clean_text(str(claim.get("text") or ""))
+        values = grouped.setdefault(section_id, [])
+        if text:
+            values.append(text)
+    return grouped
+
+
+def _apply_v2_note_fill_to_payload(
+    record: dict,
+    claims: list[dict],
+    fill: Mapping[str, Any],
+) -> None:
+    payload = record.setdefault("payload", {})
+    paper_type = str(fill.get("paper_type") or "").strip().lower()
+    if paper_type not in PAPER_TYPES:
+        raise ValueError("verified v2 fill is missing a valid paper_type")
+    sections, section_violations = _v2_sections_by_id(fill)
+    required_specs = required_paper_sections(paper_type)
+    if section_violations or set(sections) != {spec.section_id for spec in required_specs}:
+        raise ValueError("verified v2 fill no longer matches the required section matrix")
+    claims_by_section: dict[str, list[dict]] = {}
+    for claim in claims:
+        section_id = str(claim.get("paper_section_id") or "")
+        if section_id in PAPER_SECTION_SPECS:
+            claims_by_section.setdefault(section_id, []).append(claim)
+
+    canonical_sections: list[dict[str, Any]] = []
+    summaries: dict[str, str] = {}
+    for spec in required_specs:
+        section = sections[spec.section_id]
+        status = str(section.get("status") or "").strip().lower()
+        summary = clean_text(str(section.get("summary") or ""))
+        na_reason = clean_text(str(section.get("not_applicable_reason") or ""))
+        summaries[spec.section_id] = summary if status == "assessed" else f"N/A: {na_reason}"
+        canonical_sections.append(
+            {
+                "section_id": spec.section_id,
+                "status": status,
+                "summary": summary,
+                "not_applicable_reason": na_reason,
+                "claim_ids": [
+                    str(claim.get("id") or "")
+                    for claim in claims_by_section.get(spec.section_id, [])
+                ],
+            }
+        )
+    payload["deep_read"] = {
+        "schema": PAPER_DEEP_READ_SCHEMA,
+        "paper_type": paper_type,
+        "sections": canonical_sections,
+    }
+
+    core = payload.setdefault("core_content", {})
+    critique = payload.setdefault("critique", {})
+    core.update(
+        {
+            "research_problem": summaries["research_problem"],
+            "motivation": summaries["research_problem"],
+            "story": summaries["contributions"],
+            "method": summaries["approach"],
+            "innovations": [],
+            "changes_and_effects": [],
+            "mechanism": "",
+            "why_it_might_work": summaries["transfer_open_questions"],
+        }
+    )
+    critique.update(
+        {
+            "assumptions": [summaries["limitations_reliability"]],
+            "weak_spots": [],
+            "experiment_gaps": [],
+            "reliability_risks": [],
+            "failure_scenarios": [],
+            "improvements": [],
+            "key_insights": [],
+        }
+    )
+    texts = _v2_claim_texts_by_section(claims)
+    core["innovations"] = list(texts.get("contributions", []))
+    effect_sections = ["evaluation_design", "results_boundaries"]
+    effect_sections.extend(
+        {
+            "method_system": ["baselines_ablations"],
+            "benchmark": ["metrics_protocol", "coverage_bias_leakage", "benchmark_reliability"],
+            "survey": ["trend_evidence", "gaps_disagreement", "coverage_limits"],
+        }[paper_type]
+    )
+    core["changes_and_effects"] = [
+        text
+        for section_id in effect_sections
+        for text in texts.get(section_id, [])
+    ]
+    mechanism_section = {
+        "method_system": "architecture_mechanism",
+        "benchmark": "task_data_construction",
+        "survey": "taxonomy",
+    }[paper_type]
+    core["mechanism"] = summaries[mechanism_section]
+
+    critique["reliability_risks"] = list(texts.get("limitations_reliability", []))
+    critique["key_insights"] = list(texts.get("transfer_open_questions", []))
+    if paper_type == "method_system":
+        critique["experiment_gaps"] = list(texts.get("baselines_ablations", []))
+        critique["failure_scenarios"] = list(texts.get("failure_scenarios", []))
+    elif paper_type == "benchmark":
+        critique["weak_spots"] = list(texts.get("coverage_bias_leakage", []))
+        critique["reliability_risks"].extend(texts.get("benchmark_reliability", []))
+    else:
+        critique["experiment_gaps"] = list(texts.get("gaps_disagreement", []))
+        critique["weak_spots"] = list(texts.get("coverage_limits", []))
+
+
+def _apply_note_fill_to_payload(
+    record: dict,
+    claims: list[dict],
+    fill: Mapping[str, Any] | None = None,
+) -> None:
+    """Route verified v2 or historical v1 note content into canonical payload."""
+    if isinstance(fill, Mapping) and str(fill.get("schema") or "") == PAPER_NOTE_FILL_SCHEMA:
+        _apply_v2_note_fill_to_payload(record, claims, fill)
+        return
     payload = record.setdefault("payload", {})
     type_claim = next(
         (claim for claim in claims if str(claim.get("id") or "") == "claim-paper-type"),
@@ -1021,6 +1431,11 @@ def _note_sections(record: dict, claims: list[dict]) -> list[dict[str, Any]]:
     type_claim = by_id.get("claim-paper-type")
     paper_type = _paper_type_from_record(record)
     if type_claim is not None or paper_type:
+        type_refs = [
+            ref
+            for ref in ((type_claim or {}).get("evidence_refs") or [])
+            if isinstance(ref, dict)
+        ]
         sections.append(
             {
                 "key": "paper-type",
@@ -1029,26 +1444,86 @@ def _note_sections(record: dict, claims: list[dict]) -> list[dict[str, Any]]:
                     (type_claim or {}).get("paper_type") or paper_type
                 ).strip(),
                 "content": clean_text(str((type_claim or {}).get("text") or "")),
-                "refs": [
-                    ref
-                    for ref in ((type_claim or {}).get("evidence_refs") or [])
-                    if isinstance(ref, dict)
-                ],
+                "claim_texts": [],
+                "refs": type_refs,
+                "ref_labels": [f"分类证据 {index}" for index in range(1, len(type_refs) + 1)],
             }
         )
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    deep_read = payload.get("deep_read")
+    if (
+        isinstance(deep_read, dict)
+        and str(deep_read.get("schema") or "") == PAPER_DEEP_READ_SCHEMA
+    ):
+        raw_sections = deep_read.get("sections")
+        for raw_section in raw_sections if isinstance(raw_sections, list) else []:
+            if not isinstance(raw_section, dict):
+                continue
+            section_id = str(raw_section.get("section_id") or "")
+            spec = PAPER_SECTION_SPECS.get(section_id)
+            if spec is None:
+                continue
+            status = str(raw_section.get("status") or "")
+            section_claims = [
+                claim
+                for claim in claims
+                if isinstance(claim, dict)
+                and str(claim.get("paper_note_schema") or "") == PAPER_NOTE_CLAIM_SCHEMA
+                and str(claim.get("paper_section_id") or "") == section_id
+            ]
+            claim_texts = (
+                [clean_text(str(claim.get("text") or "")) for claim in section_claims]
+                if status == "assessed"
+                else []
+            )
+            refs: list[dict] = []
+            labels: list[str] = []
+            for claim_index, claim in enumerate(section_claims, start=1):
+                claim_refs = [
+                    ref
+                    for ref in (claim.get("evidence_refs") or [])
+                    if isinstance(ref, dict)
+                ]
+                for evidence_index, ref in enumerate(claim_refs, start=1):
+                    refs.append(ref)
+                    if status == "not_applicable":
+                        labels.append(f"不适用判断 · 证据 {evidence_index}")
+                    else:
+                        labels.append(f"判断 {claim_index} · 证据 {evidence_index}")
+            content = (
+                clean_text(str(raw_section.get("summary") or ""))
+                if status == "assessed"
+                else f"N/A: {clean_text(str(raw_section.get('not_applicable_reason') or ''))}"
+            )
+            sections.append(
+                {
+                    "key": section_id.replace("_", "-"),
+                    "heading": spec.heading,
+                    "paper_type": "",
+                    "content": content,
+                    "claim_texts": [text for text in claim_texts if text],
+                    "refs": refs,
+                    "ref_labels": labels,
+                }
+            )
+        return sections
     for name in elements_for(record):
         claim = by_id.get(f"claim-{name}")
+        refs = [
+            ref
+            for ref in ((claim or {}).get("evidence_refs") or [])
+            if isinstance(ref, dict)
+        ]
         sections.append(
             {
                 "key": name.replace("_", "-"),
                 "heading": ELEMENT_HEADING[name],
                 "paper_type": "",
                 "content": clean_text(str((claim or {}).get("text") or "")),
-                "refs": [
-                    ref
-                    for ref in ((claim or {}).get("evidence_refs") or [])
-                    if isinstance(ref, dict)
-                ],
+                "claim_texts": [],
+                "refs": refs,
+                "ref_labels": ["" for _ref in refs],
             }
         )
     return sections
@@ -1109,10 +1584,11 @@ def _append_evidence_callout(
             ref,
             section["targets"][index - 1],
         )
+        label = section.get("ref_labels", [])[index - 1] if index <= len(section.get("ref_labels", [])) else ""
         lines.extend(
             [
                 ">",
-                f"> **证据 {index}**",
+                f"> **{label or f'证据 {index}'}**",
                 ">",
                 f"> - 来源单元：{_note_inline_code(source_unit_id)}",
                 f"> - 材料：{_note_inline_code(artifact)}",
@@ -1172,6 +1648,10 @@ def render_note_md(
         if section["paper_type"]:
             lines.extend([f"论文类型：{_note_inline_code(section['paper_type'])}", ""])
         lines.extend([_note_markdown_literal(section["content"]) or "尚未填写。", ""])
+        for claim_index, claim_text in enumerate(section.get("claim_texts", []), start=1):
+            lines.append(f"{claim_index}. {_note_markdown_literal(claim_text)}")
+        if section.get("claim_texts"):
+            lines.append("")
         if section["refs"]:
             count = len(section["refs"])
             lines.extend(
@@ -1584,12 +2064,23 @@ def _prepare_note_scaffold(
     _assert_safe_paper_input_path(root, fill_scaffold_path)
     if fill_scaffold_path.exists():
         existing = load_yaml(fill_scaffold_path, default={})
+        is_v1_fill = bool(
+            isinstance(existing, dict)
+            and not str(existing.get("schema") or "")
+            and (
+                isinstance(existing.get("element_sets"), dict)
+                or isinstance(existing.get("elements"), list)
+            )
+        )
+        if is_v1_fill:
+            return fill_scaffold_path
         has_agent_fill = bool(
             isinstance(existing, dict)
             and (
                 str(existing.get("paper_type") or "").strip()
                 or str(existing.get("paper_type_reason") or "").strip()
                 or bool(existing.get("paper_type_evidence_refs"))
+                or bool(existing.get("sections"))
                 or any(
                     str(element.get("content") or "").strip()
                     or bool(element.get("evidence_refs"))
@@ -1616,7 +2107,7 @@ def _prepare_note_scaffold(
     append_history(
         record,
         action="paper-note-scaffolded",
-        summary="Prepared unified deep-read fill skeleton (script authored nothing).",
+        summary="Prepared multidimensional paper-note-fill/v2 skeleton (script authored nothing).",
         information_types=["inference", "unverified"],
         artifacts=[rel(root, fill_scaffold_path), rel(root, cache_path)],
     )
@@ -1994,13 +2485,14 @@ def _unit_owned_fill_path(unit_root: Path, fill_path: Path) -> Path | None:
 def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: Path) -> str:
     """One private navigation line for the Agent protocol in `docs/DESIGN.md`.
 
-    Pure navigation: it names the parse-cache artifact to read, the elements to fill
-    (each needs a verbatim quote + locator), and the exact verify command to run after.
+    Pure navigation: it names the parse-cache artifact to read, the required sections
+    to fill, and the exact verify command to run after.
     It authors no judgement — the agent still fills the understanding.
     """
-    element_sets = ";".join(
-        f"{paper_type}={','.join(elements)}"
-        for paper_type, elements in ELEMENT_SETS.items()
+    common_sections = ",".join(spec.section_id for spec in required_paper_sections(PAPER_TYPES[0])[:7])
+    type_sections = ";".join(
+        f"{paper_type}={','.join(spec.section_id for spec in required_paper_sections(paper_type)[7:])}"
+        for paper_type in PAPER_TYPES
     )
     verify_cmd = (
         f"${{RESEARCH_PYTHON:-python3}} {SCRIPT_PATH} --root {root} "
@@ -2008,7 +2500,8 @@ def next_for_agent_note(root: Path, record: dict, cache_path: Path, fill_path: P
     )
     return (
         f"NEXT FOR AGENT: read {rel(root, cache_path)} (source quotes) then fill {rel(root, fill_path)} "
-        f"paper_type + reason/evidence, then one branch [{element_sets}] — each selected element needs content + >=1 verbatim quote+locator "
+        f"paper_type + reason/evidence, common [{common_sections}], and selected type sections [{type_sections}] — "
+        f"each assessed section needs a summary plus independent evidence-backed claims; explicit N/A needs a reason and evidence "
         f"(PDF page=N / HTML section:<anchor>), then run: {verify_cmd}"
     )
 
@@ -2379,7 +2872,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
             mode=mode,
         )
         print(f"[ok] wrote {fill_scaffold_path.relative_to(root)}")
-        print("下一步：runtime agent 先填写论文类型、分类理由与证据，再只填写对应五要素分支。")
+        print("下一步：runtime agent 填写论文类型、共同维度与对应类型维度；每个判断绑定逐字证据。")
         print(next_for_agent_note(root, record, cache_path, fill_scaffold_path))
         _finalize_post_actions(root, trigger="milestone", message=f"milestone: scaffold note {args.paper_id}", defer_post_actions=defer_post_actions,
                                target_paths=[unit_root / "record.yaml", fill_scaffold_path])
@@ -2393,7 +2886,7 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     _fill, claims = _prevalidated_verify_fill(args, bound_fill)
 
     _revalidate_managed_verify_fill(root, bound_fill)
-    _apply_note_fill_to_payload(record, claims)
+    _apply_note_fill_to_payload(record, claims, _fill)
     attach_claims(record.setdefault("payload", {}), claims)
     build_verification_receipt(record, unit_root)
     write_text_if_changed(
@@ -2406,6 +2899,14 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
         ),
     )
     note_payload = {"paper_id": record["id"], "kind": "paper"}
+    if str(_fill.get("schema") or "") == PAPER_NOTE_FILL_SCHEMA:
+        note_payload.update(
+            {
+                "schema": PAPER_DEEP_READ_SCHEMA,
+                "paper_type": record["payload"]["deep_read"]["paper_type"],
+                "sections": record["payload"]["deep_read"]["sections"],
+            }
+        )
     attach_claims(note_payload, claims)
     write_yaml_if_changed(unit_root / "note-claims.yaml", note_payload)
     record["maturity"] = "complete"
@@ -2417,14 +2918,14 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     append_history(
         record,
         action="paper-note-verified",
-        summary="Verified + persisted agent 5-element note (evidence-grounded).",
+        summary="Verified + persisted evidence-grounded multidimensional paper note.",
         information_types=["inference", "evaluation", "unverified"],
         artifacts=[rel(root, note_path), rel(root, cache_path)],
     )
     write_record(root, record)
     print(
         f"[ok] verified + wrote {note_path.relative_to(root)} "
-        f"(paper type + {max(0, len(claims) - 1)} elements)"
+        f"(paper type + {max(0, len(claims) - 1)} independent section claims)"
     )
     _auto_post_note_steps(root, record, unit_root, source_chunks, cache_path, paper_preferences, defer_post_actions)
     note_targets = [unit_root / "record.yaml", note_path, unit_root / "note-claims.yaml", unit_root / "structure.yaml", unit_root / "figures.yaml", unit_root / "figures"]

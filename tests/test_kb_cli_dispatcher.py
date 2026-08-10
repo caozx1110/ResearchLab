@@ -6437,7 +6437,7 @@ _PAPER_ADD_STDOUT = (
 )
 _PAPER_PREPARE_STDOUT = (
     "[ok] wrote kb/units/papers/p-demo-abcd1234/note-fill.yaml\n"
-    "下一步：runtime agent 填 paper_type、类型证据与对应五要素。\n"
+    "下一步：runtime agent 填论文类型、共同维度与对应类型维度。\n"
     "NEXT FOR AGENT: read kb/units/papers/p-demo-abcd1234/parse-cache.yaml, fill note-fill.yaml, "
     "then run complete-note --phase verify.\n"
 )
@@ -6482,7 +6482,7 @@ def test_kb_ingest_chains_intake_then_prepare_and_stops_before_verify(monkeypatc
 
     out = capsys.readouterr().out
     assert "已入库并备好统一深读骨架" in out
-    assert "填写论文类型及对应五要素" in out
+    assert "完成共同维度和类型专属维度" in out
     for forbidden in ("NEXT FOR AGENT:", "parse-cache.yaml", "--phase", ".py", "${"):
         assert forbidden not in out
     protocol = json.loads((tmp_path / ".runtime" / "ingest.json").read_text(encoding="utf-8"))

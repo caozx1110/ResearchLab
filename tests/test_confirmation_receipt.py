@@ -5,7 +5,9 @@ from research.evidence import (
     confirmation_claim_ids,
     confirmation_content_digest,
     confirmation_evidence_digest,
+    verification_receipt_violations,
 )
+from research.paper_notes import PAPER_DEEP_READ_SCHEMA, PAPER_NOTE_CLAIM_SCHEMA
 from research.confirm import apply_confirmation
 from research.paths import unit_root
 from research.records import normalize_record_schema
@@ -103,6 +105,60 @@ def test_confirmation_digest_helpers_bind_claims_and_evidence_set() -> None:
     assert confirmation_evidence_digest(record, ["kb/x.md"]) != confirmation_evidence_digest(
         changed, ["kb/x.md"]
     )
+
+
+def test_v2_paper_receipts_bind_sections_and_critique_without_changing_v1_digest(
+    tmp_path,
+) -> None:
+    legacy = _record()
+    legacy_with_workflow_metadata = _record()
+    legacy_with_workflow_metadata["payload"]["deep_read"] = {
+        "paper_type": "method_system"
+    }
+    legacy_with_workflow_metadata["payload"]["critique"] = {
+        "weak_spots": ["Legacy v1 critique was outside the old digest contract."]
+    }
+    assert confirmation_content_digest(legacy) == confirmation_content_digest(
+        legacy_with_workflow_metadata
+    )
+
+    record = _record()
+    record["payload"]["deep_read"] = {
+        "schema": PAPER_DEEP_READ_SCHEMA,
+        "paper_type": "method_system",
+        "sections": [
+            {
+                "section_id": "research_problem",
+                "status": "assessed",
+                "summary": "Bind every current v2 section.",
+                "not_applicable_reason": "",
+                "claim_ids": ["claim-002"],
+            }
+        ],
+    }
+    record["payload"]["critique"] = {"reliability_risks": ["One current risk."]}
+    record["payload"]["claims"][0].update(
+        {
+            "paper_note_schema": PAPER_NOTE_CLAIM_SCHEMA,
+            "paper_section_id": "research_problem",
+            "paper_section_status": "assessed",
+            "paper_local_claim_id": "primary",
+        }
+    )
+    _write_verified_artifact(tmp_path)
+    receipt = build_verification_receipt(
+        record,
+        unit_root(tmp_path, "paper", record["id"]),
+    )
+    assert len(receipt["content_digest"]) == 64
+    assert verification_receipt_violations(
+        record,
+        unit_root(tmp_path, "paper", record["id"]),
+    ) == []
+
+    record["payload"]["deep_read"]["sections"][0]["summary"] = "Changed after verify."
+    violations = verification_receipt_violations(record, None, check_artifacts=False)
+    assert any("content_digest does not match current analysis" in item for item in violations)
 
 
 def test_apply_confirmation_stamps_full_version_bound_receipt(tmp_path, monkeypatch) -> None:

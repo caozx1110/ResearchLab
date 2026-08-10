@@ -21,7 +21,7 @@ description: 统一分析 paper、repo、dataset、blog 与技术笔记 unit；�
 
 | kind | 内部 implementation | Agent 填写契约 |
 |---|---|---|
-| `paper` | `.agents/skills/unit-analyst/scripts/paper.py` | Agent 选择 `method_system / benchmark / survey`，填写类型理由与对应五要素；类型和每个要素都需逐字 evidence。未选分支保持空。 |
+| `paper` | `.agents/skills/unit-analyst/scripts/paper.py` | Agent 选择 `method_system / benchmark / survey`，完成共同维度与对应类型专属维度；每个 assessed section 支持多条独立 evidence claim，确实不适用时写明理由并附逐字 evidence。 |
 | `repo` | `.agents/skills/unit-analyst/scripts/repo.py` | 机械 structure scan 后，Agent 填 `capability / reuse_points / entry_map`；每项引用本地冻结源码的真实 `file:line`。 |
 | `dataset` | `.agents/skills/unit-analyst/scripts/dataset.py` | Agent 填 `positioning / composition / schema_access / suitability_risks`；每项引用冻结数据卡或 parse-cache。 |
 | `blog` / human note | `.agents/skills/unit-analyst/scripts/blog.py` | Agent 填 `positioning / key_points / credibility / reusable_explanation`；每项引用冻结 HTML、Markdown 或 parse-cache。 |

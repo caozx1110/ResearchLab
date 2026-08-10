@@ -3,9 +3,9 @@
 We cannot headless-test "an agent filled *good* understanding" (that needs a real
 agent). So these test the MACHINERY the script owns:
 
-  * complete-note --phase prepare directly emits a type selector and three branches;
-  * type selection and the selected 5-element branch require verbatim evidence;
-  * unselected branches must remain blank, while old screening records stay readable;
+  * complete-note --phase prepare emits the versioned multidimensional matrix;
+  * type selection and every required assessed or N/A section require evidence;
+  * unknown/unselected sections fail closed, while v1 fills remain readable;
   * feeding synthetic filled content with legit verbatim evidence -> validates,
     clears the substance gate, and persists (core_content non-empty, note.md written);
   * feeding fabricated evidence -> rejected, with the offending element named;
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from repo_paths import initialize_test_workspace
 
+import copy
 import hashlib
 import importlib.util
 import sys
@@ -29,10 +30,18 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import confirm_unit, has_substantive_content
+from research.context_pack import build_context_pack
 from research.core import ensure_workspace, record_path, write_record
 from research.evidence import attach_claims, build_verification_receipt
+from research.judgements import discover_pending_judgements
+from research.obsidian import obsidian_managed_root, update_obsidian_projection
 from research.preference_selection import eligible_preferences, record_effective_selection
-from research.records import kind_payload_skeleton
+from research.records import (
+    canonical_record_snapshot_for_record,
+    kind_payload_skeleton,
+    normalize_record_snapshot,
+)
+from research.surveys import build_unit_binding, select_current_confirmed_survey_records
 
 
 def _project_root() -> Path:
@@ -42,6 +51,16 @@ def _project_root() -> Path:
 def _load_paper_module():
     script = _project_root() / "skills" / "unit-analyst" / "scripts" / "paper.py"
     spec = importlib.util.spec_from_file_location("paper_analyst_script_under_test", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_report_module():
+    script = _project_root() / "skills" / "report-author" / "scripts" / "report.py"
+    spec = importlib.util.spec_from_file_location("paper_v2_report_consumer_under_test", script)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -226,7 +245,7 @@ def _legit_note_fill() -> dict:
     }
 
 
-def _typed_note_fill(paper, paper_type: str) -> dict:
+def _legacy_typed_note_fill(paper, paper_type: str) -> dict:
     quote_by_element = {
         "motivation": "fail to generalize to unseen objects",
         "method": "predicts short action chunks with a flow matching head",
@@ -241,20 +260,31 @@ def _typed_note_fill(paper, paper_type: str) -> dict:
         "gaps": "brittle behaviour under heavy occlusion",
         "insight": "flow matching head",
     }
-    fill = paper.build_note_scaffold(
-        _paper_record("p-x"), [], "page", digest_chunks=1, digest_chars=10
-    )
-    fill["paper_type"] = paper_type
-    fill["paper_type_reason"] = "The paper's contribution structure matches this type."
-    fill["paper_type_evidence_refs"] = [
-        {
-            "source_unit_id": "p-x",
-            "artifact": "parse-cache.yaml",
-            "locator": "page=1",
-            "quote": "vision language action policies for robot manipulation",
-            "summary": "classification evidence",
-        }
-    ]
+    fill = {
+        "paper_type": paper_type,
+        "paper_type_reason": "The paper's contribution structure matches this type.",
+        "paper_type_evidence_refs": [
+            {
+                "source_unit_id": "p-x",
+                "artifact": "parse-cache.yaml",
+                "locator": "page=1",
+                "quote": "vision language action policies for robot manipulation",
+                "summary": "classification evidence",
+            }
+        ],
+        "element_sets": {
+            branch_type: [
+                {
+                    "element": name,
+                    "claim_type": paper.ELEMENT_CLAIM_TYPE[name],
+                    "content": "",
+                    "evidence_refs": [],
+                }
+                for name in paper.ELEMENT_SETS[branch_type]
+            ]
+            for branch_type in paper.PAPER_TYPES
+        },
+    }
     for element in fill["element_sets"][paper_type]:
         name = element["element"]
         element["content"] = f"Agent-authored {name.replace('_', ' ')} synthesis."
@@ -267,6 +297,75 @@ def _typed_note_fill(paper, paper_type: str) -> dict:
                 "summary": name,
             }
         ]
+    return fill
+
+
+def _typed_note_fill(paper, paper_type: str, *, paper_id: str = "p-x") -> dict:
+    quote_by_section = {
+        "research_problem": "fail to generalize to unseen objects",
+        "contributions": "higher success rate than the baseline",
+        "approach": "predicts short action chunks with a flow matching head",
+        "evaluation_design": "real robot benchmark",
+        "results_boundaries": "higher success rate than the baseline",
+        "limitations_reliability": "brittle behaviour under heavy occlusion",
+        "transfer_open_questions": "flow matching head",
+        "architecture_mechanism": "flow matching head",
+        "training_inference": "predicts short action chunks",
+        "baselines_ablations": "higher success rate than the baseline",
+        "failure_scenarios": "brittle behaviour under heavy occlusion",
+        "task_data_construction": "real robot benchmark",
+        "metrics_protocol": "higher success rate than the baseline",
+        "coverage_bias_leakage": "brittle behaviour under heavy occlusion",
+        "benchmark_reliability": "brittle behaviour under heavy occlusion",
+        "scope_inclusion": "vision language action policies for robot manipulation",
+        "taxonomy": "flow matching head",
+        "trend_evidence": "higher success rate than the baseline",
+        "gaps_disagreement": "brittle behaviour under heavy occlusion",
+        "coverage_limits": "brittle behaviour under heavy occlusion",
+    }
+    fill = paper.build_note_scaffold(
+        _paper_record(paper_id), [], "page", digest_chunks=1, digest_chars=10
+    )
+    fill["paper_id"] = paper_id
+    fill["paper_type"] = paper_type
+    fill["paper_type_reason"] = "The paper contribution structure matches this type."
+    fill["paper_type_evidence_refs"] = [
+        {
+            "source_unit_id": paper_id,
+            "artifact": "parse-cache.yaml",
+            "locator": "page=1",
+            "quote": "vision language action policies for robot manipulation",
+            "summary": "classification evidence",
+        }
+    ]
+    fill["sections"] = []
+    for spec in paper.required_paper_sections(paper_type):
+        quote = quote_by_section[spec.section_id]
+        fill["sections"].append(
+            {
+                "section_id": spec.section_id,
+                "status": "assessed",
+                "summary": f"Agent-authored {spec.section_id.replace('_', ' ')} synthesis.",
+                "not_applicable_reason": "",
+                "not_applicable_evidence_refs": [],
+                "claims": [
+                    {
+                        "id": "primary",
+                        "text": f"Independent {spec.section_id.replace('_', ' ')} judgement.",
+                        "claim_type": spec.claim_types[0],
+                        "evidence_refs": [
+                            {
+                                "source_unit_id": paper_id,
+                                "artifact": "parse-cache.yaml",
+                                "locator": "page=1" if quote in PAGE1 else "page=2",
+                                "quote": quote,
+                                "summary": spec.section_id,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
     return fill
 
 
@@ -328,9 +427,9 @@ def test_paper_source_has_no_count_grading_symbols() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 2. complete-note prepare produces one type selector plus three blank branches.
+# 2. complete-note prepare produces the frozen v2 matrix without authored text.
 # --------------------------------------------------------------------------- #
-def test_note_scaffold_has_type_evidence_and_three_blank_branches(tmp_path: Path) -> None:
+def test_note_scaffold_has_v2_schema_and_required_matrix(tmp_path: Path) -> None:
     paper = _load_paper_module()
     record = _paper_record("p-note-000001")
     chunks = [{"label": "source.pdf:page-1", "text": PAGE1, "page": 1}]
@@ -340,57 +439,316 @@ def test_note_scaffold_has_type_evidence_and_three_blank_branches(tmp_path: Path
     assert scaffold["paper_type"] == ""
     assert scaffold["paper_type_reason"] == ""
     assert scaffold["paper_type_evidence_refs"] == []
-    assert set(scaffold["element_sets"]) == set(paper.PAPER_TYPES)
-    for paper_type, expected in paper.ELEMENT_SETS.items():
-        branch = scaffold["element_sets"][paper_type]
-        assert [element["element"] for element in branch] == list(expected)
-        assert len(branch) == 5
-        for element in branch:
-            assert element["content"] == ""       # script authors nothing
-            assert element["evidence_refs"] == []  # agent must attach evidence
+    assert scaffold["schema"] == paper.PAPER_NOTE_FILL_SCHEMA
+    assert scaffold["sections"] == []
+    matrix = scaffold["fill_contract"]["section_matrix"]
+    assert [item["section_id"] for item in matrix["common"]] == [
+        spec.section_id for spec in paper.required_paper_sections("method_system")[:7]
+    ]
+    assert set(matrix["by_paper_type"]) == set(paper.PAPER_TYPES)
+    for paper_type in paper.PAPER_TYPES:
+        assert [item["section_id"] for item in matrix["by_paper_type"][paper_type]] == [
+            spec.section_id for spec in paper.required_paper_sections(paper_type)[7:]
+        ]
     assert "evidence_ref_format" in scaffold["fill_contract"]
 
 
 @pytest.mark.parametrize(
-    ("paper_type", "expected"),
+    "paper_type",
     [
-        ("benchmark", ["motivation", "task_design", "metrics", "coverage_limitation", "insight"]),
-        ("survey", ["scope", "taxonomy", "trends", "gaps", "insight"]),
+        "method_system",
+        "benchmark",
+        "survey",
     ],
 )
-def test_note_scaffold_and_verify_follow_paper_type(
-    tmp_path: Path, paper_type: str, expected: list[str]
+def test_v2_verify_and_projection_follow_required_paper_type_matrix(
+    tmp_path: Path, paper_type: str
 ) -> None:
     paper = _load_paper_module()
     unit_dir = tmp_path / paper_type
     unit_dir.mkdir()
     _write_parse_cache(unit_dir, "p-x")
-    record = _paper_record(f"p-{paper_type}")
+    paper_id = f"p-{paper_type}"
+    record = _paper_record(paper_id)
 
     scaffold = paper.build_note_scaffold(record, [], "page", digest_chunks=1, digest_chars=10)
     assert scaffold["paper_type"] == ""
-    assert [element["element"] for element in scaffold["element_sets"][paper_type]] == expected
+    assert scaffold["schema"] == paper.PAPER_NOTE_FILL_SCHEMA
 
-    fill = _typed_note_fill(paper, paper_type)
+    fill = _typed_note_fill(paper, paper_type, paper_id=paper_id)
     violations, claims = paper.verify_note_fill(fill, unit_dir, record)
     assert violations == [], violations
     assert [claim["id"] for claim in claims] == [
         "claim-paper-type",
-        *[f"claim-{name}" for name in expected],
+        *[
+            f"claim-paper-v2-{spec.section_id.replace('_', '-')}-primary"
+            for spec in paper.required_paper_sections(paper_type)
+        ],
     ]
     assert claims[0]["text"].startswith(f"paper_type={paper_type}; ")
     assert claims[0]["paper_type"] == paper_type
-    paper._apply_note_fill_to_payload(record, claims)
+    assert all(claim["paper_note_schema"] == paper.PAPER_NOTE_CLAIM_SCHEMA for claim in claims)
+    paper._apply_note_fill_to_payload(record, claims, fill)
     assert record["payload"]["deep_read"]["paper_type"] == paper_type
+    assert record["payload"]["deep_read"]["schema"] == paper.PAPER_DEEP_READ_SCHEMA
     assert has_substantive_content(record, "paper") is True
     note_md = paper.render_note_md(record, claims)
-    for name in expected:
-        assert f"## {paper.ELEMENT_HEADING[name]}" in note_md
+    for spec in paper.required_paper_sections(paper_type):
+        assert f"## {spec.heading}" in note_md
 
     unselected = "survey" if paper_type != "survey" else "benchmark"
-    fill["element_sets"][unselected][0]["content"] = "Must not be mixed in."
+    alien = paper.required_paper_sections(unselected)[-1]
+    fill["sections"].append(
+        {
+            "section_id": alien.section_id,
+            "status": "assessed",
+            "summary": "Must not be mixed in.",
+            "not_applicable_reason": "",
+            "not_applicable_evidence_refs": [],
+            "claims": [],
+        }
+    )
     violations, _ = paper.verify_note_fill(fill, unit_dir, record)
-    assert any("unselected branch must stay blank" in violation for violation in violations)
+    assert any("does not belong to selected paper_type" in violation for violation in violations)
+
+
+def test_v2_not_applicable_section_is_evidence_bound_and_reviewable(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    record = _paper_record("p-x")
+    fill = _typed_note_fill(paper, "method_system")
+    section = next(item for item in fill["sections"] if item["section_id"] == "training_inference")
+    section.update(
+        {
+            "status": "not_applicable",
+            "summary": "",
+            "not_applicable_reason": "The evaluated system exposes no separate training stage.",
+            "not_applicable_evidence_refs": [
+                {
+                    "source_unit_id": "p-x",
+                    "artifact": "parse-cache.yaml",
+                    "locator": "page=2",
+                    "quote": "predicts short action chunks with a flow matching head",
+                    "summary": "scope evidence",
+                }
+            ],
+            "claims": [],
+        }
+    )
+
+    violations, claims = paper.verify_note_fill(fill, unit_dir, record)
+    assert violations == [], violations
+    na_claim = next(claim for claim in claims if claim["paper_section_id"] == "training_inference")
+    assert na_claim["id"] == "claim-paper-v2-training-inference-not-applicable"
+    assert na_claim["paper_section_status"] == "not_applicable"
+    paper._apply_note_fill_to_payload(record, claims, fill)
+    persisted = next(
+        item for item in record["payload"]["deep_read"]["sections"]
+        if item["section_id"] == "training_inference"
+    )
+    assert persisted["claim_ids"] == [na_claim["id"]]
+    rendered = paper.render_note_md(record, claims)
+    assert "N/A: The evaluated system exposes no separate training stage." in rendered
+    assert "**不适用判断 · 证据 1**" in rendered
+
+    section["not_applicable_evidence_refs"] = []
+    violations, _claims = paper.verify_note_fill(fill, unit_dir, record)
+    assert any("not_applicable_evidence_refs" in item for item in violations)
+
+
+def test_v2_five_generic_sections_cannot_bypass_required_semantic_matrix(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    fill = _typed_note_fill(paper, "method_system")
+    fill["sections"] = fill["sections"][:5]
+
+    violations, _claims = paper.verify_note_fill(fill, unit_dir, _paper_record("p-x"))
+    missing = [item for item in violations if "missing required section" in item]
+    assert len(missing) == 6
+    assert not any("word" in item or "length" in item for item in violations)
+
+
+def test_v2_multiple_claims_remain_independent_in_projection_and_reader_note(
+    tmp_path: Path,
+) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    record = _paper_record("p-x")
+    fill = _typed_note_fill(paper, "method_system")
+    contributions = next(
+        item for item in fill["sections"] if item["section_id"] == "contributions"
+    )
+    contributions["claims"].append(
+        {
+            "id": "secondary",
+            "text": "A second independently reviewable contribution judgement.",
+            "claim_type": "evaluation",
+            "evidence_refs": [
+                {
+                    "source_unit_id": "p-x",
+                    "artifact": "parse-cache.yaml",
+                    "locator": "page=2",
+                    "quote": "predicts short action chunks with a flow matching head",
+                    "summary": "second contribution",
+                }
+            ],
+        }
+    )
+    contributions["claims"].append(
+        {
+            "id": "same-text-different-claim",
+            "text": "Independent contributions judgement.",
+            "claim_type": "inference",
+            "evidence_refs": [
+                {
+                    "source_unit_id": "p-x",
+                    "artifact": "parse-cache.yaml",
+                    "locator": "page=1",
+                    "quote": "fail to generalize to unseen objects",
+                    "summary": "independent evidence for a separately identified claim",
+                }
+            ],
+        }
+    )
+
+    violations, claims = paper.verify_note_fill(fill, unit_dir, record)
+    assert violations == [], violations
+    paper._apply_note_fill_to_payload(record, claims, fill)
+    ids = [claim["id"] for claim in claims if claim.get("paper_section_id") == "contributions"]
+    assert ids == [
+        "claim-paper-v2-contributions-primary",
+        "claim-paper-v2-contributions-secondary",
+        "claim-paper-v2-contributions-same-text-different-claim",
+    ]
+    assert record["payload"]["core_content"]["innovations"] == [
+        "Independent contributions judgement.",
+        "A second independently reviewable contribution judgement.",
+        "Independent contributions judgement.",
+    ]
+    rendered = paper.render_note_md(record, claims)
+    evidence_start = rendered.index("## Evidence Index")
+    assert rendered.count("Independent contributions judgement.") == 2
+    assert rendered.count("A second independently reviewable contribution judgement.") == 1
+    assert rendered.index("Independent contributions judgement.") < evidence_start
+    assert rendered.index("A second independently reviewable contribution judgement.") < evidence_start
+    assert "**判断 1 · 证据 1**" in rendered
+    assert "**判断 2 · 证据 1**" in rendered
+    assert "**判断 3 · 证据 1**" in rendered
+    assert rendered.count("second contribution") == 1
+
+
+def test_v2_claims_reach_review_obsidian_find_survey_and_report_with_currentness(
+    tmp_path: Path,
+) -> None:
+    initialize_test_workspace(tmp_path)
+    paper = _load_paper_module()
+    report = _load_report_module()
+    paper_id = "p-v2-consumers-12345678"
+    record = _paper_record(paper_id)
+    unit_dir = record_path(tmp_path, "paper", paper_id).parent
+    unit_dir.mkdir(parents=True)
+    _write_parse_cache(unit_dir, paper_id)
+    fill = _typed_note_fill(paper, "method_system", paper_id=paper_id)
+
+    violations, claims = paper.verify_note_fill(fill, unit_dir, record)
+    assert violations == [], violations
+    paper._apply_note_fill_to_payload(record, claims, fill)
+    attach_claims(record["payload"], claims)
+    build_verification_receipt(record, unit_dir)
+    record["maturity"] = "complete"
+    record["payload"]["state"]["full_note_status"] = "pending_user_confirmation"
+    write_record(tmp_path, record)
+
+    cards = discover_pending_judgements(tmp_path)
+    assert len(cards) == 1
+    assert [claim["id"] for claim in cards[0]["claims"]] == sorted(
+        claim["id"] for claim in claims
+    )
+
+    projection = update_obsidian_projection(tmp_path)
+    assert projection["status"]["status"] == "PASS"
+    page = (obsidian_managed_root(tmp_path) / f"units/{paper_id}.md").read_text(
+        encoding="utf-8"
+    )
+    for claim in claims:
+        assert page.count(f"### Claim {claim['id']}") == 1
+        if claim["id"] != "claim-paper-type":
+            assert page.count(claim["text"]) == 1
+
+    snapshot = canonical_record_snapshot_for_record(tmp_path, load_yaml(record_path(tmp_path, "paper", paper_id)))
+    current = normalize_record_snapshot(snapshot, tmp_path)
+    assert current is not None
+    confirmed = confirm_unit(
+        current,
+        "paper",
+        confirmed_by="Human Reviewer",
+        evidence=["kb/programs/p/decision-log.md"],
+        user_authorization="I confirm this multidimensional paper analysis.",
+        authorization_source="user_message",
+        project_root=tmp_path,
+        expected_record_snapshot=snapshot,
+    )
+    write_record(tmp_path, confirmed, expected_record_snapshot=snapshot)
+    confirmed = load_yaml(record_path(tmp_path, "paper", paper_id))
+    assert discover_pending_judgements(tmp_path) == []
+
+    pack = build_context_pack(
+        tmp_path,
+        query="multidimensional paper",
+        matched_records=[{"id": paper_id}],
+        passages=[],
+        max_utf8_bytes=50_000,
+    )
+    formal = pack["units"][0]["formal"]["claims"]
+    assert len(formal) == 3
+    assert len({claim["id"] for claim in formal}) == 3
+    assert pack["omissions"]["claim_limit"] == len(claims) - 3
+
+    eligible, excluded = select_current_confirmed_survey_records(tmp_path, [confirmed])
+    assert [item["id"] for item in eligible] == [paper_id]
+    assert excluded == []
+    assert build_unit_binding(tmp_path, confirmed)["id"] == paper_id
+
+    sources, missing = report.load_confirmed_claim_sources(tmp_path, [paper_id])
+    assert missing == []
+    assert len(sources) == 1
+    assert [claim["id"] for claim in sources[0].claims] == [
+        claim["id"] for claim in confirmed["payload"]["claims"]
+    ]
+    assert sources[0].validate_current() is True
+
+    tampered = copy.deepcopy(confirmed)
+    tampered["payload"]["deep_read"]["sections"][0]["summary"] = "Changed after confirmation."
+    write_yaml_if_changed(record_path(tmp_path, "paper", paper_id), tampered)
+    stale_pack = build_context_pack(
+        tmp_path,
+        query="multidimensional paper",
+        matched_records=[{"id": paper_id}],
+        passages=[],
+        max_utf8_bytes=50_000,
+    )
+    assert stale_pack["units"][0]["formal"]["claims"] == []
+    assert (
+        stale_pack["omissions"]["stale_confirmation_claim"]
+        + stale_pack["omissions"]["pending_confirmation_claim"]
+    ) == len(claims)
+    stale_eligible, stale_excluded = select_current_confirmed_survey_records(
+        tmp_path, [tampered]
+    )
+    assert stale_eligible == []
+    assert stale_excluded[0]["id"] == paper_id
+    stale_sources, stale_missing = report.load_confirmed_claim_sources(tmp_path, [paper_id])
+    assert stale_missing == []
+    assert stale_sources[0].claims == []
+    assert stale_sources[0].issues == [
+        "canonical claims are not bound to a current ConfirmationReceipt"
+    ]
 
 
 def test_missing_paper_type_is_rejected_but_legacy_reader_keeps_method_default(tmp_path: Path) -> None:
@@ -419,31 +777,51 @@ def test_deep_read_type_and_unselected_branches_are_evidence_bound(tmp_path: Pat
     assert any("paper_type" in violation and "not verbatim" in violation for violation in violations)
 
     mixed = _typed_note_fill(paper, "method_system")
-    mixed["element_sets"]["survey"][0]["evidence_refs"] = [
-        {
-            "source_unit_id": "p-x",
-            "artifact": "parse-cache.yaml",
-            "locator": "page=1",
-            "quote": "vision language action policies for robot manipulation",
-            "summary": "must remain absent from an unselected branch",
-        }
-    ]
+    alien = dict(_typed_note_fill(paper, "survey")["sections"][-1])
+    mixed["sections"].append(alien)
     violations, _claims = paper.verify_note_fill(mixed, unit_dir, record)
-    assert any("unselected branch must stay blank" in violation for violation in violations)
+    assert any("does not belong to selected paper_type" in violation for violation in violations)
 
 
-def test_deep_read_rejects_duplicate_slots_and_claim_type_downgrade(tmp_path: Path) -> None:
+def test_deep_read_rejects_duplicate_unknown_claim_identity_and_type_downgrade(
+    tmp_path: Path,
+) -> None:
     paper = _load_paper_module()
     unit_dir = tmp_path / "unit"
     unit_dir.mkdir()
     _write_parse_cache(unit_dir, "p-x")
     fill = _typed_note_fill(paper, "method_system")
-    fill["element_sets"]["survey"].append(dict(fill["element_sets"]["survey"][0]))
-    fill["element_sets"]["method_system"][2]["claim_type"] = "fact"
+    fill["sections"].append(dict(fill["sections"][0]))
+    fill["sections"].append(
+        {
+            "section_id": "mystery_dimension",
+            "status": "assessed",
+            "summary": "Unknown sections must never be silently accepted.",
+            "not_applicable_reason": "",
+            "not_applicable_evidence_refs": [],
+            "claims": [],
+        }
+    )
+    fill["sections"][1]["claims"].append(dict(fill["sections"][1]["claims"][0]))
+    fill["sections"][4]["claims"][0]["claim_type"] = "fact"
 
     violations, _claims = paper.verify_note_fill(fill, unit_dir, _paper_record("p-x"))
-    assert any("duplicate element" in violation for violation in violations)
-    assert any("claim_type must be evaluation" in violation for violation in violations)
+    assert any("duplicate section" in violation for violation in violations)
+    assert any("unknown section" in violation for violation in violations)
+    assert any("duplicate section-local claim id" in violation for violation in violations)
+    assert any("claim_type: expected" in violation for violation in violations)
+
+
+def test_deep_read_requires_the_frozen_section_order(tmp_path: Path) -> None:
+    paper = _load_paper_module()
+    unit_dir = tmp_path / "unit"
+    unit_dir.mkdir()
+    _write_parse_cache(unit_dir, "p-x")
+    fill = _typed_note_fill(paper, "method_system")
+    fill["sections"][0], fill["sections"][1] = fill["sections"][1], fill["sections"][0]
+
+    violations, _claims = paper.verify_note_fill(fill, unit_dir, _paper_record("p-x"))
+    assert any("order must exactly match" in violation for violation in violations)
 
 
 def test_legacy_quick_screen_type_can_verify_old_flat_fill_without_writeback(tmp_path: Path) -> None:
@@ -520,7 +898,7 @@ def test_reader_first_note_keeps_all_analysis_before_complete_folded_evidence(
     unit_dir.mkdir(parents=True)
     _write_parse_cache(unit_dir, record["id"])
 
-    fill = _typed_note_fill(paper, "method_system")
+    fill = _legacy_typed_note_fill(paper, "method_system")
     for ref in fill["paper_type_evidence_refs"]:
         ref["source_unit_id"] = record["id"]
     for element in fill["element_sets"]["method_system"]:
@@ -703,8 +1081,8 @@ def test_empty_note_fill_is_rejected_and_hollow_confirm_is_blocked(tmp_path: Pat
     empty_fill = paper.build_note_scaffold(_paper_record("p-x"), [], "page", digest_chunks=1, digest_chars=10)
     violations, _claims = paper.verify_note_fill(empty_fill, unit_dir)
     assert violations
-    assert any("empty content" in v for v in violations)
-    assert any("no evidence_refs" in v for v in violations)
+    assert any("paper_type" in v for v in violations)
+    assert any("missing required section" in v for v in violations)
 
     # And the confirmation substance gate independently refuses a hollow paper.
     hollow = _paper_record("p-hollow-000001")  # core_content untouched == empty
@@ -922,8 +1300,7 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
     ) == 0
 
     fill_path = unit_dir / "note-fill.yaml"
-    fill = _typed_note_fill(paper, "method_system")
-    fill["paper_id"] = paper_id
+    fill = _typed_note_fill(paper, "method_system", paper_id=paper_id)
     for item in paper._all_note_evidence_items(fill):
         for evidence_ref in item.get("evidence_refs") or []:
             evidence_ref["source_unit_id"] = paper_id
@@ -970,10 +1347,11 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
         "--preference-selection-id",
         verify_selection,
         "--defer-post-actions",
-    ) == 0
+        ) == 0
     verified = load_yaml(record_path(tmp_path, "paper", paper_id))
     assert verified["payload"]["deep_read"]["paper_type"] == "method_system"
-    assert len(verified["payload"]["claims"]) == 6
+    assert len(verified["payload"]["claims"]) == 12
+    assert len(verified["payload"]["verification"]["content_digest"]) == 64
 
 
 @pytest.mark.parametrize("artifact", ("source", "parse-cache", "fill"))
@@ -1046,8 +1424,38 @@ def test_complete_note_prepare_needs_no_screening_and_does_not_guess_type(
     ) == 0
     scaffold = load_yaml(unit_dir / "note-fill.yaml")
     assert scaffold["paper_type"] == ""
-    assert set(scaffold["element_sets"]) == set(paper.PAPER_TYPES)
+    assert scaffold["schema"] == paper.PAPER_NOTE_FILL_SCHEMA
+    assert scaffold["sections"] == []
     assert not (unit_dir / "screening.yaml").exists()
+
+
+def test_complete_note_prepare_preserves_recognized_schema_less_v1_fill_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paper = _load_paper_module()
+    initialize_test_workspace(tmp_path)
+    paper_id = "p-v1-preserve-0001"
+    write_record(tmp_path, _paper_record(paper_id))
+    unit_dir = record_path(tmp_path, "paper", paper_id).parent
+    _write_parse_cache(unit_dir, paper_id)
+    fill_path = unit_dir / "note-fill.yaml"
+    legacy_fill = _legacy_typed_note_fill(paper, "method_system")
+    write_yaml_if_changed(fill_path, legacy_fill)
+    before = fill_path.read_bytes()
+
+    assert _run_cli(
+        paper,
+        monkeypatch,
+        tmp_path,
+        "complete-note",
+        "--phase",
+        "prepare",
+        "--paper-id",
+        paper_id,
+        "--defer-post-actions",
+    ) == 0
+    assert fill_path.read_bytes() == before
+    assert load_yaml(fill_path).get("schema") is None
 
 
 def test_new_paper_rejects_legacy_screen_without_creating_artifacts(
@@ -1086,20 +1494,20 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     unit_dir = record_path(tmp_path, "paper", paper_id).parent
     _write_parse_cache(unit_dir, paper_id)
 
-    # Direct deep-read prepare -> type selector + three branches; no screening artifact.
+    # Direct deep-read prepare -> v2 matrix contract; no screening artifact.
     assert _run_cli(paper, monkeypatch, tmp_path, "complete-note", "--phase", "prepare",
                     "--paper-id", paper_id, "--defer-post-actions") == 0
     fill_path = unit_dir / "note-fill.yaml"
     scaffold = load_yaml(fill_path)
     assert scaffold["paper_type"] == ""
-    assert set(scaffold["element_sets"]) == set(paper.PAPER_TYPES)
+    assert scaffold["schema"] == paper.PAPER_NOTE_FILL_SCHEMA
+    assert scaffold["sections"] == []
     assert not (unit_dir / "screening.yaml").exists()
     reloaded = load_yaml(record_path(tmp_path, "paper", paper_id))
     assert has_substantive_content(reloaded, "paper") is False  # scaffold is not content
 
-    # Agent selects a type and fills only that branch; verify persists type + note.
-    legit_fill = _typed_note_fill(paper, "method_system")
-    legit_fill["paper_id"] = paper_id
+    # Agent fills all common + selected type sections; verify persists v2 + note.
+    legit_fill = _typed_note_fill(paper, "method_system", paper_id=paper_id)
     for item in paper._all_note_evidence_items(legit_fill):
         for evidence_ref in item.get("evidence_refs") or []:
             evidence_ref["source_unit_id"] = paper_id
@@ -1110,18 +1518,19 @@ def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch:
     filled = load_yaml(record_path(tmp_path, "paper", paper_id))
     assert has_substantive_content(filled, "paper") is True
     assert filled["payload"]["deep_read"]["paper_type"] == "method_system"
-    assert len(filled["payload"]["claims"]) == 6
+    assert filled["payload"]["deep_read"]["schema"] == paper.PAPER_DEEP_READ_SCHEMA
+    assert len(filled["payload"]["claims"]) == 12
     assert filled["payload"]["claims"] == load_yaml(unit_dir / "note-claims.yaml")["claims"]
     assert filled["payload"]["verification"]["artifacts"]
     assert len(filled["payload"]["verification"]["claims_digest"]) == 64
+    assert len(filled["payload"]["verification"]["content_digest"]) == 64
 
     # Fabricated fill through the CLI is rejected (non-zero exit).
-    bad = _typed_note_fill(paper, "method_system")
-    bad["paper_id"] = paper_id
+    bad = _typed_note_fill(paper, "method_system", paper_id=paper_id)
     for item in paper._all_note_evidence_items(bad):
         for evidence_ref in item.get("evidence_refs") or []:
             evidence_ref["source_unit_id"] = paper_id
-    bad["element_sets"]["method_system"][0]["evidence_refs"][0]["quote"] = (
+    bad["sections"][0]["claims"][0]["evidence_refs"][0]["quote"] = (
         "fabricated claim not in source"
     )
     write_yaml_if_changed(fill_path, bad)
