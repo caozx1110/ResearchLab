@@ -14,6 +14,7 @@ from repo_paths import REPO_ROOT
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.prefs import ensure_workspace
+from research.paths import resolve_local_reference
 from research.records import iter_records
 
 
@@ -105,7 +106,11 @@ def test_human_note_freezes_exact_bytes_with_provenance_and_exact_checkpoint(
     record = records[0]
     assert record["source"]["source_origin"] == "human-note"
     assert record["source"]["original_uri"] == "kb/obsidian/inbox/My Note.md"
-    backup_paths = [root / value for value in record["source"]["backup_paths"]]
+    backup_paths = [
+        resolve_local_reference(root, value)
+        for value in record["source"]["backup_paths"]
+    ]
+    assert all(path is not None for path in backup_paths)
     assert any(path.read_bytes() == original for path in backup_paths)
     parse_cache = load_yaml(
         root / "units" / "blogs" / record["id"] / "parse-cache.yaml",
@@ -304,6 +309,7 @@ def test_kb_ingest_private_human_note_route_prepares_blog_without_public_path_le
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[tuple[str, tuple[str, ...]]] = []
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda _root: {"ingest", "generate-note"})
 

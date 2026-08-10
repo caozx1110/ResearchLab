@@ -53,6 +53,7 @@ def test_dataset_profile_scaffold_and_verbatim_verification(tmp_path: Path) -> N
         ".agents/skills/unit-analyst/scripts/dataset.py",
         "dataset_analyst_first_class",
     )
+    initialize_test_workspace(tmp_path)
     record = default_record(
         "dataset",
         title="HIW-500",
@@ -178,7 +179,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
     assert dataset.main() == 0
 
     committed = subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "show", "--format=", "--name-only", "HEAD"],
+        ["git", "-C", str(tmp_path), "show", "--format=", "--name-only", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -186,7 +187,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
     relative_fill = f"units/datasets/{dataset_id}/dataset-fill.yaml"
     assert relative_fill in committed
     assert "dataset-fill.yaml" not in subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        ["git", "-C", str(tmp_path), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,

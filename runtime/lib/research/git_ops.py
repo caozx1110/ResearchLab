@@ -38,6 +38,7 @@ from .journal import (
     _recovery_journaled_op,
     _recovery_workspace_scope,
     _target_key,
+    RECOVERABLE_TARGET_CLASSES,
     committed_ops,
     incomplete_ops,
     journal_runtime_lock,
@@ -700,7 +701,11 @@ def _restore_committed_range(
         union_keys: set[str] = set()
         disposable_union_keys: set[str] = set()
         disposable_recovery_keys = {
-            _target_key(project_root, passage_search_cache_path(project_root))
+            _target_key(
+                project_root,
+                passage_search_cache_path(project_root),
+                allowed_classes=RECOVERABLE_TARGET_CLASSES,
+            )
         }
         for source_id, entry, _source_digest in source_views:
             if str(entry.get("state") or "") != "commit":
@@ -717,7 +722,13 @@ def _restore_committed_range(
         ]
         with ExitStack() as locks:
             for path in sorted(target_paths, key=lambda item: item.as_posix()):
-                locks.enter_context(operation_lock(project_root, path))
+                locks.enter_context(
+                    operation_lock(
+                        project_root,
+                        path,
+                        allowed_target_classes=RECOVERABLE_TARGET_CLASSES,
+                    )
+                )
 
             # Prove every exact-key segment before creating a recovery journal.
             # A directory digest cannot be derived by assigning the recorded

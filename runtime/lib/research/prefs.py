@@ -325,9 +325,15 @@ def effective_review_policy(project_root: Path) -> dict[str, Any]:
 
 
 def load_runtime_preferences(project_root: Path) -> dict[str, Any]:
-    preferences_path = runtime_preferences_path(project_root)
-    has_existing_config = preferences_path.exists()
-    payload = load_yaml(preferences_path, default={})
+    try:
+        preferences_path = runtime_preferences_path(project_root)
+    except SystemExit:
+        # Pure policy reads on an uninitialized workspace stay zero-write and
+        # fail closed to the disabled defaults.  Every preference mutation is
+        # still rejected by the layout-aware transaction boundary.
+        preferences_path = None
+    has_existing_config = preferences_path is not None and preferences_path.exists()
+    payload = load_yaml(preferences_path, default={}) if preferences_path is not None else {}
     raw_profile = payload.get("governance_profile") if isinstance(payload, dict) else None
     has_existing_payload = isinstance(payload, dict) and bool(payload)
     if not has_existing_payload:

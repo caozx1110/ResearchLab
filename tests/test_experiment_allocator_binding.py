@@ -377,7 +377,12 @@ def test_transaction_recovery_removes_exclusive_run_after_later_failure(
 
     monkeypatch.setattr(module, "append_list_item", fail_after_run_write)
     with pytest.raises(RuntimeError, match="injected post-run failure"):
-        with module.command_mutation(root, "experiment-workbench:log-run", targets):
+        with module.command_mutation(
+            root,
+            "experiment-workbench:log-run",
+            targets,
+            allow_operational_state=True,
+        ):
             module._dispatch(args, root)
 
     assert not (record_path.parent / "runs").exists()

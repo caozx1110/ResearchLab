@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.paths import config_root
@@ -22,6 +22,7 @@ def _experiment_module():
 
 
 def _run_experiment(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    initialize_test_workspace(root)
     project_root = REPO_ROOT
     script = project_root / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
     return subprocess.run(
@@ -45,7 +46,7 @@ def _run_report(root: Path, *args: str, check: bool = True) -> subprocess.Comple
 
 def _kb_git_status(root: Path) -> str:
     return subprocess.run(
-        ["git", "-C", str(root / "kb"), "status", "--short"],
+        ["git", "-C", str(root), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,
@@ -53,11 +54,11 @@ def _kb_git_status(root: Path) -> str:
 
 
 def _commit_kb_fixture(root: Path) -> None:
-    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.email", "experiment@example.invalid"], check=True)
-    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.name", "Experiment Test"], check=True)
-    subprocess.run(["git", "-C", str(root / "kb"), "add", "--all"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "experiment@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Experiment Test"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "--all"], check=True)
     subprocess.run(
-        ["git", "-C", str(root / "kb"), "commit", "-m", "fixture baseline"],
+        ["git", "-C", str(root), "commit", "-m", "fixture baseline"],
         check=True,
         capture_output=True,
         text=True,

@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from repo_paths import REPO_ROOT, source_path
+from repo_paths import REPO_ROOT, initialize_test_workspace, source_path
 
 import pytest
 
@@ -42,6 +42,7 @@ def _workspace(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    initialize_test_workspace(root)
     return root
 
 
@@ -625,7 +626,7 @@ def test_diagnostics_owner_script_exposes_locked_operations(tmp_path: Path) -> N
     )
     assert apply_args.command == "apply-retrospective"
     analysis_path = root / ".runtime/diagnostic-analysis.json"
-    analysis_path.parent.mkdir(parents=True)
+    analysis_path.parent.mkdir(parents=True, exist_ok=True)
     analysis_path.write_text(
         json.dumps(
             {
@@ -654,7 +655,7 @@ def test_owner_analysis_reader_rejects_leaf_swap_before_anchored_open(
         "d1_diagnostics_owner_toc_script",
     )
     analysis_path = root / ".runtime/diagnostic-analysis.json"
-    analysis_path.parent.mkdir(parents=True)
+    analysis_path.parent.mkdir(parents=True, exist_ok=True)
     safe_payload = {
         "explanation": "safe hypothesis",
         "reproduction": [],

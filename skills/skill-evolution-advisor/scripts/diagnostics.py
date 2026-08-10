@@ -136,7 +136,7 @@ def _load_private_analysis(root: Path, value: str) -> dict[str, object]:
     descriptor = -1
     try:
         directory = os.open(resolved_root, directory_flags)
-        for part in ("kb", ".runtime", *relative.parts[:-1]):
+        for part in (".runtime", *relative.parts[:-1]):
             child = os.open(part, directory_flags, dir_fd=directory)
             os.close(directory)
             directory = child

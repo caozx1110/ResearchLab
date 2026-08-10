@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 
@@ -32,6 +32,7 @@ def _main(module, monkeypatch: pytest.MonkeyPatch, root: Path, *args: str) -> in
 
 
 def _plan(module, monkeypatch: pytest.MonkeyPatch, root: Path, title: str = "import target") -> tuple[str, Path]:
+    initialize_test_workspace(root)
     assert _main(module, monkeypatch, root, "plan", "--title", title, "--program-id", "program-import") == 0
     record_path = next((root / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = str(load_yaml(record_path)["id"])

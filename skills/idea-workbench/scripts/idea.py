@@ -939,9 +939,10 @@ def _evidence_corpus_snapshot(
             total_bytes += metadata.st_size
             if total_bytes > MAX_CORPUS_TOTAL_BYTES:
                 raise ValueError("citable idea evidence corpus exceeds the total byte budget")
+            logical_path = rel(root, path)
             binding = regular_file_binding(
                 path,
-                logical_identity=path.relative_to(root).as_posix(),
+                logical_identity=logical_path,
                 trusted_root=root,
             )
             try:
@@ -952,13 +953,13 @@ def _evidence_corpus_snapshot(
                 raise ValueError("citable idea evidence artifact is unreadable") from exc
             if binding != regular_file_binding(
                 path,
-                logical_identity=path.relative_to(root).as_posix(),
+                logical_identity=logical_path,
                 trusted_root=root,
             ):
                 raise ValueError("citable idea evidence artifact changed while it was read")
             entries.append(
                 {
-                    "path": path.relative_to(root).as_posix(),
+                    "path": logical_path,
                     "identity_digest": binding["identity_digest"],
                     "bytes_digest": binding["bytes_digest"],
                     "size": metadata.st_size,
@@ -2450,7 +2451,7 @@ def _claims_corpus_violations(
                 continue
             try:
                 snapshot = source.artifact_snapshot(artifact)
-                relative = snapshot.path.relative_to(root.absolute()).as_posix()
+                relative = rel(root, snapshot.path)
             except ValueError:
                 violations.append(
                     f"claims[{claim_index}].evidence_refs[{ref_index}]: "

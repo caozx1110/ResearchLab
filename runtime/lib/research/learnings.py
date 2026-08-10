@@ -311,7 +311,10 @@ def discover_pending_preference_review_cards(
     limit: int = 2,
 ) -> list[dict[str, Any]]:
     """Pure-read projection of at most two grounded preference observations."""
-    captured = _strict_learning_snapshot(project_root)
+    try:
+        captured = _strict_learning_snapshot(project_root)
+    except SystemExit:
+        return []
     if captured is None:
         return []
     snapshot, entries = captured

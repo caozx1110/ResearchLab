@@ -25,7 +25,7 @@ from .paper_draft_runtime import (
     paper_draft_section_currentness_violations,
     paper_draft_section_path,
 )
-from .paths import kb_root
+from .paths import kb_root, rel
 from .confirm import has_complete_confirmation_receipt
 from .evidence import (
     CONFIRMABLE_CONTENT_FIELDS,
@@ -161,8 +161,8 @@ class BoundJudgementBatchSnapshot:
             return None
         if supplied_path:
             try:
-                canonical_path = bound.path.relative_to(self.root).as_posix()
-            except ValueError:
+                canonical_path = rel(self.root, bound.path)
+            except (SystemExit, ValueError):
                 return None
             if supplied_path != canonical_path:
                 return None
@@ -215,7 +215,7 @@ def _safe_relative_path(root: Path, path: Path) -> str:
         allowed_root=kb_root(resolved_root),
         require="file",
     )
-    return resolved.relative_to(resolved_root).as_posix()
+    return rel(resolved_root, resolved)
 
 
 def _unit_path(root: Path, unit_id: str) -> Path | None:
@@ -726,8 +726,8 @@ def _capture_side_judgement_discovery(
     specs = list(_side_container_specs(root))
     for path, owner, is_list in specs:
         try:
-            relative = path.absolute().relative_to(root).as_posix()
-        except ValueError:
+            relative = rel(root, path.absolute())
+        except (SystemExit, ValueError):
             continue
         file_snapshot = snapshot_project_file(root, relative)
         if file_snapshot is None:
@@ -809,6 +809,12 @@ def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     if not lexical_root.exists() and not lexical_root.is_symlink():
         return []
     project_root = _canonical_project_root(root)
+    try:
+        kb_root(project_root)
+    except SystemExit:
+        # Status/review discovery is a pure rescue read.  A missing or unsafe
+        # layout yields no trusted cards and never creates workspace state.
+        return []
     unit_candidates: list[dict[str, Any]] = []
     for snapshot in iter_canonical_record_snapshots(project_root):
         try:
@@ -941,7 +947,7 @@ def discover_stale_confirmed_surveys(root: str | Path) -> list[dict[str, Any]]:
                     "kind": "survey_judgement",
                     "id": subject_id,
                     "owner": bound.owner,
-                    "path": bound.path.relative_to(project_root).as_posix(),
+                    "path": rel(project_root, bound.path),
                 },
                 "slug": _text(record.get("slug")),
                 "mode": _text(record.get("mode")),
@@ -1088,7 +1094,11 @@ def require_judgement_snapshot(
         raise ValueError("review snapshot binding is incomplete")
     if root is not None and judgement_claim_present:
         project_root = Path(root).resolve()
-        artifact_path = (project_root / path).resolve()
+        artifact_snapshot = snapshot_project_file(project_root, path)
+        if artifact_snapshot is None:
+            raise ValueError("review subject no longer has its canonical owner or path identity")
+        artifact_path = artifact_snapshot.path
+        canonical_path = artifact_snapshot.relative_path
         identity_owner = UNIT_OWNER_BY_KIND.get(_text(record.get("kind")), owner)
         if _identity_violations(project_root, record, identity_owner, artifact_path):
             raise ValueError("review subject no longer has its canonical owner or path identity")
@@ -1107,7 +1117,11 @@ def require_judgement_snapshot(
             current_binding = dict(current_binding) if isinstance(current_binding, dict) else {}
             if current_binding != expected:
                 raise ValueError("review snapshot is stale; show the current judgement before applying a decision")
-    record_binding = judgement_snapshot_binding(record, owner=owner, path=path)
+    record_binding = judgement_snapshot_binding(
+        record,
+        owner=owner,
+        path=canonical_path if root is not None and judgement_claim_present else path,
+    )
     expected_record_binding = dict(expected)
     expected_record_binding.pop("source_digest", None)
     if record_binding != expected_record_binding:
@@ -1127,7 +1141,7 @@ def _bound_unit_from_snapshot(
     if record is None:
         raise ValueError(f"bound judgement is not a valid canonical record: {subject_kind}:{subject_id}")
     owner = UNIT_OWNER_BY_KIND[subject_kind]
-    relative_path = snapshot.path.relative_to(project_root).as_posix()
+    relative_path = rel(project_root, snapshot.path)
     supplied_owner = _text(subject.get("owner")) if subject is not None else ""
     supplied_path = _text(subject.get("path")) if subject is not None else ""
     if supplied_owner and supplied_owner != owner:
@@ -1167,7 +1181,7 @@ def _bound_side_from_candidate(
     subject_id = _text(record.get("id"))
     owner = SIDE_OWNER_BY_KIND[subject_kind]
     container = selected.container
-    relative_path = container.path.relative_to(project_root).as_posix()
+    relative_path = rel(project_root, container.path)
     supplied_owner = _text(subject.get("owner")) if subject is not None else ""
     supplied_path = _text(subject.get("path")) if subject is not None else ""
     if supplied_owner and supplied_owner != owner:
@@ -1229,7 +1243,10 @@ def load_bound_judgement_container_snapshot(
     relative = Path(relative_path)
     if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise ValueError("side judgement container path is not canonical")
-    target_path = project_root / relative
+    target_snapshot = snapshot_project_file(project_root, relative)
+    if target_snapshot is None:
+        raise ValueError("side judgement container path is not canonical")
+    target_path = target_snapshot.path
     matching_specs = [
         spec
         for spec in _side_container_specs(project_root)
@@ -1431,15 +1448,9 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
     relative = _text(subject.get("path"))
     candidates: list[Path] = []
     if relative:
-        candidate = project_root / relative
-        candidates.append(
-            trusted_project_path(
-                project_root,
-                candidate,
-                allowed_root=kb_root(project_root),
-                require="file",
-            )
-        )
+        candidate_snapshot = snapshot_project_file(project_root, relative)
+        if candidate_snapshot is not None:
+            candidates.append(candidate_snapshot.path)
     unit = _unit_path(project_root, subject_id)
     if unit is not None:
         candidates.append(unit)

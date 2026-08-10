@@ -1955,7 +1955,12 @@ def _dispatch(args, root: Path) -> int:
         for guarded in guarded_files:
             if not guarded.exists() or guarded.is_symlink() or not guarded.is_file():
                 raise SystemExit("Experiment batch output is missing or unsafe before commit.")
-            file_facts.append({"path": rel(root, guarded), "sha256": _hash_file(guarded)})
+            file_facts.append(
+                {
+                    "path": guarded.relative_to(kb_root(root)).as_posix(),
+                    "sha256": _hash_file(guarded),
+                }
+            )
         _BATCH_IMPORT_COMMIT_GUARD.set(
             {
                 "root": root,

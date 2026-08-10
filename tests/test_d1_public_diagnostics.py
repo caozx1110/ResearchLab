@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 from research.diagnostics import load_diagnostic_detail, list_diagnostic_issues
 from research.prefs import write_runtime_preferences
@@ -198,6 +198,7 @@ def test_capture_exception_preserves_original_exit_and_public_text(
     tmp_path: Path,
     capsys,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     kb = _load_kb_cli()
 
     def fail_capture(*args, **kwargs):
@@ -229,6 +230,7 @@ def test_capture_exception_preserves_original_exit_and_public_text(
 
 def test_real_intake_child_hands_allowlisted_failure_stage_to_dispatcher(tmp_path: Path) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     write_runtime_preferences(
         tmp_path,
         {"diagnostics": {"mode": "errors-only", "detail_level": "local-detailed"}},
@@ -263,6 +265,7 @@ def test_dispatcher_hands_only_closed_mechanical_detail_to_private_store(
     tmp_path: Path,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     write_runtime_preferences(
         tmp_path,
         {"diagnostics": {"mode": "errors-only", "detail_level": "local-detailed"}},
@@ -311,6 +314,7 @@ def test_developer_local_detail_emits_digest_bound_private_agent_action(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     write_runtime_preferences(
         tmp_path,
         {
@@ -381,6 +385,7 @@ def test_noneligible_detail_states_emit_no_retrospective_action(
     ):
         root = tmp_path / f"case-{index}"
         kb = _load_kb_cli()
+        initialize_test_workspace(root)
         write_runtime_preferences(root, {"diagnostics": diagnostics})
         monkeypatch.setattr(kb.subprocess, "run", lambda *args, **kwargs: _child_result(31))
 
@@ -435,6 +440,7 @@ def test_doctor_agent_protocol_contains_only_policy_and_mechanical_audit_summary
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "current_runtime_capabilities",

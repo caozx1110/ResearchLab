@@ -8,6 +8,7 @@ import research.common as common
 import research.sources as sources
 from research.evidence import verify_claim_evidence
 from research.yaml_io import load_yaml
+from repo_paths import initialize_test_workspace
 
 
 class _FakeResp:
@@ -194,6 +195,7 @@ def test_evidence_grounds_html_section_locator(tmp_path: Path) -> None:
 
 
 def test_local_pdf_backup_persists_bytes_and_page_locator(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     pdf = tmp_path / "local.pdf"
     data = _minimal_pdf_bytes("Local PDF body on page one.")
     pdf.write_bytes(data)

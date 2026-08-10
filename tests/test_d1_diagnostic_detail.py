@@ -951,11 +951,11 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
         [
             "git",
             "-C",
-            str(root / "kb"),
+            str(root),
             "add",
             "-f",
             "--",
-            detail_path.relative_to(root / "kb").as_posix(),
+            detail_path.relative_to(root).as_posix(),
         ],
         check=True,
     )
@@ -982,7 +982,7 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
         [
             "git",
             "-C",
-            str(root / "kb"),
+            str(root),
             "ls-tree",
             "-r",
             "--name-only",
@@ -1009,7 +1009,7 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
         [
             "git",
             "-C",
-            str(root / "kb"),
+            str(root),
             "ls-tree",
             "-r",
             "--name-only",

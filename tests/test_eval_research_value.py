@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 
@@ -39,6 +39,7 @@ def _write(path: Path, text: str) -> None:
 
 
 def _build_workspace(root: Path) -> None:
+    initialize_test_workspace(root)
     # one paper unit with empty core_content but real note + parse-cache text
     unit = root / "units" / "papers" / "p-smoke-0001"
     _write(

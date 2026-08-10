@@ -1880,7 +1880,34 @@ def _audit_counts(findings: list[dict[str, str]]) -> dict[str, int]:
 def audit_workspace(project_root: Path) -> dict[str, Any]:
     """Run deterministic, layered, byte-read-only mechanical KB health checks."""
     root = Path(project_root)
-    findings, unsafe_root = _symlink_findings(root)
+    if not root.exists() and not root.is_symlink():
+        findings: list[dict[str, str]] = []
+        unsafe_root = True
+    elif (root / "kb").is_symlink():
+        findings = [
+            _audit_finding(
+                "SECURITY_SYMLINK_ESCAPE",
+                "security",
+                "error",
+                "kb",
+                "The legacy KB root is a symlink and cannot define a trusted workspace boundary.",
+            )
+        ]
+        unsafe_root = True
+    else:
+        try:
+            findings, unsafe_root = _symlink_findings(root)
+        except SystemExit:
+            findings = [
+                _audit_finding(
+                    "SECURITY_WORKSPACE_LAYOUT_UNTRUSTED",
+                    "security",
+                    "error",
+                    "kb/config/workspace-layout.yaml",
+                    "The workspace layout is missing, unknown, or unsafe.",
+                )
+            ]
+            unsafe_root = True
     if not unsafe_root:
         _, lint_issues = lint_records(root)
         findings.extend(_lint_finding(issue) for issue in lint_issues)

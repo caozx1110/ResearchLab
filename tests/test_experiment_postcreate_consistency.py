@@ -195,6 +195,7 @@ def _run_log_transaction(module, root: Path, args) -> int:
             "experiment-workbench:log-run",
             targets,
             commit_guard=module._validate_created_run_at_commit,
+            allow_operational_state=True,
         ):
             result = module._dispatch(args, root)
         pending = module._PENDING_CHECKPOINT.get()
