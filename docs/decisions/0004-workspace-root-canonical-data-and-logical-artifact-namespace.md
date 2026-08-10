@@ -86,6 +86,8 @@ Issue #22 的 development candidate 实现该 Wave 3 obligation：根 managed bl
 
 Wave 4 只通过显式迁移文档/流程处理 legacy workspace。普通 install/update 不静默移动 canonical data；新 runtime 发现未迁移 legacy layout 时给出安全迁移指引并停止 root-layout 写入。
 
+Issue #29 的 development candidate 实现该 Wave 4 obligation：detector 保持只读并区分 root、eligible legacy 与全部拒绝状态；owner-only plan/apply/rollback 绑定 exact filesystem/Git/tree/receipt、当前消息授权、同盘私有恢复材料与独占 lock。迁移 commit 以旧 HEAD 为直接父提交，显式 rollback 使用新的授权与普通 reverse commit；两者都保留 logical `kb/...` bytes，拒绝 outer Git、history rewrite、自动迁移和不完整恢复。该实现与[迁移指南](../MIGRATE_KB_TO_WORKSPACE_ROOT.md)随候选 PR 仍是 proposal，只有合入 default branch 后才成为本 ADR 的 accepted implementation state。
+
 ## Alternatives considered
 
 - **继续永久使用物理 `<workspace>/kb/`。** 拒绝：它让 dedicated knowledge workspace 多一层无语义容器，并继续把产品安装、Agent 入口与数据所有权耦合在 installer 假设中。

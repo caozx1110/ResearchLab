@@ -103,6 +103,7 @@ from research import updater
 from research.obsidian import obsidian_projection_status, update_obsidian_projection
 from research.paths import rel, resolve_local_reference
 from research.workspace_layout import WorkspaceLayoutError, require_workspace_rules
+from research.legacy_migration import LEGACY_MIGRATION_GUIDANCE
 
 try:
     from research.diagnostics import capture_runtime_failure as _capture_runtime_failure
@@ -5899,6 +5900,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = find_project_root(DEFAULT_PROJECT_ROOT, explicit_root=args.root)
     if args.command not in {"help", "doctor"}:
+        try:
+            (root / "kb").lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise SystemExit(LEGACY_MIGRATION_GUIDANCE) from exc
+        else:
+            raise SystemExit(LEGACY_MIGRATION_GUIDANCE)
         try:
             require_workspace_rules(root)
         except WorkspaceLayoutError as exc:

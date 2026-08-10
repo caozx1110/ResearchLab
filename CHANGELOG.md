@@ -14,11 +14,13 @@ All notable changes to this project will be documented here. The format follows 
 - Fresh explicit `kb init` workspaces now use the workspace root as the physical canonical data root, activated by a tracked byte-canonical layout marker. Persisted `kb/...` artifact identities remain unchanged, KB Git uses exact root pathspecs, and install/update/reinstall never silently migrate a legacy physical `kb/` workspace.
 - Installed rule loading now uses a one-line, user-owned root pointer plus a minimal `.agents/WORKSPACE_RULES.md`; the duplicated `.agents/AGENTS.md` and eager `.agents/AGENT_GUIDE.md` payloads are retired. Manifest-owned legacy copies are removed safely during update/reinstall, while bytes outside the root managed block remain unchanged throughout install, update, reinstall, and uninstall.
 - Multi-operation skills now expose operation selectors and direct one-hop references for schema, recovery, private command catalogs, and variant workflows. Validation caps each `SKILL.md` at 500 lines and 64 KiB, checks links/anchors and shared protocol references, and requires navigation guidance for references of 200 lines or more without imposing a language-density score.
+- Legacy `<workspace>/kb/` conversion now has a read-only state detector and a private, digest-bound plan/apply/rollback workflow. Eligible dedicated workspaces preserve canonical bytes, logical `kb/...` identities, Git history and root user rules; ordinary install/update/reinstall/runtime still never migrate automatically, and staged failures retain exact recovery evidence. See the [migration guide](docs/MIGRATE_KB_TO_WORKSPACE_ROOT.md).
 
 ### Security
 
 - Runtime owners, journal/recovery/CAS, strict readers, indexes, diagnostics, and checkpoints share one root-role resolver. Missing or ambiguous markers, legacy/outer-Git layouts, reserved or unknown targets, collisions, symlinks, special nodes, and incomplete journals fail closed before business mutation; `.journal` and `.runtime` require explicit owner opt-in.
 - Missing, empty, symlinked, special, or identity-changing workspace rules now block the public mutation dispatcher and every journal transaction before any workspace write; `kb help` and `kb doctor` remain zero-write rescue routes.
+- Migration rejects outer Git, partial/unknown layouts, collisions, dirty state, incomplete journals, linked worktrees, symlink ancestors/leaves, special nodes, stale plans/receipts, and commit-boundary drift. Apply and reverse rollback require separate current-message authorization and preserve one same-filesystem private recovery receipt when exact recovery cannot complete.
 
 ## [0.2.0-rc.7] - 2026-07-29
 

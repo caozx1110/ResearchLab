@@ -20,6 +20,8 @@ from .common import (
 )
 from .path_contract import (
     PathContractError,
+    PRIVATE_DIAGNOSTIC_PREFIX,
+    WORKSPACE_GITIGNORE_LINES,
     logical_ref_to_physical_path,
     physical_path_to_logical_ref,
 )
@@ -38,39 +40,7 @@ UNIT_KIND_DIRS = {
 TEXT_REWRITE_SUFFIXES = {".md", ".markdown", ".txt", ".yaml", ".yml", ".json"}
 
 
-PRIVATE_DIAGNOSTIC_PREFIX = "memory/skill-evolution/.private"
-
-
-KB_GITIGNORE_LINES = [
-    "# Installed workspace integrations",
-    "/.agents/",
-    "/.venv/",
-    "/.claude/",
-    "/bin/",
-    "/CLAUDE.md",
-    "",
-    "# Runtime state",
-    "/.runtime/",
-    "",
-    "# Operation recovery journal",
-    "/.journal/",
-    "",
-    "# Raw and exported artifacts",
-    "/raw/",
-    "/output/",
-    "",
-    "# Generated browser workspace",
-    "/user/kb/",
-    "",
-    "# Private local diagnostics",
-    f"/{PRIVATE_DIAGNOSTIC_PREFIX}/",
-    "",
-    "# Generated Obsidian projection",
-    "/obsidian/managed/",
-    "",
-    "# Local noise",
-    "/.DS_Store",
-]
+KB_GITIGNORE_LINES = list(WORKSPACE_GITIGNORE_LINES)
 
 
 def project_root(start: Path | None = None, *, explicit_root: str | Path | None = None) -> Path:

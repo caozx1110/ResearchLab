@@ -108,6 +108,7 @@ def _read_marker(workspace: Path) -> tuple[bytes, os.stat_result]:
     try:
         config_metadata = config.lstat()
     except FileNotFoundError as exc:
+        _raise_legacy_migration_guidance(workspace)
         raise WorkspaceLayoutError(
             "工作区尚未通过 kb init 激活 workspace-root layout。"
         ) from exc
@@ -119,6 +120,7 @@ def _read_marker(workspace: Path) -> tuple[bytes, os.stat_result]:
     try:
         marker_metadata = marker.lstat()
     except FileNotFoundError as exc:
+        _raise_legacy_migration_guidance(workspace)
         raise WorkspaceLayoutError(
             "工作区尚未通过 kb init 激活 workspace-root layout。"
         ) from exc
@@ -159,6 +161,27 @@ def _read_marker(workspace: Path) -> tuple[bytes, os.stat_result]:
     if data != WORKSPACE_LAYOUT_MARKER_BYTES:
         raise WorkspaceLayoutError("workspace layout marker is unknown or non-canonical")
     return data, marker_metadata
+
+
+def _raise_legacy_migration_guidance(workspace: Path) -> None:
+    """Prefer the explicit migration route over misleading fresh-init advice."""
+
+    try:
+        legacy_metadata = (workspace / "kb").lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    # A symlink/FIFO/device named ``kb`` is an unsafe collision, not a legacy
+    # workspace.  Preserve the resolver's ordinary fail-closed init guidance;
+    # the migration guide is reserved for a real retired wrapper directory.
+    if _node_kind(legacy_metadata) != "directory":
+        return
+    # Import lazily: the migration detector consumes marker constants from this
+    # module, while the active root resolver must remain its lower layer.
+    from .legacy_migration import LEGACY_MIGRATION_GUIDANCE
+
+    raise WorkspaceLayoutError(LEGACY_MIGRATION_GUIDANCE)
 
 
 def resolve_workspace_roots(

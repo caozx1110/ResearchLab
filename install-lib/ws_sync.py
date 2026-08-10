@@ -6,8 +6,9 @@ The helper intentionally manages only two reachable areas:
 * ``DIR/.agents`` subtree
 * the single root-level ``DIR/AGENTS.md`` file
 
-It never enumerates or mutates sibling runtime/data directories such as
-``DIR/kb`` or ``DIR/.venv``.
+Before those writes it invokes the shared read-only layout detector.  That
+preflight scans without following links and never mutates a legacy ``DIR/kb``;
+ordinary install/update/reinstall must stop and route explicit migration.
 
 Release contents come only from the tracked allowlist below. The repository
 ``LICENSE`` is installed as ``DIR/.agents/LICENSE``. Install, update, and
@@ -146,6 +147,55 @@ def resolve_dir(path: str, label: str) -> Path:
     if not resolved.is_dir():
         die(f"{label} is not a directory: {path}")
     return resolved
+
+
+def resolve_workspace_dir(path: str, label: str) -> Path:
+    """Keep the lexical workspace identity so the detector can reject links."""
+
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    lexical = Path(os.path.normpath(os.fspath(candidate)))
+    try:
+        metadata = lexical.lstat()
+    except OSError:
+        die(f"{label} is not a directory: {path}")
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        die(f"{label} must be a real directory")
+    return lexical
+
+
+def refuse_legacy_workspace(repo: Path, dst_root: Path, *, action: str) -> None:
+    """Read-only Wave 4 detector hook; lifecycle actions never migrate data."""
+
+    runtime_lib = repo / "runtime" / "lib"
+    if not runtime_lib.is_dir():
+        die("source runtime library is missing")
+    runtime_text = runtime_lib.as_posix()
+    inserted = runtime_text not in sys.path
+    if inserted:
+        sys.path.insert(0, runtime_text)
+    try:
+        from research.legacy_migration import (  # type: ignore[import-not-found]
+            LEGACY_MIGRATION_GUIDANCE,
+            LegacyLayoutState,
+            detect_legacy_layout,
+        )
+
+        detection = detect_legacy_layout(dst_root)
+    except Exception as exc:
+        die(f"legacy workspace preflight failed closed: {type(exc).__name__}")
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(runtime_text)
+            except ValueError:
+                pass
+    if detection.state not in {
+        LegacyLayoutState.ACTIVE_ROOT,
+        LegacyLayoutState.NO_LAYOUT,
+    }:
+        die(f"{LEGACY_MIGRATION_GUIDANCE} 安装器的 {action} 操作不会自动迁移数据。")
 
 
 def sha256_file(path: Path) -> str:
@@ -1915,7 +1965,8 @@ def writes_need_change(dst_root: Path, writes: dict[str, tuple[bytes, int]], rem
 
 def install(args: argparse.Namespace) -> int:
     repo = resolve_dir(args.repo, "repo")
-    dst_root = resolve_dir(args.dir, "dir")
+    dst_root = resolve_workspace_dir(args.dir, "dir")
+    refuse_legacy_workspace(repo, dst_root, action="install")
     source = resolve_dir(args.source, "source") if args.source else None
     items = source_items(repo, source, allow_snapshot=args.allow_snapshot_source)
     files = current_files_from_items(items)
@@ -1987,7 +2038,8 @@ def install(args: argparse.Namespace) -> int:
 
 def update(args: argparse.Namespace) -> int:
     repo = resolve_dir(args.repo, "repo")
-    dst_root = resolve_dir(args.dir, "dir")
+    dst_root = resolve_workspace_dir(args.dir, "dir")
+    refuse_legacy_workspace(repo, dst_root, action="update")
     source = resolve_dir(args.source, "source") if args.source else None
     if not agents_root(dst_root).is_dir() or agents_root(dst_root).is_symlink():
         die(f"copy-project update requires a real .agents directory: {agents_root(dst_root)}")
@@ -2100,7 +2152,8 @@ def update(args: argparse.Namespace) -> int:
 
 def reinstall(args: argparse.Namespace) -> int:
     repo = resolve_dir(args.repo, "repo")
-    dst_root = resolve_dir(args.dir, "dir")
+    dst_root = resolve_workspace_dir(args.dir, "dir")
+    refuse_legacy_workspace(repo, dst_root, action="reinstall")
     source = resolve_dir(args.source, "source") if args.source else None
     manifest_snapshot = load_manifest_snapshot(dst_root, required=True)
     assert manifest_snapshot is not None

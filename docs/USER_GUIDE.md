@@ -47,7 +47,7 @@ kb init
 
 初始化会先创建可立即使用的本地知识库骨架。缺少真实署名时，Agent 会询问是否花约 1 分钟“现在设置”（推荐），也可以回复“先跳过”；跳过不会写入占位偏好，之后仍可立即入库、检索和分析资料。想继续时直接说“补充我的研究偏好”或再次使用 `kb init` 即可。
 
-对全新 dedicated workspace，显式 `kb init` 会激活 workspace-root layout，把知识资料直接保存在当前 workspace，而不再额外创建旧版物理数据子目录。记录、证据与回执的持久身份保持不变，用户无需改写历史引用。已有旧版分层不会被 init、install、update 或 reinstall 自动移动；当前 runtime 会先停止写入，等待显式迁移流程。
+对全新 dedicated workspace，显式 `kb init` 会激活 workspace-root layout，把知识资料直接保存在当前 workspace，而不再额外创建旧版物理数据子目录。记录、证据与回执的持久身份保持不变，用户无需改写历史引用。已有旧版分层不会被 init、install、update 或 reinstall 自动移动；runtime 会先停止写入，并引导 Agent 使用[旧布局迁移指南](MIGRATE_KB_TO_WORKSPACE_ROOT.md)。迁移只适用于 detector 明确认定安全的独立 workspace，需要当前消息授权，并保留可验证的同盘恢复材料。
 
 根集成规则只保留一个稳定加载指针，Agent 会先加载最小工作区规则，再按当前任务选择 owner 和一跳流程合同，不会在每轮预读全部 schema、恢复与变体说明。若最小规则缺失或不安全，所有会改变 workspace 的动作都会在写入前停止；`kb help` 与 `kb doctor` 仍可只读运行，供 Agent 判断并修复安装。
 

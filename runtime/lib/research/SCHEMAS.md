@@ -65,6 +65,41 @@ data-root-relative top-level ownership 分为：
 
 journal key 保持 data-root-relative（例如 `units/papers/...`），持久 artifact identity 保持 logical `kb/...`。KB Git repository 位于 workspace root；initial/checkpoint/undo/restore 只能使用 literal canonical pathspec，layout marker 显式纳入，operational/private/reserved/unknown 路径不随祖先 scope 搭车，禁止无范围 workspace `git add -A`。根 `AGENTS.md` 只有已 tracked 或用户明确选择时才可由 Git owner 纳入，任何 business transaction 都不能写它。
 
+### Legacy root migration receipts
+
+旧物理 `<workspace>/kb/` 只由 migration owner 的只读 detector 分类。稳定状态集合为 `root | no-layout | eligible-legacy | partial-ambiguous | outer-git | collision | dirty | incomplete-journal | symlink | special-node`。只有 `eligible-legacy` 可以生成 plan；其它状态不得创建 recovery、marker、Git commit 或 business journal，也不能由普通 install/update/reinstall/runtime 自动修复。
+
+冻结计划 schema 为 `research-legacy-layout-migration-plan/v1`。它是私有控制面，不是 canonical artifact，至少绑定：
+
+```yaml
+schema: research-legacy-layout-migration-plan/v1
+operation_id: <24 lowercase hex>
+workspace_root: <private canonical absolute lexical path>
+recovery_name: .workspace-oss-migration-<operation_id>
+detection_fingerprint: <sha256>
+old_head: <git object id>
+old_head_ref: refs/heads/<branch>
+old_tree: <git tree id>
+old_refs_sha256: <sha256>
+old_refs: [<exact show-ref rows>]
+old_index_sha256: <sha256>
+stable_tree_sha256: <sha256 of path+kind+mode+bytes rows>
+movable_entries: [<sorted canonical/operational top-level names>]
+entry_identities: [[<name>, [<dev>, <inode>, <type>, <size>, <mtime_ns>, <ctime_ns>]]]
+workspace_identity: [<dev>, <inode>, <type>, <size>, <mtime_ns>, <ctime_ns>]
+legacy_identity: [<dev>, <inode>, <type>, <size>, <mtime_ns>, <ctime_ns>]
+legacy_mode: <integer mode>
+plan_sha256: <sha256 of every preceding field>
+```
+
+Plan generation is pure read. `movable_entries` must be a sorted, duplicate-free subset of the reviewed top-level inventory and cannot contain separators, traversal or `.gitignore`; `.git` and optional `.gitignore` have separate exact identities. Apply reparses and validates the whole schema, requires it to match a fresh detector receipt field-for-field, creates private recovery, then repeats the full detector before the first move. A self-resealed plan cannot widen names or substitute Git receipts.
+
+Private recovery schema is `research-legacy-layout-migration-recovery/v1`. Its directory is a unique same-filesystem workspace sibling, owned by the current user with mode `0700`; `receipt.json` is an anchored, no-follow ordinary `0600` file, at most 32 MiB. It contains the complete validated plan, SHA-256 of the apply authorization from the current user message, optional independent rollback-authorization SHA-256, completed stages, migration/rollback HEAD, bounded original root/legacy ignore and integration-file snapshots, state, and `receipt_sha256` over every other field. Raw authorization text is never stored.
+
+Stable recovery states are `applying | migrated | rolling-back | rolled-back-after-failure | rolled-back | rollback-incomplete`; `completed_stages` draws only from `recovery-prepared | git-moved | entries-moved | ignore-merged | marker-written | commit-created`. `rollback-incomplete` retains the sole recovery material and forbids guessing or continuing ordinary lifecycle writes. Every explicit rollback requires a new current-message authorization plus the exact current `receipt_sha256`; it must not require the apply sentence to be repeated byte-for-byte.
+
+Apply moves direct `.git` ownership first, then exact allowlisted entries, merges root/legacy `.gitignore` while preserving user lines, creates the canonical marker without overwrite, verifies canonical/integration/Git receipts, and creates one ordinary migration commit whose direct parent is `old_head`. Bounded internal commits disable hooks and signing and use literal pathspecs. Successful rollback first verifies the frozen migration HEAD and clean tree, creates one ordinary reverse commit, then moves Git/canonical entries back and restores root bytes. Auto-recovery after apply failure restores `old_head`; successful post-migration rollback preserves old HEAD as an ancestor. Neither path rewrites refs/history, changes logical `kb/...`, stages reserved/private targets, or exposes receipts/paths/flags through the public `kb` surface.
+
 ### Runtime rule loading 与 progressive disclosure <a id="runtime-rule-loading"></a>
 
 安装态根 `AGENTS.md` 的 managed block 只含稳定 `.agents/WORKSPACE_RULES.md` 加载指针；完整 runtime rules 不复制到根，也不再分发 `.agents/AGENTS.md` 或 `.agents/AGENT_GUIDE.md`。根 marker 外 bytes 始终 user-owned，install/update/reinstall/uninstall 必须逐字保持。
