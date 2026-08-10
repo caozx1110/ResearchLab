@@ -14,7 +14,7 @@ workspace/
 └── AGENTS.md                   # user-owned integration file
 ```
 
-Persisted artifact references still begin with `kb/...`; that prefix is a stable logical namespace, not a required physical directory. Existing legacy workspaces with a physical `<workspace>/kb/` are never guessed or moved by init, install, update, or reinstall. The workspace-root runtime refuses mutation until the later explicit migration workflow can prove a safe conversion.
+Persisted artifact references still begin with `kb/...`; that prefix is a stable logical namespace, not a required physical directory. Existing legacy workspaces with a physical `<workspace>/kb/` are never guessed or moved by init, install, update, or reinstall. The workspace-root runtime refuses mutation and points to the explicit, receipt-bound [legacy migration guide](docs/MIGRATE_KB_TO_WORKSPACE_ROOT.md); only an eligible dedicated workspace and a current user-message authorization can be converted.
 
 The root `AGENTS.md` remains user-owned: the installer manages only a stable pointer to the minimal workspace rule layer. Detailed schema, recovery, review, and variant workflows live in the routed skill's direct references and are loaded only for the selected operation. If the minimal rules are missing or unsafe, all workspace-changing `kb` actions stop before writing; only read-only `kb help` and `kb doctor` remain available for repair guidance.
 

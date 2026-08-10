@@ -22,9 +22,12 @@ Include the affected commit or release candidate, operating system, minimal repr
 - Raw source and complete parse caches are immutable derived evidence.
 - Multi-file KB writes use explicit targets, journaling, locks, revision checks, and scoped checkpoints.
 - Canonical mutation requires the exact workspace-layout marker. Missing/unknown markers, legacy layout, outer Git, unknown root entries, symlink ancestors/leaves, and special nodes fail closed before business writes.
+- Legacy migration is never an installer/runtime side effect. Its read-only detector distinguishes root, eligible legacy, partial/ambiguous, outer Git, collision, dirty, incomplete journal, symlink, and special-node states before recovery or business writes.
+- Apply and rollback require independent authorization from the current user message plus exact plan/recovery receipts. Moves stay on one filesystem under an exclusive lock; commit-boundary drift stops, and incomplete recovery preserves one private sibling recovery set for human inspection.
 - Every public mutation and journal transaction also requires the installed `.agents/WORKSPACE_RULES.md` to be a bounded, stable ordinary file beneath a real `.agents` directory. Missing, empty, symlinked, special, or concurrently replaced rules fail before journal creation; only read-only `kb help` and `kb doctor` remain available for recovery.
 - Workspace-root ownership uses a canonical allowlist. `.agents`, `.git`, `.venv`, `.claude`, root agent-rule files, `bin`, and unknown siblings never become business, journal, strict-reader, or ordinary checkpoint targets merely because they share the root.
 - Persisted `kb/...` values are logical artifact identities; physical workspace-root mapping cannot silently rewrite evidence, receipts, history, or report/survey bindings.
+- Migration commits and rollback commits are ordinary descendants of the legacy HEAD. Hooks/signing are disabled for the bounded internal commit, literal pathspecs are used, and no history rewrite, outer-Git merge, force resolution, or automatic recovery-material deletion is allowed.
 - Update provenance preserves local checkouts and forks; unknown legacy provenance requires a user choice.
 - Install, update, migration, and uninstall do not treat canonical workspace data or legacy `kb/` as release content.
 - Repository-local `/.agents/` is ignored local tooling and is never enumerated, hashed, validated, or installed as product payload; only tracked `skills/` and `runtime/` feed the release mapping.

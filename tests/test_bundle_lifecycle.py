@@ -581,7 +581,6 @@ def test_merge_update_reinstall_uninstall_preserve_user_workspace(tmp_path: Path
     user_skill.parent.mkdir(parents=True)
     user_skill.write_text("# User skill\n", encoding="utf-8")
     (workspace / "AGENTS.md").write_text("# User rules\n\nKeep this prose.\n", encoding="utf-8")
-    (workspace / "kb").mkdir()
     (workspace / "notes.md").write_text("research data\n", encoding="utf-8")
     (workspace / ".venv").mkdir()
     (workspace / ".venv" / "sentinel").write_text("runtime\n", encoding="utf-8")

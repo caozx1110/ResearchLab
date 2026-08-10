@@ -1772,6 +1772,10 @@ ws_sync_error_tail() {
   # 子进程原文只用于进程内分类，绝不投影到公开面。未知错误也使用
   # fail-closed 的稳定类别，不猜测、更不回显路径、token 或 traceback。
   case "$1" in
+    *"检测到旧版知识库布局"*)
+      printf '%s\n' "  原因：检测到旧版知识库布局，安装生命周期不会自动搬运研究数据。"
+      printf '%s\n' "  处理：请先阅读迁移旧知识库到工作区根目录的指南，让 Agent 完成显式检查、授权与迁移。"
+      ;;
     *"source-not-git-worktree"*|*"source must be a git worktree"*)
       printf '%s\n' "  原因：安装源码缺少可验证的版本信息。"
       printf '%s\n' "  处理：请让 Agent 取得完整的版本化源码后重试；若只能使用快照，请先确认接受其来源边界。"

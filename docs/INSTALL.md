@@ -56,7 +56,7 @@ kb init
 
 初始化会先让知识库可用，再提供“现在设置”（推荐）和“先跳过”。选择跳过不会追加或覆盖偏好，也不妨碍立即添加、检索或分析资料；之后可直接说“补充我的研究偏好”。初始化后可用 `kb status` 查看当前状态。此后不需要继续操作安装脚本；更新、重装和卸载由 Agent 或管理员按需处理，并保留已有研究资料。
 
-全新 dedicated workspace 的 `kb init` 会先做零写 collision preflight，再写入 byte-canonical `config/workspace-layout.yaml`，随后把 `units/`、`programs/`、`raw/` 等 canonical 目录直接建在 workspace 根。普通业务动词不能创建 marker；marker 缺失/异常、已有 Git repository、partial root tree、unknown sibling、symlink、special node 或 legacy `kb/` 都先拒绝。当前安装/update/reinstall 不会自动迁移 legacy 数据；在显式 migration 流程交付前，不要对 legacy workspace 强行运行 root-layout init。
+全新 dedicated workspace 的 `kb init` 会先做零写 collision preflight，再写入 byte-canonical `config/workspace-layout.yaml`，随后把 `units/`、`programs/`、`raw/` 等 canonical 目录直接建在 workspace 根。普通业务动词不能创建 marker；marker 缺失/异常、已有 Git repository、partial root tree、unknown sibling、symlink、special node 或 legacy `kb/` 都先拒绝。install/update/reinstall 不会自动迁移 legacy 数据；检测到旧布局时，让 Agent 按[迁移旧知识库到 workspace root](MIGRATE_KB_TO_WORKSPACE_ROOT.md)完成只读检查、当前消息授权与 receipt-bound 迁移，不要强行运行 root-layout init 或手工剪切目录。
 
 ## 管理员参考：推荐安装模型
 

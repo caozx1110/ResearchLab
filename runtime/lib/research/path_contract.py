@@ -48,6 +48,42 @@ CANONICAL_ARTIFACT_TOP_LEVEL = (
 # Downstream journal/runtime owners must opt in explicitly when checking it.
 OPERATIONAL_STATE_TOP_LEVEL = frozenset({".journal", ".runtime"})
 
+# Root-layout Git ownership is deliberately narrower than the physical
+# workspace.  Keep the anchored ignore contract in this lowest-level module so
+# migration and the ordinary runtime share one byte vocabulary without making
+# the read-only migration detector import the high-level ``paths`` facade.
+PRIVATE_DIAGNOSTIC_PREFIX = "memory/skill-evolution/.private"
+WORKSPACE_GITIGNORE_LINES = (
+    "# Installed workspace integrations",
+    "/.agents/",
+    "/.venv/",
+    "/.claude/",
+    "/bin/",
+    "/CLAUDE.md",
+    "",
+    "# Runtime state",
+    "/.runtime/",
+    "",
+    "# Operation recovery journal",
+    "/.journal/",
+    "",
+    "# Raw and exported artifacts",
+    "/raw/",
+    "/output/",
+    "",
+    "# Generated browser workspace",
+    "/user/kb/",
+    "",
+    "# Private local diagnostics",
+    f"/{PRIVATE_DIAGNOSTIC_PREFIX}/",
+    "",
+    "# Generated Obsidian projection",
+    "/obsidian/managed/",
+    "",
+    "# Local noise",
+    "/.DS_Store",
+)
+
 # These workspace integrations must never become a canonical business,
 # transaction, strict-reader, or checkpoint target after the physical root is
 # widened.  Case-folded comparison also fails closed on case-insensitive hosts.
@@ -299,6 +335,7 @@ __all__ = [
     "LOGICAL_ARTIFACT_PREFIX",
     "OPERATIONAL_STATE_TOP_LEVEL",
     "PathContractError",
+    "PRIVATE_DIAGNOSTIC_PREFIX",
     "RESERVED_WORKSPACE_TOP_LEVEL",
     "RootRoles",
     "TargetAssessment",
@@ -308,4 +345,5 @@ __all__ = [
     "logical_ref_to_physical_path",
     "physical_path_to_logical_ref",
     "validate_logical_artifact_ref",
+    "WORKSPACE_GITIGNORE_LINES",
 ]

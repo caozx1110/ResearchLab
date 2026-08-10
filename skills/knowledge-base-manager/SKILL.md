@@ -24,6 +24,8 @@ description: 管理 knowledge base 的统一 schema、passage 索引、链接、
 
 历史上误存为 repo 的 Hugging Face dataset 只能走本 owner 的显式 dataset migration：默认先给 dry-run 计划，确认 apply 后在一个 journaled transaction 内改 ID、目录与引用，并支持 undo。旧 confirmation 只保留为审计记录；因为 subject kind/id 已改变，dataset canonical judgement 必须重新填证据、verify 并由用户确认。更新安装包不得静默迁移真实 KB。
 
+检测到 retired physical `kb/` wrapper 时，不得把它当 fresh init。只在用户明确要求迁移且 detector 判定 eligible 后加载[旧布局迁移私有流程](references/legacy-root-migration.md)；普通 runtime/安装生命周期只读检测并 fail closed。
+
 ## Review classifier
 
 Knowledge Base Manager 负责 knowledge-unit classifier；公共 `kb review` 还通过 shared judgement discovery 聚合其它 owner 的 ready judgement：
@@ -83,7 +85,7 @@ Owner script、Python 命令、环境变量、内部 flags、绝对路径与 Age
 - topic/tag/pool/summary 属于可覆盖治理层；history、links 与确认记录保留变更痕迹。
 - storage-sync 只处理 KB 数据范围，不重写分发 skill 或工作区根规则。
 
-脚本入口：`scripts/kb.py`（init / query / review-queue / confirm / promote / link / govern / audit / lint / resume / undo / restore）。
+脚本入口：`scripts/kb.py`（init / query / review-queue / confirm / promote / link / govern / audit / lint / resume / undo / restore）；旧布局的 owner-only receipt 流程使用 `scripts/migrate_legacy_layout.py`，不接入公共 dispatcher。
 
 ## 启动澄清（Agent 用）
 
