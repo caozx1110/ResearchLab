@@ -98,6 +98,7 @@ Root layout 采用 reviewed canonical top-level allowlist；`.journal/`、`.runt
 - `sources.py`：source intake 与 KB-local storage migration；
 - `surveys.py`：survey 上游 byte binding、selection 与消费者只读 freshness 检查；
 - `source_materials.py`：PDF / HTML / Markdown / text 的完整 Markdown 阅读层、图片本地化、source map 与转换清单；
+- `source_navigation.py`：只读校验 canonical Markdown 阅读入口，把 page/section locator 解析为唯一且真实存在的 source block，歧义或 stale map 只降级到全文；
 - `index.py` / `retrieval.py`：canonical index、deterministic passage extraction、FTS5 cache、只读 stale fallback 与 ID compaction；
 - `diagnostics.py`：可选诊断策略、脱敏 issue、确定性去重和本地导出预览；
 - `preference_selection.py`：task-scoped eligible view、Agent effective-selection receipt 与 stale binding；
@@ -114,7 +115,9 @@ Root layout 采用 reviewed canonical top-level allowlist；`.journal/`、`.runt
 
 ### Obsidian 派生视图
 
-已激活的 workspace root 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统物理上只管理 `obsidian/managed/`（稳定逻辑 identity 为 `kb/obsidian/managed/`），人工内容放在 `obsidian/inbox/` 与 `obsidian/annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper、文章与本地文档页回链 canonical `source/document.md`，source map 能把 page/section evidence locator 投影到稳定 source block；repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；renderer 11 的 Bases 直接输出当前支持的 Obsidian 保存格式所采用的 byte-canonical YAML。manifest-owned 普通 `.base` 是 renderer 完整拥有的可重建派生视图，刷新会丢弃任何手工内容并恢复默认 bytes；symlink、特殊类型、未登记路径仍拒绝，managed Markdown 的内容漂移也继续保留并 fail closed。manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
+已激活的 workspace root 可直接作为无需社区插件的 Obsidian Vault；canonical record、program state、taxonomy 与 evidence 仍是唯一事实源。系统物理上只管理 `obsidian/managed/`（稳定逻辑 identity 为 `kb/obsidian/managed/`），人工内容放在 `obsidian/inbox/` 与 `obsidian/annotations/`，不得生成或改写 `.obsidian/`。生成页以 Reading view 为消费合同；编辑/Live Preview 显示 wikilink、code span 与 block ID 源码是 Obsidian 原生行为。Paper 页优先暴露已经存在的 canonical `note.md` 深读入口，并继续回链 `source/document.md`；共享 source-reading resolver 只在 document digest 当前、source-map locator 唯一匹配且目标 block 确实存在时生成精确 page/section 链接，map 缺失、stale 或歧义时降级到全文，Markdown view 不安全或 stale 时不生成链接。repo evidence 可以渲染为经过路径 containment 和文件存在性检查的本地文件链接，但 canonical 身份始终是 unit id 与仓库相对路径，机器本地 URI 不写回证据。动态 canonical 文本必须经 Markdown-safe 字面渲染，frontmatter wikilink 必须保持物理单行；renderer 12 的 unit page 纳入深读入口，三份 Bases 仍输出当前支持的保存格式所对应的 byte-canonical YAML。manifest-owned 普通 `.base` 是 renderer 完整拥有的可重建派生视图，刷新会丢弃任何手工内容并恢复默认 bytes；symlink、特殊类型、未登记路径仍拒绝，managed Markdown 的内容漂移也继续保留并 fail closed。manifest 的 renderer revision 变化会令旧投影 stale 并触发可恢复重建。
+
+新生成的 paper `note.md` 是 reader-first 派生阅读面，不改变 canonical claim/evidence/receipt：论文类型与所选五要素的分析正文全部先渲染，每节只放一个稳定的证据入口；文末按相同固定顺序保留每条 ref 的 source unit、artifact、原始 locator、完整 quote 与可选 summary，并用 Obsidian 原生默认折叠 callout 隔离逐字引文。普通 Markdown 阅读器仍可顺序读出 callout 内容。动态文本全部按字面转义；历史 note 不因 projection refresh 或无关 analyzer 操作批量重写。
 
 人工笔记回流是显式选择，不是目录扫描：只接收当前消息点名的 `inbox/` 或 `annotations/` 下一层 UTF-8 普通 Markdown basename，拒绝 nested path、symlink、special、oversize 与 review sheet。source-intake 将选择时 exact bytes 冻结成 provenance 隔离的 `blog` unit（`source_origin=human-note`），原件不进入 transaction 或 checkpoint；blog owner 只从冻结 parse cache 接受 Agent fill/verify，结构化判断仍进入普通 pending review。
 

@@ -16,14 +16,16 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
 import re
 import stat
 import sys
 from contextvars import ContextVar
 from datetime import datetime
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
+from urllib.parse import quote as url_quote
 
 SCRIPT_PATH = Path(__file__).resolve()
 skills_dir = SCRIPT_PATH.parents[2]
@@ -93,6 +95,10 @@ from research.preference_selection import (
     operation_contract,
     resolve_task_preferences,
     selection_binding,
+)
+from research.source_navigation import (
+    SourceReadingTarget,
+    resolve_source_reading_targets,
 )
 
 SECTION_PATTERNS = (
@@ -982,40 +988,217 @@ def _apply_note_fill_to_payload(record: dict, claims: list[dict]) -> None:
             target[field] = content
 
 
-def render_note_md(record: dict, claims: list[dict]) -> str:
-    """Render note.md from verified elements + their evidence citations."""
-    # Collapse ALL whitespace (incl. newlines) so the full title renders on the single
-    # H1 line (F8). A PDF-extracted title can carry embedded newlines; `f"# {title}"`
-    # would then put only the first physical line in the heading and orphan the rest as
-    # body text — reading as a mid-sentence truncation. This keeps the whole title, no
-    # hard character cut.
-    title = " ".join(str(record.get("title") or record.get("id") or "").split())
-    by_id = {str(claim.get("id") or ""): claim for claim in claims}
+_NOTE_MARKDOWN_INLINE_RE = re.compile(r"([\\`*_{}\[\]()<>~$|^&=#!])")
+_NOTE_LEADING_MARKDOWN_RE = re.compile(r"^(?P<prefix>(?:[+-])|(?:\d+[.)]))(?=\s)")
+_NOTE_NON_CONTENT_HEADINGS = frozenset({"paper type", "evidence index"})
+
+
+def _note_markdown_literal(value: Any) -> str:
+    """Render one untrusted canonical value as a single Markdown text line."""
+
+    text = " ".join(str(value or "").split())
+    text = _NOTE_MARKDOWN_INLINE_RE.sub(lambda match: f"\\{match.group(0)}", text)
+    return _NOTE_LEADING_MARKDOWN_RE.sub(
+        lambda match: f"\\{match.group('prefix')}",
+        text,
+    )
+
+
+def _note_inline_code(value: Any, *, fallback: str = "未提供") -> str:
+    text = " ".join(str(value or "").split()) or fallback
+    longest = max((len(match.group(0)) for match in re.finditer(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    return f"{fence} {text} {fence}"
+
+
+def _note_sections(record: dict, claims: list[dict]) -> list[dict[str, Any]]:
+    by_id = {
+        str(claim.get("id") or ""): claim
+        for claim in claims
+        if isinstance(claim, dict)
+    }
+    sections: list[dict[str, Any]] = []
+    type_claim = by_id.get("claim-paper-type")
+    paper_type = _paper_type_from_record(record)
+    if type_claim is not None or paper_type:
+        sections.append(
+            {
+                "key": "paper-type",
+                "heading": "Paper Type",
+                "paper_type": str(
+                    (type_claim or {}).get("paper_type") or paper_type
+                ).strip(),
+                "content": clean_text(str((type_claim or {}).get("text") or "")),
+                "refs": [
+                    ref
+                    for ref in ((type_claim or {}).get("evidence_refs") or [])
+                    if isinstance(ref, dict)
+                ],
+            }
+        )
+    for name in elements_for(record):
+        claim = by_id.get(f"claim-{name}")
+        sections.append(
+            {
+                "key": name.replace("_", "-"),
+                "heading": ELEMENT_HEADING[name],
+                "paper_type": "",
+                "content": clean_text(str((claim or {}).get("text") or "")),
+                "refs": [
+                    ref
+                    for ref in ((claim or {}).get("evidence_refs") or [])
+                    if isinstance(ref, dict)
+                ],
+            }
+        )
+    return sections
+
+
+def _note_source_link(
+    project_root: Path | None,
+    note_path: Path | None,
+    record: dict,
+    ref: Mapping[str, Any],
+    target: SourceReadingTarget | None,
+) -> tuple[str, str]:
+    if project_root is None or note_path is None or target is None:
+        return "", ""
+    source_unit_id = " ".join(str(ref.get("source_unit_id") or "").split())
+    current_unit_id = " ".join(str(record.get("id") or "").split())
+    if source_unit_id and source_unit_id != current_unit_id:
+        return "", ""
+    try:
+        note_parent = note_path.parent.relative_to(kb_root(project_root)).as_posix()
+    except ValueError:
+        return "", ""
+    relative = posixpath.relpath(target.markdown_path, start=note_parent)
+    if relative.startswith("/") or any(part in {"", ".."} for part in PurePosixPath(relative).parts):
+        return "", ""
+    encoded = url_quote(relative, safe="/._~-")
+    if target.block_id:
+        return f"[打开原文定位](<{encoded}#^{target.block_id}>)", "exact"
+    return f"[打开 Markdown 全文](<{encoded}>)", "document"
+
+
+def _append_evidence_callout(
+    lines: list[str],
+    *,
+    section: dict[str, Any],
+    record: dict,
+    project_root: Path | None,
+    note_path: Path | None,
+) -> None:
+    refs = section["refs"]
+    lines.extend(
+        [
+            f"### {section['heading']}",
+            "",
+            f"> [!quote]- 完整证据（{len(refs)} 条）",
+        ]
+    )
+    for index, ref in enumerate(refs, start=1):
+        source_unit_id = ref.get("source_unit_id") or record.get("id")
+        artifact = ref.get("artifact")
+        locator = ref.get("locator")
+        summary = _note_markdown_literal(ref.get("summary"))
+        quote = _note_markdown_literal(ref.get("quote"))
+        source_link, precision = _note_source_link(
+            project_root,
+            note_path,
+            record,
+            ref,
+            section["targets"][index - 1],
+        )
+        lines.extend(
+            [
+                ">",
+                f"> **证据 {index}**",
+                ">",
+                f"> - 来源单元：{_note_inline_code(source_unit_id)}",
+                f"> - 材料：{_note_inline_code(artifact)}",
+                f"> - 原始定位：{_note_inline_code(locator)}",
+            ]
+        )
+        if precision == "exact":
+            lines.append(f"> - 阅读入口：{source_link}")
+        elif precision == "document":
+            lines.append(f"> - 阅读入口：{source_link}（未找到唯一精确 block，保留上方原始定位。）")
+        else:
+            lines.append("> - 阅读入口：不可用（材料与原始定位仍完整保留。）")
+        if summary:
+            lines.append(f"> - 摘要：{summary}")
+        lines.extend([">", f"> > {quote or '未提供逐字引文。'}"])
+    lines.extend(["", f"^paper-note-evidence-{section['key']}", ""])
+
+
+def render_note_md(
+    record: dict,
+    claims: list[dict],
+    *,
+    project_root: Path | None = None,
+    note_path: Path | None = None,
+) -> str:
+    """Render a reader-first note followed by complete folded evidence."""
+
+    # Collapse all title whitespace so extracted line breaks cannot create a second
+    # Markdown block. Literal escaping then prevents the remaining text from
+    # injecting links, headings, callouts, or HTML into the generated note.
+    title = _note_markdown_literal(record.get("title") or record.get("id"))
+    sections = _note_sections(record, claims)
+    all_refs = [ref for section in sections for ref in section["refs"]]
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    if project_root is not None and all_refs:
+        targets = resolve_source_reading_targets(
+            project_root,
+            source,
+            [ref.get("locator") for ref in all_refs],
+        )
+    else:
+        targets = tuple(None for _ref in all_refs)
+    target_offset = 0
+    for section in sections:
+        target_end = target_offset + len(section["refs"])
+        section["targets"] = targets[target_offset:target_end]
+        target_offset = target_end
     lines = [
         f"# {title}",
         "",
-        "> 本笔记由 runtime agent 依据 parse-cache 填写；脚本已逐字校验每条 evidence。",
+        "> 本笔记由 runtime agent 依据 canonical evidence 填写；脚本已逐字校验每条证据。",
+        "> 完整逐字引文位于文末的默认折叠证据区；正文可连续阅读。",
         "",
     ]
-    for name in elements_for(record):
-        lines.append(f"## {ELEMENT_HEADING[name]}")
-        lines.append("")
-        claim = by_id.get(f"claim-{name}")
-        content = clean_text(str(claim.get("text") or "")) if claim else ""
-        lines.append(content or "-")
-        lines.append("")
-        refs = (claim.get("evidence_refs") if claim else None) or []
-        if refs:
-            lines.append("证据：")
-            for ref in refs:
-                if not isinstance(ref, dict):
-                    continue
-                locator = str(ref.get("locator") or "?")
-                quote = clean_text(str(ref.get("quote") or ""))
-                summary = clean_text(str(ref.get("summary") or ""))
-                suffix = f" — {summary}" if summary else ""
-                lines.append(f"- [{locator}] \"{quote}\"{suffix}")
-            lines.append("")
+    for section in sections:
+        lines.extend([f"## {section['heading']}", ""])
+        if section["paper_type"]:
+            lines.extend([f"论文类型：{_note_inline_code(section['paper_type'])}", ""])
+        lines.extend([_note_markdown_literal(section["content"]) or "尚未填写。", ""])
+        if section["refs"]:
+            count = len(section["refs"])
+            lines.extend(
+                [
+                    f"[查看 {count} 条完整证据](#^paper-note-evidence-{section['key']})",
+                    "",
+                ]
+            )
+
+    evidence_sections = [section for section in sections if section["refs"]]
+    if evidence_sections:
+        lines.extend(
+            [
+                "## Evidence Index",
+                "",
+                "以下证据逐条保留来源、材料、原始定位、逐字引文与可选摘要；在 Obsidian Reading view 中默认收起。",
+                "",
+            ]
+        )
+        for section in evidence_sections:
+            _append_evidence_callout(
+                lines,
+                section=section,
+                record=record,
+                project_root=project_root,
+                note_path=note_path,
+            )
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1027,7 +1210,7 @@ def detect_structure(source_chunks: list[dict], note_path: Path) -> dict:
             if line.startswith("## "):
                 heading = clean_text(line[3:])
                 key = heading.lower()
-                if key and key not in seen:
+                if key and key not in _NOTE_NON_CONTENT_HEADINGS and key not in seen:
                     seen.add(key)
                     sections.append({"heading": heading, "source": "note.md"})
     for chunk in source_chunks:
@@ -2213,7 +2396,15 @@ def _run_complete_note(args, root, record, unit_root, cache_path, source_chunks,
     _apply_note_fill_to_payload(record, claims)
     attach_claims(record.setdefault("payload", {}), claims)
     build_verification_receipt(record, unit_root)
-    write_text_if_changed(note_path, render_note_md(record, claims))
+    write_text_if_changed(
+        note_path,
+        render_note_md(
+            record,
+            claims,
+            project_root=root,
+            note_path=note_path,
+        ),
+    )
     note_payload = {"paper_id": record["id"], "kind": "paper"}
     attach_claims(note_payload, claims)
     write_yaml_if_changed(unit_root / "note-claims.yaml", note_payload)

@@ -24,6 +24,7 @@ from research.obsidian import (
     update_obsidian_projection,
 )
 from research.relations import project_relation_edges
+from research.source_navigation import resolve_source_reading_target
 import research.obsidian as obsidian_module
 
 
@@ -238,6 +239,9 @@ def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Pa
     document = tmp_path / "units/papers/p-paper-12345678/source/document.md"
     document.parent.mkdir(parents=True, exist_ok=True)
     document.write_text("# Full paper\n\n^source-page-1\n\nReadable source.\n", encoding="utf-8")
+    note = document.parent.parent / "note.md"
+    original_note = b"# Existing deep note\n\nHuman-visible legacy bytes stay stable.\n"
+    note.write_bytes(original_note)
     source_map = document.parent / "source-map.yaml"
     conversion = document.parent / "conversion.yaml"
     archive = document.parent / "archive.html"
@@ -317,14 +321,124 @@ def test_projection_links_markdown_reading_view_and_local_repo_file(tmp_path: Pa
     assert result["status"]["status"] == "PASS"
     paper_page = (obsidian_managed_root(tmp_path) / "units/p-paper-12345678.md").read_text(encoding="utf-8")
     repo_page = (obsidian_managed_root(tmp_path) / "units/r-local-12345678.md").read_text(encoding="utf-8")
+    note_link = "[[units/papers/p-paper-12345678/note|Read deep note]]"
+    source_link = "[[units/papers/p-paper-12345678/source/document|Read material]]"
+    assert note_link in paper_page
+    assert paper_page.index(note_link) < paper_page.index(source_link)
     assert "[[units/papers/p-paper-12345678/source/document|Read material]]" in paper_page
     assert "[[units/papers/p-paper-12345678/source/document#^source-page-1|parse-cache.yaml]]" in paper_page
     assert source_file.resolve().as_uri() in repo_page
     assert "#L1" not in repo_page
+    assert note.read_bytes() == original_note
 
     archive.write_text("drifted offline page\n", encoding="utf-8")
     drift_report = obsidian_projection_status(tmp_path)
     assert "OBSIDIAN_SOURCE_ARCHIVE_DRIFT" in {item["code"] for item in drift_report["findings"]}
+
+
+def test_source_reading_resolver_maps_page_and_section_then_falls_back_honestly(
+    tmp_path: Path,
+) -> None:
+    unit_id = "p-source-nav-12345678"
+    source_root = tmp_path / f"units/papers/{unit_id}/source"
+    source_root.mkdir(parents=True)
+    document = source_root / "document.md"
+    document.write_text(
+        "\n".join(
+            [
+                "^source-document",
+                "",
+                "## Method",
+                "",
+                "^source-method",
+                "",
+                "Method text.",
+                "",
+                "^source-page-1",
+                "",
+                "Page text.",
+                "",
+                "^source-page-one-alt",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source_map = source_root / "source-map.yaml"
+    source = {
+        "markdown_path": f"kb/units/papers/{unit_id}/source/document.md",
+        "markdown_hash": hashlib.sha256(document.read_bytes()).hexdigest(),
+        "materialization": {
+            "source_map_path": f"kb/units/papers/{unit_id}/source/source-map.yaml"
+        },
+    }
+    write_yaml_if_changed(
+        source_map,
+        {
+            "schema": "research-source-map/v1",
+            "blocks": [
+                {"block_id": "source-document", "locator_kind": "section", "anchor": "document"},
+                {"block_id": "source-method", "locator_kind": "section", "anchor": "method", "heading": "Method"},
+                {"block_id": "source-page-1", "locator_kind": "page", "page": 1},
+            ],
+        },
+    )
+
+    page = resolve_source_reading_target(tmp_path, source, "page=1")
+    section = resolve_source_reading_target(tmp_path, source, "section:method")
+    assert page is not None and page.precision == "exact" and page.block_id == "source-page-1"
+    assert section is not None and section.precision == "exact" and section.block_id == "source-method"
+
+    unknown = resolve_source_reading_target(tmp_path, source, "line=4")
+    assert unknown is not None and unknown.precision == "document" and unknown.block_id == ""
+
+    original_document = document.read_text(encoding="utf-8")
+    document.write_text(original_document + "^source-method\n", encoding="utf-8")
+    source["markdown_hash"] = hashlib.sha256(document.read_bytes()).hexdigest()
+    duplicate_physical_block = resolve_source_reading_target(tmp_path, source, "section:method")
+    assert duplicate_physical_block is not None and duplicate_physical_block.precision == "document"
+    document.write_text(original_document, encoding="utf-8")
+    source["markdown_hash"] = hashlib.sha256(document.read_bytes()).hexdigest()
+
+    write_yaml_if_changed(
+        source_map,
+        {
+            "schema": "research-source-map/v1",
+            "blocks": [
+                {"block_id": "source-page-1", "locator_kind": "page", "page": 1},
+                {"block_id": "source-page-one-alt", "locator_kind": "page", "page": 1},
+            ],
+        },
+    )
+    ambiguous = resolve_source_reading_target(tmp_path, source, "page=1")
+    assert ambiguous is not None and ambiguous.precision == "document"
+
+    write_yaml_if_changed(
+        source_map,
+        {
+            "schema": "research-source-map/v1",
+            "blocks": [{"block_id": "stale-missing-block", "locator_kind": "page", "page": 1}],
+        },
+    )
+    stale_map = resolve_source_reading_target(tmp_path, source, "page=1")
+    assert stale_map is not None and stale_map.precision == "document"
+
+    source_map.unlink()
+    missing_map = resolve_source_reading_target(tmp_path, source, "page=1")
+    assert missing_map is not None and missing_map.precision == "document"
+
+    document.write_text(document.read_text(encoding="utf-8") + "drift\n", encoding="utf-8")
+    assert resolve_source_reading_target(tmp_path, source, "page=1") is None
+
+    document.unlink()
+    source["markdown_hash"] = ""
+    assert resolve_source_reading_target(tmp_path, source, "page=1") is None
+
+    outside = tmp_path / "outside.md"
+    outside.write_text("^source-page-1\n", encoding="utf-8")
+    document.symlink_to(outside)
+    source["markdown_hash"] = hashlib.sha256(outside.read_bytes()).hexdigest()
+    assert resolve_source_reading_target(tmp_path, source, "page=1") is None
 
 
 def test_obsidian_status_rejects_missing_declared_source_document(tmp_path: Path) -> None:

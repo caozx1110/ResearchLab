@@ -31,11 +31,15 @@ from .relations import (
     project_relation_edges,
     stable_block_id,
 )
+from .source_navigation import (
+    resolve_canonical_source_path,
+    resolve_source_reading_target,
+)
 from .yaml_io import dump_yaml, load_yaml, write_bytes_atomic, write_text_if_changed, write_yaml_if_changed
 
 
 OBSIDIAN_PROJECTION_SCHEMA = "research-kb-obsidian/v1"
-OBSIDIAN_RENDERER_REVISION = 11
+OBSIDIAN_RENDERER_REVISION = 12
 MANIFEST_NAME = "manifest.yaml"
 HUMAN_DIRS = ("inbox", "annotations")
 UNIT_HEADINGS = frozenset(
@@ -177,30 +181,7 @@ def _source_markdown(value: Any, *, zh: bool = False) -> str:
 
 
 def _canonical_source_path(project_root: Path, raw: Any, *, suffix: str | None) -> Path | None:
-    text = _single_line(raw)
-    if not text:
-        return None
-    lexical = PurePosixPath(text)
-    if lexical.is_absolute() or not lexical.parts or lexical.parts[0] != "kb":
-        return None
-    if any(part in {"", ".", ".."} for part in lexical.parts):
-        return None
-    if suffix is not None and lexical.suffix.lower() != suffix:
-        return None
-    roots = workspace_root_roles(project_root).roots
-    try:
-        candidate = logical_ref_to_physical_path(roots, text)
-        assessment = assert_no_follow_target(
-            roots,
-            candidate,
-            allowed_classes=(TargetClass.CANONICAL_ARTIFACT,),
-        )
-        resolved = assessment.physical_path.resolve(strict=True)
-    except (OSError, PathContractError, ValueError):
-        return None
-    if candidate.is_symlink() or not candidate.is_file():
-        return None
-    return resolved
+    return resolve_canonical_source_path(project_root, raw, suffix=suffix)
 
 
 def _canonical_kb_entry(project_root: Path, raw: Any, *, directory: bool) -> Path | None:
@@ -248,6 +229,24 @@ def _source_document_vault_path(project_root: Path, source: dict[str, Any]) -> s
 def _source_document_link(project_root: Path, source: dict[str, Any], *, zh: bool = False) -> str:
     vault_path = _source_document_vault_path(project_root, source)
     return _wikilink(vault_path, display=_t(zh, "Read material", "阅读 Markdown 全文")) if vault_path else ""
+
+
+def _paper_note_link(project_root: Path, record: dict[str, Any], *, zh: bool = False) -> str:
+    if str(record.get("kind") or "") != "paper":
+        return ""
+    unit_id = _single_line(record.get("id"))
+    if not unit_id:
+        return ""
+    logical_path = f"kb/units/{UNIT_KIND_DIRS['paper']}/{unit_id}/note.md"
+    note_path = _canonical_kb_entry(project_root, logical_path, directory=False)
+    if note_path is None:
+        return ""
+    try:
+        relative = note_path.relative_to(kb_root(project_root).resolve(strict=True))
+    except (OSError, ValueError):
+        return ""
+    vault_path = PurePosixPath(relative.as_posix()).with_suffix("").as_posix()
+    return _wikilink(vault_path, display=_t(zh, "Read deep note", "阅读深读笔记"))
 
 
 def _local_repo_quick_links(project_root: Path, record: dict[str, Any], *, zh: bool) -> list[str]:
@@ -402,40 +401,8 @@ def _source_evidence_link(
     artifact: str,
 ) -> str:
     source = record.get("source") if isinstance(record.get("source"), dict) else {}
-    vault_path = _source_document_vault_path(project_root, source)
-    if not vault_path:
-        return ""
-    materialization = source.get("materialization") if isinstance(source.get("materialization"), dict) else {}
-    source_map = _canonical_source_path(project_root, materialization.get("source_map_path"), suffix=".yaml")
-    block_id = ""
-    if source_map is not None:
-        try:
-            payload = load_yaml(source_map, default={})
-        except (OSError, RuntimeError):
-            payload = {}
-        blocks = payload.get("blocks", []) if isinstance(payload, dict) else []
-        locator = _single_line(ref.get("locator"))
-        page_match = re.fullmatch(r"page\s*=\s*(\d+)", locator, flags=re.IGNORECASE)
-        section_match = re.fullmatch(r"(?:section|anchor)\s*:\s*(.+)", locator, flags=re.IGNORECASE)
-        for item in (blocks if isinstance(blocks, list) else []):
-            if not isinstance(item, dict):
-                continue
-            matches = False
-            if page_match:
-                try:
-                    matches = int(item.get("page")) == int(page_match.group(1))
-                except (TypeError, ValueError):
-                    matches = False
-            elif section_match:
-                target = section_match.group(1).strip()
-                matches = target in {_single_line(item.get("anchor")), _single_line(item.get("heading"))}
-            elif locator.lower() in {"section", "document"}:
-                matches = _single_line(item.get("anchor")) == "document"
-            if matches and BLOCK_ID_RE.fullmatch(_single_line(item.get("block_id"))):
-                block_id = _single_line(item.get("block_id"))
-                break
-    target = f"{vault_path}#^{block_id}" if block_id else vault_path
-    return _wikilink(target, display=artifact)
+    target = resolve_source_reading_target(project_root, source, ref.get("locator"))
+    return _wikilink(target.obsidian_path, display=artifact) if target is not None else ""
 
 
 def _local_repo_artifact_uri(record: dict[str, Any], ref: dict[str, Any]) -> str:
@@ -732,8 +699,12 @@ def _render_unit_page(
     concept_sections = _render_concept_sections(record, records_by_id, zh=zh)
     source_uri = _single_line(source.get("original_uri"))
     source_document = _source_document_link(project_root, source, zh=zh)
+    paper_note = _paper_note_link(project_root, record, zh=zh)
     repo_links = _local_repo_quick_links(project_root, record, zh=zh)
-    primary_access = source_document or (" · ".join(repo_links) if repo_links else "")
+    primary_links = [link for link in (paper_note, source_document) if link]
+    if not primary_links:
+        primary_links = repo_links
+    primary_access = " · ".join(primary_links)
     lines = [
         _frontmatter(properties).rstrip(),
         "",

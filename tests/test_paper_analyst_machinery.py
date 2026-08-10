@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from repo_paths import initialize_test_workspace
 
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -77,6 +78,79 @@ def _write_parse_cache(unit_dir: Path, paper_id: str) -> Path:
         },
     )
     return cache
+
+
+def _materialize_markdown_reading_view(
+    root: Path,
+    record: dict,
+    *,
+    include_source_map: bool = True,
+) -> tuple[Path, Path]:
+    unit_dir = record_path(root, "paper", record["id"]).parent
+    source_dir = unit_dir / "source"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    document = source_dir / "document.md"
+    document.write_text(
+        "\n".join(
+            [
+                "^source-document",
+                "",
+                "## Motivation",
+                "",
+                "^source-motivation",
+                "",
+                PAGE1,
+                "",
+                "## Method and results",
+                "",
+                "^source-page-2",
+                "",
+                PAGE2,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source_map = source_dir / "source-map.yaml"
+    if include_source_map:
+        write_yaml_if_changed(
+            source_map,
+            {
+                "schema": "research-source-map/v1",
+                "blocks": [
+                    {
+                        "block_id": "source-motivation",
+                        "locator_kind": "page",
+                        "page": 1,
+                    },
+                    {
+                        "block_id": "source-motivation",
+                        "locator_kind": "section",
+                        "anchor": "motivation",
+                        "heading": "Motivation",
+                    },
+                    {
+                        "block_id": "source-page-2",
+                        "locator_kind": "page",
+                        "page": 2,
+                    },
+                ],
+            },
+        )
+    record["source"].update(
+        {
+            "markdown_path": f"kb/units/papers/{record['id']}/source/document.md",
+            "markdown_hash": hashlib.sha256(document.read_bytes()).hexdigest(),
+            "materialization": {
+                "source_map_path": (
+                    f"kb/units/papers/{record['id']}/source/source-map.yaml"
+                    if include_source_map
+                    else ""
+                )
+            },
+        }
+    )
+    return document, source_map
 
 
 def _paper_record(paper_id: str, *, info_types=None, core_content=None) -> dict:
@@ -434,6 +508,152 @@ def test_note_fill_legit_evidence_validates_and_clears_substance_gate(tmp_path: 
         project_root=tmp_path,
     )
     assert confirmed["confirmation_status"] == "confirmed"
+
+
+def test_reader_first_note_keeps_all_analysis_before_complete_folded_evidence(
+    tmp_path: Path,
+) -> None:
+    initialize_test_workspace(tmp_path)
+    paper = _load_paper_module()
+    record = _paper_record("p-reader-first-12345678")
+    unit_dir = record_path(tmp_path, "paper", record["id"]).parent
+    unit_dir.mkdir(parents=True)
+    _write_parse_cache(unit_dir, record["id"])
+
+    fill = _typed_note_fill(paper, "method_system")
+    for ref in fill["paper_type_evidence_refs"]:
+        ref["source_unit_id"] = record["id"]
+    for element in fill["element_sets"]["method_system"]:
+        for ref in element["evidence_refs"]:
+            ref["source_unit_id"] = record["id"]
+    fill["element_sets"]["method_system"][0]["evidence_refs"].append(
+        {
+            "source_unit_id": record["id"],
+            "artifact": "parse-cache.yaml",
+            "locator": "page=1",
+            "quote": "Existing imitation policies fail to generalize to unseen objects",
+            "summary": "second motivation citation",
+        }
+    )
+    violations, claims = paper.verify_note_fill(fill, unit_dir, record)
+    assert violations == [], violations
+    assert len(claims) == 6
+    paper._apply_note_fill_to_payload(record, claims)
+    _materialize_markdown_reading_view(tmp_path, record)
+    note_path = unit_dir / "note.md"
+
+    rendered = paper.render_note_md(
+        record,
+        claims,
+        project_root=tmp_path,
+        note_path=note_path,
+    )
+    assert rendered == paper.render_note_md(
+        record,
+        claims,
+        project_root=tmp_path,
+        note_path=note_path,
+    )
+
+    evidence_start = rendered.index("## Evidence Index")
+    analysis_texts = [str(claim["text"]) for claim in claims]
+    assert all(
+        rendered.index(paper._note_markdown_literal(text)) < evidence_start
+        for text in analysis_texts
+    )
+    for claim in claims:
+        for ref in claim["evidence_refs"]:
+            quote_line = f"> > {ref['quote']}"
+            assert rendered.splitlines().count(quote_line) == 1
+            assert rendered.index(quote_line) > evidence_start
+
+    assert rendered.count("> [!quote]- 完整证据（1 条）") == 5
+    assert rendered.count("> [!quote]- 完整证据（2 条）") == 1
+    assert rendered.count("> - 来源单元：") == 7
+    assert rendered.count("> - 材料：` parse-cache.yaml `") == 7
+    assert rendered.count("> - 原始定位：") == 7
+    assert rendered.count("> - 摘要：") == 7
+    assert rendered.count("[打开原文定位](<source/document.md#^source-motivation>)") == 3
+    assert rendered.count("[打开原文定位](<source/document.md#^source-page-2>)") == 4
+    for key in ("paper-type", "motivation", "method", "experiment", "limitation", "insight"):
+        assert rendered.count(f"](#^paper-note-evidence-{key})") == 1
+        assert rendered.count(f"^paper-note-evidence-{key}") == 2
+    note_path.write_text(rendered, encoding="utf-8")
+    detected = paper.detect_structure([], note_path)
+    detected_headings = {item["heading"] for item in detected["detected_sections"]}
+    assert "Motivation" in detected_headings
+    assert "Paper Type" not in detected_headings
+    assert "Evidence Index" not in detected_headings
+
+
+def test_note_link_fallbacks_are_honest_and_dynamic_markdown_is_literal(
+    tmp_path: Path,
+) -> None:
+    initialize_test_workspace(tmp_path)
+    paper = _load_paper_module()
+    record = _paper_record("p-reader-safe-12345678")
+    record["title"] = "Reader title\n## Injected [link](https://example.invalid)"
+    unit_dir = record_path(tmp_path, "paper", record["id"]).parent
+    unit_dir.mkdir(parents=True)
+    document, _source_map = _materialize_markdown_reading_view(
+        tmp_path,
+        record,
+        include_source_map=False,
+    )
+    claims = [
+        {
+            "id": "claim-motivation",
+            "text": "Reader analysis\n> [!danger] injected callout",
+            "claim_type": "inference",
+            "confirmation_status": "pending_user_confirmation",
+            "evidence_refs": [
+                {
+                    "source_unit_id": record["id"],
+                    "artifact": "parse-cache`.yaml",
+                    "locator": "section:motivation\n## forged",
+                    "quote": "<script>alert(1)</script>\n## forged quote",
+                    "summary": "[unsafe](https://example.invalid) summary",
+                }
+            ],
+        }
+    ]
+    note_path = unit_dir / "note.md"
+
+    rendered = paper.render_note_md(
+        record,
+        claims,
+        project_root=tmp_path,
+        note_path=note_path,
+    )
+    assert "[打开 Markdown 全文](<source/document.md>)" in rendered
+    assert "source/document.md#^" not in rendered
+    assert "\n## Injected" not in rendered
+    assert "\n> [!danger]" not in rendered
+    assert "<script>" not in rendered
+    assert "[unsafe](https://example.invalid)" not in rendered
+    assert r"\<script\>alert\(1\)\</script\>" in rendered
+    assert "`` parse-cache`.yaml ``" in rendered
+
+    claims[0]["evidence_refs"][0]["source_unit_id"] = "p-other-source-12345678"
+    cross_unit = paper.render_note_md(
+        record,
+        claims,
+        project_root=tmp_path,
+        note_path=note_path,
+    )
+    assert "source/document.md" not in cross_unit
+    assert "阅读入口：不可用（材料与原始定位仍完整保留。）" in cross_unit
+    claims[0]["evidence_refs"][0]["source_unit_id"] = record["id"]
+
+    document.write_text(document.read_text(encoding="utf-8") + "drift\n", encoding="utf-8")
+    stale = paper.render_note_md(
+        record,
+        claims,
+        project_root=tmp_path,
+        note_path=note_path,
+    )
+    assert "source/document.md" not in stale
+    assert "阅读入口：不可用（材料与原始定位仍完整保留。）" in stale
 
 
 # --------------------------------------------------------------------------- #
