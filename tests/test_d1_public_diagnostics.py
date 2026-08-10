@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT, initialize_test_workspace
+from repo_paths import REPO_ROOT, initialize_test_workspace, install_test_workspace_rules
 
 from research.diagnostics import load_diagnostic_detail, list_diagnostic_issues
 from research.prefs import write_runtime_preferences
@@ -109,6 +109,7 @@ class CaptureDependencyStub:
 
 
 def test_default_off_failure_creates_no_diagnostic_write(monkeypatch, tmp_path: Path, capsys) -> None:
+    install_test_workspace_rules(tmp_path)
     kb = _load_kb_cli()
     capture = CaptureDependencyStub("off")
     monkeypatch.setattr(kb, "_capture_runtime_failure", capture)
@@ -150,6 +151,7 @@ def test_default_off_failure_creates_no_diagnostic_write(monkeypatch, tmp_path: 
 
 
 def test_enabled_failure_creates_one_issue_and_repeat_bumps(monkeypatch, tmp_path: Path, capsys) -> None:
+    install_test_workspace_rules(tmp_path)
     kb = _load_kb_cli()
     capture = CaptureDependencyStub("errors-only")
     monkeypatch.setattr(kb, "_capture_runtime_failure", capture)
@@ -168,6 +170,7 @@ def test_enabled_failure_creates_one_issue_and_repeat_bumps(monkeypatch, tmp_pat
 
 
 def test_per_skill_off_overrides_developer_mode(monkeypatch, tmp_path: Path, capsys) -> None:
+    install_test_workspace_rules(tmp_path)
     kb = _load_kb_cli()
     capture = CaptureDependencyStub("developer", skill_modes={"knowledge-base-manager": "off"})
     monkeypatch.setattr(kb, "_capture_runtime_failure", capture)
@@ -181,6 +184,7 @@ def test_per_skill_off_overrides_developer_mode(monkeypatch, tmp_path: Path, cap
 
 
 def test_success_does_not_call_capture_or_create_issue(monkeypatch, tmp_path: Path, capsys) -> None:
+    install_test_workspace_rules(tmp_path)
     kb = _load_kb_cli()
     capture = CaptureDependencyStub("developer")
     monkeypatch.setattr(kb, "_capture_runtime_failure", capture)
@@ -498,7 +502,10 @@ def test_d1_keeps_exactly_sixteen_public_verbs() -> None:
 
 def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
     root = _project_root()
-    agent_rules = (root / "runtime" / "AGENTS.md").read_text(encoding="utf-8")
+    workspace_rules = (root / "runtime" / "WORKSPACE_RULES.md").read_text(encoding="utf-8")
+    diagnostic_contract = (
+        root / "skills" / "skill-evolution-advisor" / "SKILL.md"
+    ).read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
     guide = (root / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
     design = (root / "docs" / "DESIGN.md").read_text(encoding="utf-8")
@@ -516,7 +523,7 @@ def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
     assert "- Status: Proposed" not in decision
 
     for mode in ("off", "errors-only", "developer"):
-        assert mode in agent_rules
+        assert mode in diagnostic_contract
         assert mode in guide
         assert mode in design
     for phrase in (
@@ -525,18 +532,18 @@ def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
         "关闭 unit-analyst 诊断",
         "检查知识库健康",
     ):
-        assert phrase in agent_rules
         assert phrase in guide
-    assert "local-only" in agent_rules
+    assert "diagnostics" in workspace_rules
+    assert "excluded from export" in diagnostic_contract
     assert "local-only" in readme
     assert "后台 telemetry" in guide
     assert "不增加 `lint` 或 `diagnostics` 入口" in guide
     assert "不存在新的 `kb lint` 或 `kb diagnostics`" in design
     assert "beta/scaffold" in readme
     assert "beta/scaffold" in changelog
-    assert "never auto-edits a skill" in agent_rules
+    assert "do not auto-edit skills" in diagnostic_contract
     assert "不能关闭 schema、evidence、confirmation" in guide
-    for document in (agent_rules, guide, design, readme, changelog, schema, decision):
+    for document in (diagnostic_contract, guide, design, readme, changelog, schema, decision):
         assert "local-detailed" in document
         assert "redacted" in document
     assert "diagnostics.detail_level" in schema

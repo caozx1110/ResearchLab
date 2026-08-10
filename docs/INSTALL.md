@@ -16,7 +16,7 @@
 
 仓库对 Agent 的安装合同如下，Agent 应自行完成，不让用户复制内部 flags：
 
-1. 将链接视为代码来源而不是知识材料；先用版本控制把它检出到临时目录，不通过管道执行远端脚本。记录仓库 origin、branch 与 commit，并检查根目录存在 `install.sh`、`runtime/VERSION`、`runtime/AGENTS.md` 与 `skills/`。
+1. 将链接视为代码来源而不是知识材料；先用版本控制把它检出到临时目录，不通过管道执行远端脚本。记录仓库 origin、branch 与 commit，并检查根目录存在 `install.sh`、`runtime/VERSION`、`runtime/AGENTS.md`、`runtime/WORKSPACE_RULES.md` 与 `skills/`。
 2. 把当前 workspace 根作为安装目标，绝不能把 `kb/` 当目标；已有普通根 `AGENTS.md` 时，确认安装器只追加/更新带 marker 的受管区块并保留块外原文。目标是 symlink、类型冲突、marker 异常或已有受管区块漂移时停止解释，不能覆盖整文件或猜测修复。
 3. 先让安装器生成 Agent JSON 计划（它隐含 dry-run）。终端保持短预览并显示目标数、冲突数和 semantic plan digest；JSON 精确列出 action、scope、tools、source provenance、canonical distributable tree map/digest、按执行顺序排列的全部 targets、每项来源内容 digest 与目标前置状态、冲突、条件性 runtime 变化及可复现的 apply contract。除 Agent 明确指定的 JSON 计划文件外，这一步不写 workspace、HOME、runtime 或 Python cache。计划文件必须位于目标 workspace 与 HOME 之外。
 4. 核对计划中的 source commit 与 source tree digest 仍等于当前 checkout，目标只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree。完成审阅后，Agent 自动计算这份最终计划文件的精确 byte SHA-256，替换 apply contract 中的 `COMPUTE_AFTER_REVIEW` 占位，再在用户已要求“安装”的授权范围内执行；用户不需要查看、复制或填写 digest。安装器会在解析 JSON 或触碰首个目标前，以 no-follow 方式读取同一个普通文件 inode，同时校验外部 byte SHA 与 semantic plan digest，再验证源码树和每个目标的前置状态。计划后出现空白、换行、键序、编码字节、未提交源码、来源身份或目标状态变化时整次操作零写失败。计划和应用都使用显式参数，非交互运行不读取 stdin。
@@ -62,8 +62,9 @@ kb init
 
 推荐把 bundle 以 project-scope copy 方式安装到外部 workspace 根：
 
-- `bash install.sh --all --project DIR` 把 manifest 声明的完整受管运行子集（含使用规则 `.agents/AGENTS.md`）复制到 `DIR`。
-- 安装器把使用规则写到 workspace 根 `DIR/AGENTS.md`，并配置所选 agent 工具。
+- `bash install.sh --all --project DIR` 把 manifest 声明的完整受管运行子集（含最小规则 `.agents/WORKSPACE_RULES.md`）复制到 `DIR`。
+- 安装器只把稳定加载指针写进 workspace 根 `DIR/AGENTS.md` 的 managed block，并配置所选 agent 工具；完整业务流程不复制到根文件。
+- `.agents/AGENTS.md` 与 `.agents/AGENT_GUIDE.md` 已退出当前 payload。若旧版本的 manifest 仍拥有它们，update/reinstall 只在 digest/type 仍匹配时安全删除；用户创建或修改的同名文件继续 fail closed 并保留。
 - 全新初始化的 workspace 数据直接放在 `DIR/` 的 canonical allowlist 下，受管 Python 环境放在 reserved `DIR/.venv/`；持久引用仍使用逻辑 `kb/...`。
 
 完整受管运行子集是受支持的安装单元；源码树中的测试、validator、开发评估工具和 checkout 说明不属于该子集。不要只复制单个 skill，也不要把 bundle 指向或安装进 `DIR/kb/`。system scope 与 symlink 模式只保留兼容性，不作为新安装建议。
@@ -195,6 +196,10 @@ Codex 直接读取仓库已有的 `AGENTS.md`（开发者工作流；`CLAUDE.md`
 现有外部 workspace 的安装目标仍是 `.agents/**`。若旧版本的 `kb update` 因为无法识别新的 `skills/`、`runtime/` 源码布局而不能自助跨越这次源码结构迁移，请让 Agent 检出最新源码并对同一 workspace 执行一次 `reinstall`；安装器会沿用既有 manifest、原子替换受管文件，并逐字保留 legacy `kb/`。这只桥接产品源码/安装布局，不迁移数据布局；workspace-root runtime 会对未迁移 legacy workspace fail closed，不能把 reinstall 当 migration。
 
 如果目标 workspace 已有普通 `AGENTS.md` 且没有异常 marker，安装器会保留块外原文并加入本 bundle 区块；update/reinstall 也只维护该区块。`AGENTS.md` 是 symlink、非普通文件、marker 结构异常，或已有受管区块发生未授权漂移时会 fail closed，不跟随链接、不替换整文件。
+
+managed block 只含 `.agents/WORKSPACE_RULES.md` 的稳定加载指针。该规则文件必须是 `.agents` 真实目录中的普通、有界、身份稳定文件；缺失、空文件、symlink、FIFO/special node 或读取期间被替换时，runtime 在任何 journal/business write 前停止。此时只有只读 `kb help` 与 `kb doctor` 可用；请通过可信源码重新执行 install/update/reinstall 修复安装，不要手工复制旧规则全文到根文件来绕过门禁。
+
+每个 owner 的 `SKILL.md` 是短入口，operation-specific schema、恢复、私有 command catalog 与 variant workflow 位于入口直接链接的一跳 references。安装器按 manifest 一并分发这些受跟踪 reference；runtime 只加载当前 route 需要的文件，不再 eager 加载一份全局机制指南。
 
 `.install-manifest.json` 记录源仓、源 commit、安装时间、每个受管文件的 sha256，以及 `AGENTS.md` 的受管状态。它用于后续 update/uninstall 的精确同步和删除。
 

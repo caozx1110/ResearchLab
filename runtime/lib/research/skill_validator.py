@@ -18,6 +18,9 @@ import yaml
 
 SHORT_DESCRIPTION_MIN = 25
 SHORT_DESCRIPTION_MAX = 64
+SKILL_MAX_LINES = 500
+SKILL_MAX_BYTES = 64 * 1024
+LONG_REFERENCE_MIN_LINES = 200
 REQUIRED_INTERFACE_FIELDS = (
     "display_name",
     "short_description",
@@ -30,6 +33,26 @@ SCRIPT_REFERENCE_RE = re.compile(
     r"(?:(?:\.agents/skills/)?(?P<skill>[a-z0-9-]+)/)?"
     r"(?P<path>scripts/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+)"
 )
+MARKDOWN_LINK_RE = re.compile(
+    r"!?\[[^\]]*\]\((?P<target><[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)"
+)
+EXPLICIT_ANCHOR_RE = re.compile(
+    r"<a\s+(?:[^>]*?\s)?(?:id|name)=[\"'](?P<anchor>[^\"']+)[\"'][^>]*>",
+    re.IGNORECASE,
+)
+HEADING_RE = re.compile(r"^#{1,6}\s+(?P<title>.+?)\s*$", re.MULTILINE)
+SCHEMA_REFERENCE_RE = re.compile(
+    r"(?:\.agents/lib/research/|runtime/lib/research/)?SCHEMAS\.md#"
+    r"(?P<anchor>[a-z0-9][a-z0-9-]*)"
+)
+INLINE_SCHEMA_ANCHOR_RE = re.compile(r"#(?P<anchor>[a-z0-9][a-z0-9-]*)")
+PROTOCOL_EXEMPTION_RE = re.compile(
+    r"<!--\s*protocol-reference-exempt:\s*[^>\s][^>]*-->", re.IGNORECASE
+)
+TOC_HEADING_RE = re.compile(
+    r"^##\s+(?:目录|Table of Contents)\s*$", re.IGNORECASE | re.MULTILINE
+)
+ON_DEMAND_RE = re.compile(r"按需加载|load only|on[- ]demand", re.IGNORECASE)
 
 
 def _load_yaml(path: Path, label: str, errors: list[str]) -> Optional[object]:
@@ -66,6 +89,162 @@ def _frontmatter(skill_md: Path, errors: list[str]) -> tuple[dict[str, object], 
         errors.append(f"{skill_md}: frontmatter must be a mapping")
         return {}, text
     return metadata, text
+
+
+def _heading_slug(title: str) -> str:
+    title = EXPLICIT_ANCHOR_RE.sub("", title)
+    title = re.sub(r"`([^`]*)`", r"\1", title)
+    title = re.sub(r"<[^>]+>", "", title)
+    title = title.strip().lower()
+    title = re.sub(r"[^\w\s-]", "", title, flags=re.UNICODE)
+    return re.sub(r"[\s-]+", "-", title).strip("-")
+
+
+def _markdown_anchors(text: str) -> set[str]:
+    anchors = {match.group("anchor") for match in EXPLICIT_ANCHOR_RE.finditer(text)}
+    slug_counts: dict[str, int] = {}
+    for match in HEADING_RE.finditer(text):
+        slug = _heading_slug(match.group("title"))
+        if not slug:
+            continue
+        duplicate = slug_counts.get(slug, 0)
+        slug_counts[slug] = duplicate + 1
+        anchors.add(slug if duplicate == 0 else f"{slug}-{duplicate}")
+    return anchors
+
+
+def _local_link_path(source: Path, raw_target: str, skill_dir: Path) -> tuple[Path, str] | None:
+    target = raw_target[1:-1] if raw_target.startswith("<") and raw_target.endswith(">") else raw_target
+    if target.startswith(("http://", "https://", "mailto:", "data:")):
+        return None
+    path_text, separator, fragment = target.partition("#")
+    if not path_text:
+        return source, fragment if separator else ""
+    if "\\" in path_text or Path(path_text).is_absolute():
+        raise ValueError("link target must be a relative POSIX path")
+    resolved = (source.parent / path_text).resolve(strict=False)
+    try:
+        resolved.relative_to(skill_dir.resolve())
+    except ValueError as exc:
+        raise ValueError("link target escapes the skill directory") from exc
+    return resolved, fragment if separator else ""
+
+
+def _validate_markdown_links(
+    source: Path,
+    text: str,
+    skill_dir: Path,
+    errors: list[str],
+) -> set[Path]:
+    linked_files: set[Path] = set()
+    for match in MARKDOWN_LINK_RE.finditer(text):
+        raw_target = match.group("target")
+        try:
+            resolved = _local_link_path(source, raw_target, skill_dir)
+        except ValueError as exc:
+            errors.append(f"{source}: invalid Markdown link {raw_target!r}: {exc}")
+            continue
+        if resolved is None:
+            continue
+        target_path, fragment = resolved
+        if not target_path.is_file():
+            errors.append(f"{source}: Markdown link target does not exist: {raw_target}")
+            continue
+        linked_files.add(target_path.resolve())
+        if fragment:
+            try:
+                target_text = target_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                errors.append(f"{source}: cannot read Markdown link target {target_path}: {exc}")
+                continue
+            if fragment not in _markdown_anchors(target_text):
+                errors.append(
+                    f"{source}: Markdown link anchor does not exist: {raw_target}"
+                )
+    return linked_files
+
+
+def _validate_long_reference(path: Path, text: str, errors: list[str]) -> None:
+    lines = text.splitlines()
+    if len(lines) < LONG_REFERENCE_MIN_LINES:
+        return
+    navigation = "\n".join(lines[:80])
+    if TOC_HEADING_RE.search(navigation) is None:
+        errors.append(
+            f"{path}: references with {LONG_REFERENCE_MIN_LINES}+ lines require a top-level table of contents"
+        )
+    if ON_DEMAND_RE.search(navigation) is None:
+        errors.append(
+            f"{path}: references with {LONG_REFERENCE_MIN_LINES}+ lines require on-demand loading guidance"
+        )
+
+
+def _schema_source_path() -> Path:
+    return Path(__file__).resolve().with_name("SCHEMAS.md")
+
+
+def _schema_protocol_anchors(skill_text: str) -> list[str]:
+    """Collect the primary and abbreviated anchors on direct protocol lines."""
+
+    anchors: list[str] = []
+    for line in skill_text.splitlines():
+        if SCHEMA_REFERENCE_RE.search(line) is None:
+            continue
+        anchors.extend(match.group("anchor") for match in INLINE_SCHEMA_ANCHOR_RE.finditer(line))
+    return list(dict.fromkeys(anchors))
+
+
+def _validate_progressive_disclosure(
+    skill_dir: Path,
+    skill_text: str,
+    errors: list[str],
+) -> None:
+    skill_md = skill_dir / "SKILL.md"
+    byte_count = len(skill_text.encode("utf-8"))
+    line_count = len(skill_text.splitlines())
+    if line_count > SKILL_MAX_LINES:
+        errors.append(
+            f"{skill_md}: entry point exceeds {SKILL_MAX_LINES} lines (got {line_count})"
+        )
+    if byte_count > SKILL_MAX_BYTES:
+        errors.append(
+            f"{skill_md}: entry point exceeds {SKILL_MAX_BYTES} bytes (got {byte_count})"
+        )
+
+    direct_links = _validate_markdown_links(skill_md, skill_text, skill_dir, errors)
+    reference_root = skill_dir / "references"
+    references = sorted(reference_root.rglob("*.md")) if reference_root.is_dir() else []
+    for reference in references:
+        try:
+            reference_text = reference.read_text(encoding="utf-8")
+        except OSError as exc:
+            errors.append(f"{reference}: cannot read reference: {exc}")
+            continue
+        if reference.resolve() not in direct_links:
+            errors.append(
+                f"{reference}: reference must be linked directly from {skill_md}"
+            )
+        _validate_markdown_links(reference, reference_text, skill_dir, errors)
+        _validate_long_reference(reference, reference_text, errors)
+
+    schema_path = _schema_source_path()
+    try:
+        schema_text = schema_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"{schema_path}: cannot read shared schema reference: {exc}")
+        schema_anchors: set[str] = set()
+    else:
+        schema_anchors = _markdown_anchors(schema_text)
+    protocol_anchors = _schema_protocol_anchors(skill_text)
+    if not protocol_anchors and PROTOCOL_EXEMPTION_RE.search(skill_text) is None:
+        errors.append(
+            f"{skill_md}: missing direct SCHEMAS.md protocol reference or explicit exemption"
+        )
+    for anchor in protocol_anchors:
+        if anchor not in schema_anchors:
+            errors.append(
+                f"{skill_md}: referenced SCHEMAS.md anchor does not exist: #{anchor}"
+            )
 
 
 def _required_string(
@@ -212,6 +391,8 @@ def validate_skill(
         if not script_path.is_file():
             errors.append(f"{skill_md}: referenced script does not exist: {script_path}")
 
+    _validate_progressive_disclosure(skill_dir, skill_text, errors)
+
     return errors
 
 
@@ -227,6 +408,13 @@ def skill_directories(skills_root: Path) -> list[Path]:
 
 def validate_skills(skills_root: Path) -> list[str]:
     errors: list[str] = []
+    schema_path = _schema_source_path()
+    try:
+        schema_text = schema_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"{schema_path}: cannot read shared schema reference: {exc}")
+    else:
+        _validate_long_reference(schema_path, schema_text, errors)
     generated = generated_metadata_outputs(skills_root, errors)
     discoverable = {path.resolve() for path in skill_directories(skills_root)}
     for openai_yaml in sorted(skills_root.glob("*/agents/openai.yaml")):

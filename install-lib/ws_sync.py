@@ -82,8 +82,7 @@ CLAUDE_INCLUDE_BLOCK = (
 CLAUDE_SKILLS_REL = ".claude/skills"
 CLAUDE_SKILLS_TARGET = "../.agents/skills"
 RELEASE_FILE_MAP = {
-    "runtime/AGENTS.md": ".agents/AGENTS.md",
-    "runtime/AGENT_GUIDE.md": ".agents/AGENT_GUIDE.md",
+    "runtime/WORKSPACE_RULES.md": ".agents/WORKSPACE_RULES.md",
     "runtime/requirements.txt": ".agents/requirements.txt",
     "runtime/VERSION": ".agents/VERSION",
     "LICENSE": ".agents/LICENSE",
@@ -283,12 +282,15 @@ def source_items(
     skills_src = source_root / "skills"
     runtime_src = source_root / "runtime"
     agents_md_src = runtime_src / "AGENTS.md"
+    workspace_rules_src = runtime_src / "WORKSPACE_RULES.md"
     if not skills_src.is_dir():
         die(f"source skills directory not found: {skills_src}")
     if not runtime_src.is_dir():
         die(f"source runtime directory not found: {runtime_src}")
     if not agents_md_src.is_file():
         die(f"source AGENTS.md not found: {agents_md_src}")
+    if not workspace_rules_src.is_file():
+        die(f"source WORKSPACE_RULES.md not found: {workspace_rules_src}")
     items: dict[str, tuple[Path, str]] = {}
     for rel in tracked_release_files(source_root, allow_snapshot=allow_snapshot):
         destination = release_destination(rel)

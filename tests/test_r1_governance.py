@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, install_test_workspace_rules
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +23,7 @@ from research.workspace_layout import initialize_workspace_layout
 
 @pytest.fixture(autouse=True)
 def _activate_workspace_root(tmp_path: Path) -> None:
+    install_test_workspace_rules(tmp_path)
     initialize_workspace_layout(tmp_path, REPO_ROOT)
 
 
@@ -226,7 +227,7 @@ def test_r1_common_human_name_is_not_rejected() -> None:
 
 def test_r1_orchestrator_status_is_byte_identical_read(tmp_path: Path, monkeypatch, capsys) -> None:
     orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
-    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents").mkdir(exist_ok=True)
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     program_id = "legacy-status"
     program = tmp_path / "programs" / program_id
@@ -318,7 +319,7 @@ def test_r1_write_record_default_cas_rejects_stale_second_writer(tmp_path: Path)
 
 def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, monkeypatch) -> None:
     orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
-    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents").mkdir(exist_ok=True)
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     program_id = "decision-gate"
     program = tmp_path / "programs" / program_id
@@ -662,7 +663,7 @@ def test_r1_workbench_command_failure_rolls_back_before_checkpoint(
     tmp_path: Path, monkeypatch, skill: str
 ) -> None:
     module = _load_skill_script(f"{skill}-workbench", f"{skill}.py")
-    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents").mkdir(exist_ok=True)
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     checkpoint_calls: list[object] = []
     if hasattr(module, "checkpoint_and_report"):
@@ -687,7 +688,7 @@ def test_r1_workbench_command_failure_rolls_back_before_checkpoint(
 
 def test_r1_report_failure_restores_output_and_skips_checkpoint(tmp_path: Path, monkeypatch) -> None:
     report = _load_skill_script("report-author", "report.py")
-    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents").mkdir(exist_ok=True)
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     program_id = "report-rollback"
     output = tmp_path / "programs" / program_id / "reports" / "weekly.md"
@@ -716,7 +717,7 @@ def test_r1_report_failure_restores_output_and_skips_checkpoint(tmp_path: Path, 
 
 def test_r1_program_commit_failure_rolls_back_and_skips_checkpoint(tmp_path: Path, monkeypatch) -> None:
     orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
-    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents").mkdir(exist_ok=True)
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     checkpoint_calls: list[object] = []
 

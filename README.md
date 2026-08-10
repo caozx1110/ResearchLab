@@ -6,7 +6,7 @@ The bundle installs beside canonical data in one dedicated workspace. An explici
 
 ```text
 workspace/
-├── .agents/                    # skills, runtime library, and agent rules
+├── .agents/                    # skills, runtime library, minimal workspace rules
 ├── config/workspace-layout.yaml
 ├── units/ programs/ synthesis/ # canonical research data
 ├── raw/ user/ output/ obsidian/
@@ -15,6 +15,8 @@ workspace/
 ```
 
 Persisted artifact references still begin with `kb/...`; that prefix is a stable logical namespace, not a required physical directory. Existing legacy workspaces with a physical `<workspace>/kb/` are never guessed or moved by init, install, update, or reinstall. The workspace-root runtime refuses mutation until the later explicit migration workflow can prove a safe conversion.
+
+The root `AGENTS.md` remains user-owned: the installer manages only a stable pointer to the minimal workspace rule layer. Detailed schema, recovery, review, and variant workflows live in the routed skill's direct references and are loaded only for the selected operation. If the minimal rules are missing or unsafe, all workspace-changing `kb` actions stop before writing; only read-only `kb help` and `kb doctor` remain available for repair guidance.
 
 The bundle identifier is **`0.2.0-rc.7`**, sourced from `runtime/VERSION` and installed as `.agents/VERSION`. The identifier denotes a release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. [CHANGELOG.md](CHANGELOG.md) records durable candidate/release acceptance summaries plus compatibility and support scope; active delivery gates, blockers, exact candidates, and live evidence belong to the linked GitHub Epic, Atomic Issues, PRs, and Actions. Installation and core workflows have no external API Key, paid search quota, commercial database, or paid plugin prerequisite.
 
@@ -198,4 +200,4 @@ The release bundle contains no private canonical workspace data (including legac
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
-The on-disk schema source is [runtime/lib/research/SCHEMAS.md](runtime/lib/research/SCHEMAS.md). The root [AGENTS.md](AGENTS.md) is for contributors developing this skill system; [runtime/AGENTS.md](runtime/AGENTS.md) and [runtime/AGENT_GUIDE.md](runtime/AGENT_GUIDE.md) are installed into `.agents/` for runtime agents. Repository-local `/.agents/` is ignored and reserved for maintainers' own tools; it is never product source or release input.
+The on-disk schema source is [runtime/lib/research/SCHEMAS.md](runtime/lib/research/SCHEMAS.md). The root [AGENTS.md](AGENTS.md) is for contributors developing this skill system. [runtime/AGENTS.md](runtime/AGENTS.md) is the source for the installed root pointer only, while [runtime/WORKSPACE_RULES.md](runtime/WORKSPACE_RULES.md) is installed as the minimal runtime rule layer. Repository-local `/.agents/` is ignored and reserved for maintainers' own tools; it is never product source or release input.

@@ -9,7 +9,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, install_test_workspace_rules
 
 import pytest
 
@@ -53,6 +53,7 @@ def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
     (root / ".agents" / "lib").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    install_test_workspace_rules(root)
     initialize_workspace_layout(root, REPO_ROOT)
     return root
 

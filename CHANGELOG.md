@@ -12,10 +12,13 @@ All notable changes to this project will be documented here. The format follows 
 - Obsidian refresh now treats every manifest-owned regular `.base` as a fully rebuildable renderer output: manual sort, filter, query, comments, invalid YAML, and other Base bytes are discarded in favor of renderer defaults. Symlinks, special files, unowned paths, managed Markdown drift, canonical data, human areas, and `.obsidian/` remain protected.
 - Optional diagnostics now separate capture mode from persistence detail. Existing `off | errors-only | developer` and scalar per-skill mode settings remain compatible, while explicit `redacted | local-detailed` workspace/per-skill policy can retain a bounded private mechanical artifact and digest-bound Agent hypothesis. Private detail is transactionally bound to the redacted index, hardened against unsafe paths, and excluded from public output, export, versioning, sync, install, and update.
 - Fresh explicit `kb init` workspaces now use the workspace root as the physical canonical data root, activated by a tracked byte-canonical layout marker. Persisted `kb/...` artifact identities remain unchanged, KB Git uses exact root pathspecs, and install/update/reinstall never silently migrate a legacy physical `kb/` workspace.
+- Installed rule loading now uses a one-line, user-owned root pointer plus a minimal `.agents/WORKSPACE_RULES.md`; the duplicated `.agents/AGENTS.md` and eager `.agents/AGENT_GUIDE.md` payloads are retired. Manifest-owned legacy copies are removed safely during update/reinstall, while bytes outside the root managed block remain unchanged throughout install, update, reinstall, and uninstall.
+- Multi-operation skills now expose operation selectors and direct one-hop references for schema, recovery, private command catalogs, and variant workflows. Validation caps each `SKILL.md` at 500 lines and 64 KiB, checks links/anchors and shared protocol references, and requires navigation guidance for references of 200 lines or more without imposing a language-density score.
 
 ### Security
 
 - Runtime owners, journal/recovery/CAS, strict readers, indexes, diagnostics, and checkpoints share one root-role resolver. Missing or ambiguous markers, legacy/outer-Git layouts, reserved or unknown targets, collisions, symlinks, special nodes, and incomplete journals fail closed before business mutation; `.journal` and `.runtime` require explicit owner opt-in.
+- Missing, empty, symlinked, special, or identity-changing workspace rules now block the public mutation dispatcher and every journal transaction before any workspace write; `kb help` and `kb doctor` remain zero-write rescue routes.
 
 ## [0.2.0-rc.7] - 2026-07-29
 

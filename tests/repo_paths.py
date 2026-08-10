@@ -39,11 +39,21 @@ def source_path(relative_path: str | Path) -> Path:
     return REPO_ROOT / path
 
 
-def initialize_test_workspace(root: str | Path) -> Path:
-    """Activate and seed an isolated workspace through the explicit test owner."""
+def install_test_workspace_rules(root: str | Path) -> Path:
+    """Install the tracked minimal rule layer into an isolated test workspace."""
 
     workspace = Path(root).absolute()
     workspace.mkdir(parents=True, exist_ok=True)
+    rules = workspace / ".agents" / "WORKSPACE_RULES.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_bytes((REPO_ROOT / "runtime" / "WORKSPACE_RULES.md").read_bytes())
+    return workspace
+
+
+def initialize_test_workspace(root: str | Path) -> Path:
+    """Activate and seed an isolated workspace through the explicit test owner."""
+
+    workspace = install_test_workspace_rules(root)
     from research.workspace_layout import initialize_workspace_layout
     from research.prefs import ensure_workspace
 

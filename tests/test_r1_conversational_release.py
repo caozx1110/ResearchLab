@@ -377,8 +377,10 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
             assert token not in help_result.stdout
     assert not (workspace / "kb").exists()
     installed_rules = (workspace / "AGENTS.md").read_text(encoding="utf-8")
-    assert "## Conversational contract" in installed_rules
-    assert "## Editing Rules" not in installed_rules
+    assert ".agents/WORKSPACE_RULES.md" in installed_rules
+    assert "## Conversational contract" not in installed_rules
+    assert (workspace / ".agents" / "WORKSPACE_RULES.md").is_file()
+    assert not (workspace / ".agents" / "AGENT_GUIDE.md").exists()
 
 
 def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: Path) -> None:
@@ -636,8 +638,10 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
 
 
 def test_idea_skill_documents_link_refresh_and_fill_names() -> None:
-    text = (_project_root() / "skills" / "idea-workbench" / "SKILL.md").read_text(
-        encoding="utf-8"
+    owner = _project_root() / "skills" / "idea-workbench"
+    entry = (owner / "SKILL.md").read_text(encoding="utf-8")
+    text = entry + "\n" + "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted((owner / "references").glob("*.md"))
     )
     for token in (
         "link --from-id <idea-id> --to-id <unit-id> --relation evidence-for",
@@ -649,16 +653,29 @@ def test_idea_skill_documents_link_refresh_and_fill_names() -> None:
         "只读",
     ):
         assert token in text
+    assert "link --from-id" not in entry
 
 
 def test_experiment_and_report_skills_document_private_minimum_invocations() -> None:
     root = _project_root() / "skills"
-    experiment = (root / "experiment-workbench" / "SKILL.md").read_text(encoding="utf-8")
-    report = (root / "report-author" / "SKILL.md").read_text(encoding="utf-8")
+    experiment_owner = root / "experiment-workbench"
+    report_owner = root / "report-author"
+    experiment_entry = (experiment_owner / "SKILL.md").read_text(encoding="utf-8")
+    report_entry = (report_owner / "SKILL.md").read_text(encoding="utf-8")
+    experiment = experiment_entry + "\n" + "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((experiment_owner / "references").glob("*.md"))
+    )
+    report = report_entry + "\n" + "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((report_owner / "references").glob("*.md"))
+    )
     for token in ("plan --title", "--program-id", "--hypothesis", "log-run --experiment-id", "--config-revision", "--seed"):
         assert token in experiment
     for token in ("weekly-prepare --program-id", "reports/editorial/weekly", "fill.yaml", "weekly-verify --program-id", "text", "refs"):
         assert token in report
+    assert "plan --title" not in experiment_entry
+    assert "weekly-prepare --program-id" not in report_entry
 
 
 def test_runtime_and_test_dependencies_are_exactly_locked_in_both_ci_jobs() -> None:

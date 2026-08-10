@@ -25,6 +25,8 @@ runtime/VERSION                 -> .agents/VERSION
 LICENSE                         -> .agents/LICENSE
 ```
 
+The two rule rows above record this ADR's original decision and are superseded by ADR 0004 Wave 3: current installs map `runtime/AGENTS.md` only into the user-owned root managed block as a stable pointer, map `runtime/WORKSPACE_RULES.md` to `.agents/WORKSPACE_RULES.md`, and no longer ship `.agents/AGENTS.md` or `.agents/AGENT_GUIDE.md`. The source/product/local-tool separation in this ADR remains accepted.
+
 Repository-local `/.agents/` is ignored and reserved for maintainers' own installed tools. It is excluded from product inventory, validation, documentation scans, rule budgets, release enumeration, source-tree digests, manifests, CI prerequisites, and installed payloads.
 
 The root `AGENTS.md` governs product development. `runtime/AGENTS.md` is the sole tracked source for installed runtime rules. Top-level `skills/*/SKILL.md` files are product code and are not automatically loaded as development instructions. Installed external workspaces keep the existing `.agents/**`, `.claude/skills -> ../.agents/skills`, skill names, commands, schemas, manifests, and `kb/` data layout.

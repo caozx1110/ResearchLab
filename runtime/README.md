@@ -1,16 +1,16 @@
 # Product runtime source
 
-这个目录存放 workspace-oss 的共享运行库和分发规则源码；15 个产品 skill 位于仓库顶层 `skills/`。安装后的 runtime 规则以 workspace 根 `AGENTS.md`（由本目录的 `AGENTS.md` 分发）为准，结构化 artifact 协议源码以 `runtime/lib/research/SCHEMAS.md` 为准。
+这个目录存放 workspace-oss 的共享运行库和分发规则源码；15 个产品 skill 位于仓库顶层 `skills/`。安装后的根 `AGENTS.md` 只提供稳定加载指针，最小 runtime 规则来自 `.agents/WORKSPACE_RULES.md`；结构化 artifact 协议源码以 `runtime/lib/research/SCHEMAS.md` 为准。
 
-> 本文件是源码 checkout 的目录说明，不进入精简安装包。安装后的 Agent 只依赖受管 `AGENTS.md`、`.agents/AGENT_GUIDE.md`、共享 schema 和各 skill 合同。
+> 本文件是源码 checkout 的目录说明，不进入精简安装包。安装后的 Agent 只依赖根 `AGENTS.md` 的稳定指针、`.agents/WORKSPACE_RULES.md`、共享 schema 和按需加载的 skill/reference 合同。
 
 ## Layout
 
 - `../skills/`: 15 个可发现 skill；14 个 L1 owner 加 `kb-cli` 快捷入口，安装为 `.agents/skills/`。
 - `lib/research/`: 跨 skill 共享的 Python helper，安装为 `.agents/lib/research/`。
 - `lib/research/SCHEMAS.md`: record、program、config、memory、confirmation gate 的共享契约。
-- `AGENTS.md`: 安装后 workspace 的 runtime Agent 规则源码。
-- `AGENT_GUIDE.md`: runtime Agent 的私有调用与恢复速查源码。
+- `AGENTS.md`: 只供根 managed block 使用的稳定加载指针；不复制到 `.agents/`。
+- `WORKSPACE_RULES.md`: 最小 always-on runtime 合同；详细流程留在 owner `SKILL.md` 的一跳 references。
 
 ## Current Skill Groups
 

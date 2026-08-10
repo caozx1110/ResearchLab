@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from repo_paths import initialize_test_workspace
+from repo_paths import initialize_test_workspace, install_test_workspace_rules
 
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
@@ -66,6 +66,7 @@ def _project_root() -> Path:
 def _activate_workspace_root(tmp_path: Path) -> None:
     """Give every runtime test the explicit layout capability required by #28."""
 
+    install_test_workspace_rules(tmp_path)
     initialize_workspace_layout(tmp_path, REPO_ROOT)
 
 

@@ -21,6 +21,7 @@ from .workspace_layout import (
     WORKSPACE_LAYOUT_MARKER_RELATIVE,
     WorkspaceLayoutError,
     require_current_workspace_layout,
+    require_workspace_rules,
 )
 from . import yaml_io
 
@@ -2405,6 +2406,10 @@ def mutation_transaction(
     targets must be covered by the root's declared path set.  Valid descendants
     inherit the root's workspace lock and are recovered by its before-image.
     """
+    try:
+        require_workspace_rules(project_root)
+    except WorkspaceLayoutError as exc:
+        raise SystemExit(str(exc)) from exc
     effective_target_classes = (
         (*allowed_target_classes, TargetClass.OPERATIONAL_STATE)
         if allow_operational_state

@@ -85,7 +85,12 @@ from research.paths import (
     runtime_preferences_path,
     user_root,
 )
-from research.workspace_layout import initialize_workspace_layout, layout_marker_path
+from research.workspace_layout import (
+    WorkspaceLayoutError,
+    initialize_workspace_layout,
+    layout_marker_path,
+    require_workspace_rules,
+)
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
@@ -842,6 +847,10 @@ def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
     if args.command == "init":
+        try:
+            require_workspace_rules(root)
+        except WorkspaceLayoutError as exc:
+            raise SystemExit(str(exc)) from exc
         initialize_workspace_layout(root, PROJECT_ROOT)
     if args.command not in {"audit", "current-state", "resume", "undo", "restore"}:
         print_resolved_project_roots(root)

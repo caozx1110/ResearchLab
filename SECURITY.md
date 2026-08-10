@@ -22,6 +22,7 @@ Include the affected commit or release candidate, operating system, minimal repr
 - Raw source and complete parse caches are immutable derived evidence.
 - Multi-file KB writes use explicit targets, journaling, locks, revision checks, and scoped checkpoints.
 - Canonical mutation requires the exact workspace-layout marker. Missing/unknown markers, legacy layout, outer Git, unknown root entries, symlink ancestors/leaves, and special nodes fail closed before business writes.
+- Every public mutation and journal transaction also requires the installed `.agents/WORKSPACE_RULES.md` to be a bounded, stable ordinary file beneath a real `.agents` directory. Missing, empty, symlinked, special, or concurrently replaced rules fail before journal creation; only read-only `kb help` and `kb doctor` remain available for recovery.
 - Workspace-root ownership uses a canonical allowlist. `.agents`, `.git`, `.venv`, `.claude`, root agent-rule files, `bin`, and unknown siblings never become business, journal, strict-reader, or ordinary checkpoint targets merely because they share the root.
 - Persisted `kb/...` values are logical artifact identities; physical workspace-root mapping cannot silently rewrite evidence, receipts, history, or report/survey bindings.
 - Update provenance preserves local checkouts and forks; unknown legacy provenance requires a user choice.

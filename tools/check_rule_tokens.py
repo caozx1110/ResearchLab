@@ -16,7 +16,7 @@ except ImportError as exc:  # pragma: no cover - dependency failure is a CLI dia
 
 ENCODING_NAME = "cl100k_base"
 DEFAULT_LIMIT = 8000
-GLOBAL_RULE_FILES = (Path("runtime/AGENTS.md"), Path("runtime/AGENT_GUIDE.md"))
+GLOBAL_RULE_FILES = (Path("runtime/AGENTS.md"), Path("runtime/WORKSPACE_RULES.md"))
 
 
 def discover_skill_files(project_root: Path) -> list[Path]:
@@ -74,7 +74,7 @@ def measure_rule_bundles(project_root: Path, *, limit: int = DEFAULT_LIMIT) -> d
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Check AGENTS.md + AGENT_GUIDE.md + one discoverable SKILL.md against a fixed token budget."
+        description="Check the root pointer + WORKSPACE_RULES.md + one discoverable SKILL.md against a fixed token budget."
     )
     parser.add_argument("--root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)

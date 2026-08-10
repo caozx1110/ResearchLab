@@ -323,8 +323,15 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     installed = set(manifest["files"])
     assert (workspace / ".agents" / "VERSION").is_file()
     assert (workspace / ".agents" / "LICENSE").is_file()
-    assert (workspace / ".agents" / "AGENT_GUIDE.md").is_file()
-    assert ".agents/AGENT_GUIDE.md" in installed
+    assert (workspace / ".agents" / "WORKSPACE_RULES.md").is_file()
+    assert ".agents/WORKSPACE_RULES.md" in installed
+    assert not (workspace / ".agents" / "AGENTS.md").exists()
+    assert not (workspace / ".agents" / "AGENT_GUIDE.md").exists()
+    assert ".agents/AGENTS.md" not in installed
+    assert ".agents/AGENT_GUIDE.md" not in installed
+    root_agents = (workspace / "AGENTS.md").read_text(encoding="utf-8")
+    assert ".agents/WORKSPACE_RULES.md" in root_agents
+    assert "evidence" not in root_agents.lower()
     assert not (workspace / ".agents" / "README.md").exists()
     assert ".agents/README.md" not in installed
     assert (workspace / ".agents" / "skills" / "kb-cli" / "SKILL.md").is_file()
@@ -357,6 +364,76 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     assert "更新”或“重装" in duplicate.stderr
 
 
+@pytest.mark.parametrize("action", ["update", "reinstall"])
+def test_lifecycle_removes_manifest_owned_legacy_rule_files(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    workspace = tmp_path / f"workspace-legacy-rules-{action}"
+    workspace.mkdir()
+    installed = _run_installer(workspace, "install", "--codex")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    manifest_path = workspace / ".agents" / ".install-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for relative, content in {
+        ".agents/AGENTS.md": b"# legacy duplicate rules\n",
+        ".agents/AGENT_GUIDE.md": b"# legacy eager guide\n",
+    }.items():
+        path = workspace / relative
+        path.write_bytes(content)
+        manifest["files"][relative] = hashlib.sha256(content).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    user_file = workspace / ".agents" / "user-owned.md"
+    user_file.write_bytes(b"user bytes stay exact\r\n")
+
+    result = _run_installer(workspace, action)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (workspace / ".agents" / "AGENTS.md").exists()
+    assert not (workspace / ".agents" / "AGENT_GUIDE.md").exists()
+    assert user_file.read_bytes() == b"user bytes stay exact\r\n"
+    current = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert ".agents/WORKSPACE_RULES.md" in current["files"]
+    assert ".agents/AGENTS.md" not in current["files"]
+    assert ".agents/AGENT_GUIDE.md" not in current["files"]
+
+
+def test_root_rule_bytes_outside_managed_block_survive_full_lifecycle(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace-root-user-bytes"
+    workspace.mkdir()
+    agents_path = workspace / "AGENTS.md"
+    original = "# 用户规则\r\n\r\nKeep  two  spaces.\r\n".encode("utf-8")
+    agents_path.write_bytes(original)
+
+    installed = _run_installer(workspace, "install", "--codex")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    installed_bytes = agents_path.read_bytes()
+    begin = installed_bytes.index(BEGIN_MARKER.encode("utf-8"))
+    end = installed_bytes.index(END_MARKER.encode("utf-8")) + len(END_MARKER)
+    prefix = installed_bytes[:begin]
+    suffix = installed_bytes[end:]
+    assert prefix.startswith(original)
+
+    for action in ("update", "reinstall"):
+        result = _run_installer(workspace, action)
+        assert result.returncode == 0, result.stdout + result.stderr
+        current = agents_path.read_bytes()
+        current_begin = current.index(BEGIN_MARKER.encode("utf-8"))
+        current_end = current.index(END_MARKER.encode("utf-8")) + len(END_MARKER)
+        assert current[:current_begin] == prefix
+        assert current[current_end:] == suffix
+
+    removed = _run_installer(workspace, "uninstall")
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    assert agents_path.read_bytes().startswith(original)
+
+
 def test_update_removes_legacy_analyzer_resource_directories(
     tmp_path: Path,
 ) -> None:
@@ -366,7 +443,12 @@ def test_update_removes_legacy_analyzer_resource_directories(
     old_skills = old_source / "skills"
     old_runtime.mkdir(parents=True)
     old_skills.mkdir()
-    for relative_path in ("runtime/AGENTS.md", "runtime/VERSION", "LICENSE"):
+    for relative_path in (
+        "runtime/AGENTS.md",
+        "runtime/WORKSPACE_RULES.md",
+        "runtime/VERSION",
+        "LICENSE",
+    ):
         source = _project_root() / relative_path
         destination = old_source / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -651,7 +733,7 @@ def test_uninstall_preserves_drifted_and_retyped_managed_paths(tmp_path: Path) -
 
     external = tmp_path / "external-agents.md"
     external.write_text("external target\n", encoding="utf-8")
-    linked = workspace / ".agents" / "AGENTS.md"
+    linked = workspace / ".agents" / "WORKSPACE_RULES.md"
     linked.unlink()
     linked.symlink_to(external)
 
