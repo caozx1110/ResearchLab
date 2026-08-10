@@ -271,6 +271,7 @@ payload:                             # 见下方 per-kind payload
     verified_at: ''
     claims_digest: ''                # canonical payload.claims sha256
     evidence_digest: ''              # 含 artifact identity + bytes 的 sha256
+    content_digest: ''               # paper-deep-read/v2 必填；绑定 deep_read/core_content/critique + claims
     artifacts:
     - identity: unit:<id>:parse-cache.yaml
       source_kind: unit
@@ -342,7 +343,7 @@ files:
 
 | kind | payload 关键 section | 写入 skill |
 |---|---|---|
-| paper | `basic_info`, `source_search`, `deep_read{paper_type}`, `core_content`, `structure`, `figures`, `critique`, `state` | paper-analyst |
+| paper | `basic_info`, `source_search`, `deep_read{schema, paper_type, sections[]}`, `core_content`, `structure`, `figures`, `critique`, `state` | paper-analyst |
 | repo | `basic_info`, `source_search`, `capability{boundary, core_capabilities}`, `structure`, `reuse`, `risk` | repo-analyst |
 | dataset | `basic_info`, `source_search`, `profile`, `composition`, `access`, `quality`, `reuse`, `state{profile_status}` | dataset-analyst |
 | blog | `basic_info`, `source_search`, `positioning`, `content`, `credibility` | blog-analyst |
@@ -394,41 +395,66 @@ links: []                     # associations 的确定性机械投影，不是�
 
 repo 的 `structure.scan_applicability` 取 `unknown|applicable|not_applicable|unavailable`；只有 `applicable` 可运行结构扫描。URL HTML 快照、dataset/model card 和普通项目页不得因本地归档目录存在而变成“源码树”。`scan-structure` 的机械事实不直接改写 canonical claims 或顶层 confirmation；确认是否失效只由统一 verification/confirmation digest validator 决定。
 
-### paper 类型与 note element set <a id="paper-element-sets"></a>
+### paper 类型与多维深读矩阵 <a id="paper-element-sets"></a>
 
 新 paper 没有 quick screen。`payload.deep_read.paper_type` 由 runtime agent 在 deep-read 阶段依据证据填写，脚本只校验枚举并持久化，**不得用关键词或启发式自动分类**。
 
 ```yaml
 payload:
   deep_read:
-    paper_type: ""  # prepare 时为空；verify 后为 method_system|benchmark|survey
+    schema: paper-deep-read/v2
+    paper_type: method_system|benchmark|survey
+    sections:
+    - section_id: research_problem
+      status: assessed|not_applicable
+      summary: ""
+      not_applicable_reason: ""
+      claim_ids: []
 ```
 
 `complete-note prepare` 直接生成一个统一待填结构，不依赖 `screening.yaml`：
 
 ```yaml
+schema: paper-note-fill/v2
+paper_id: p-...
+kind: paper
 paper_type: ""                 # agent 选择三类之一
 paper_type_reason: ""          # agent 给出分类理由
-paper_type_evidence_refs: []    # 至少一条逐字 evidence
-element_sets:
-  method_system: [...]          # 三套五要素同时存在
-  benchmark: [...]
-  survey: [...]
+paper_type_evidence_refs: []    # 至少一条逐字 evidence ref
+sections:                       # 只填写 common + 所选类型的精确集合
+- section_id: research_problem
+  status: assessed              # assessed|not_applicable
+  summary: ""
+  not_applicable_reason: ""
+  not_applicable_evidence_refs: []
+  claims:
+  - id: local-stable-slug
+    text: ""
+    claim_type: inference
+    evidence_refs: []
 ```
 
-Agent 只填写所选分支，未选分支必须保持空白。verify 同时验证类型理由/证据、所选五要素及未选分支为空，生成 `claim-paper-type` + 五条 element claims，再写入 canonical `deep_read.paper_type`。任一类型、理由、逐字证据或要素缺失均 fail-closed；不存在“值不值得读”字段、screening 产物或独立确认步骤。
+共同矩阵固定为：`research_problem`、`contributions`、`approach`、`evaluation_design`、`results_boundaries`、`limitations_reliability`、`transfer_open_questions`。类型增量矩阵固定为：
 
-每个 element 都是 judgement-class claim，必须有逐字可验证的 `evidence_refs`：
+| paper_type | required type-specific sections |
+|---|---|
+| `method_system` | `architecture_mechanism`, `training_inference`, `baselines_ablations`, `failure_scenarios` |
+| `benchmark` | `task_data_construction`, `metrics_protocol`, `coverage_bias_leakage`, `benchmark_reliability` |
+| `survey` | `scope_inclusion`, `taxonomy`, `trend_evidence`, `gaps_disagreement`, `coverage_limits` |
 
-| paper_type | required_elements | payload target |
-|---|---|---|
-| `method_system` | `motivation`, `method`, `experiment`, `limitation`, `insight` | motivation→`core_content.motivation`; method→`core_content.method`; experiment→`core_content.changes_and_effects`; limitation→`critique.weak_spots`; insight→`core_content.why_it_might_work` |
-| `benchmark` | `motivation`, `task_design`, `metrics`, `coverage_limitation`, `insight` | motivation→`core_content.motivation`; task_design→`core_content.method`; metrics / coverage_limitation→`core_content.changes_and_effects`; insight→`core_content.why_it_might_work` |
-| `survey` | `scope`, `taxonomy`, `trends`, `gaps`, `insight` | scope→`core_content.motivation`; taxonomy→`core_content.method`; trends / gaps→`core_content.changes_and_effects`; insight→`core_content.why_it_might_work` |
+每个 `assessed` section 必须有非空 summary 和至少一条独立 judgement claim；每条 claim 都必须使用该 section 允许的类型并带逐字可验证的 `evidence_refs`。允许类型固定如下：
 
-旧 paper 的 `quick_screen.paper_type` 与旧扁平 `elements` fill 只读兼容：已有类型继续选择原要素契约，兼容路径不得把类型写回 `quick_screen`，也不得让新 unit 绕过 deep-read 类型证据。三种集合都至少写入一个 `core_content` 字段，不改变 confirmation substance gate。
+- 仅 `inference`：`research_problem`、`approach`、`architecture_mechanism`、`training_inference`、`task_data_construction`、`scope_inclusion`、`taxonomy`；
+- 仅 `evaluation`：`results_boundaries`、`limitations_reliability`、`baselines_ablations`、`failure_scenarios`、`metrics_protocol`、`coverage_bias_leakage`、`benchmark_reliability`、`trend_evidence`、`gaps_disagreement`、`coverage_limits`；
+- `inference|evaluation`：`contributions`、`evaluation_design`、`transfer_open_questions`。
 
-新 verify 生成的 `note.md` 只重组派生 Markdown，不改变上述 claim 或 receipt。固定顺序为 `Paper Type`（当前统一 fill 有该 claim）→ 所选五要素正文 → `Evidence Index`。正文中的稳定 `#^paper-note-evidence-<element>` 入口指向文末同 element 的默认折叠 callout；每条输入 ref 只渲染一次完整 `source_unit_id/artifact/locator/quote/summary`，不截断 quote。共享只读 resolver 仅在 `source.markdown_path` 为安全当前的 canonical Markdown、可选 `markdown_hash` 当前、source map 为有界严格 YAML、locator 唯一匹配且 block ID 实际存在于 document 时返回精确 target；否则依次降级为 Markdown 全文或无链接，并始终保留 artifact 与原始 locator。所有 canonical 动态文本按 Markdown literal 转义。普通 projection refresh 不拥有或改写 canonical `note.md`，旧笔记不批量重渲染。
+除每个 assessed section 至少一条 claim 的结构下限外，脚本不以字数、claim/引用数量、关键词或模板相似度评判内容质量。确实不适用时，section 只能使用 `not_applicable`：summary 与 claims 必须为空，reason 与逐字 evidence 必须非空。verify 为其生成唯一的 reviewable N/A claim，不允许用空白或套话绕过。
+
+v2 section claim 的本地 id 必须是稳定小写 slug；canonical id 固定为 `claim-paper-v2-<section-id-with-hyphens>-<local-id>`，并携带 `paper-note-claim/v2`、section id/status 与 local id。缺少、乱序、重复、未知、非所选类型 section，重复 local/canonical claim，非法 claim type 或不可验证 evidence 均 fail closed。verify 按合同顺序持久化 `paper-deep-read/v2`，并无损保留所有独立 claim；不会把多条判断压成一个摘要，也不会因文本相同而合并不同 claim identity。
+
+v2 verification receipt 除 `claims_digest` 与 `evidence_digest` 外，还必须保存当前 `deep_read`、`core_content`、`critique` 与 claims 的 `content_digest`；任一正文、矩阵状态、N/A 理由或 claim 变化都会使 verification 与后续 confirmation 失效。schema-less flat/unified v1 fill、旧 `quick_screen.paper_type` 和历史 flat `elements` 保持只读兼容，继续使用原 digest 算法；`prepare` 不覆盖已识别的 v1 fill，但所有新 scaffold 只生成 v2，兼容路径不得成为新 unit 绕过类型证据或多维矩阵的入口。
+
+新 verify 生成的 `note.md` 只重组派生 Markdown，不改变上述 claim 或 receipt。固定顺序为 `Paper Type` → 共同 section → 所选类型 section → `Evidence Index`。每节先显示 summary，再逐条显示互相独立的 claim；N/A reason 只显示一次。正文中的稳定 section evidence 入口指向文末同 section 的默认折叠 callout；每条输入 ref 只渲染一次完整 `source_unit_id/artifact/locator/quote/summary`，不截断 quote。共享只读 resolver 仅在 `source.markdown_path` 为安全当前的 canonical Markdown、可选 `markdown_hash` 当前、source map 为有界严格 YAML、locator 唯一匹配且 block ID 实际存在于 document 时返回精确 target；否则依次降级为 Markdown 全文或无链接，并始终保留 artifact 与原始 locator。所有 canonical 动态文本按 Markdown literal 转义。普通 projection refresh 不拥有或改写 canonical `note.md`，旧笔记不批量重渲染。
 
 ---
 

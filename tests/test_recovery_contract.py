@@ -2413,18 +2413,45 @@ def test_paper_complete_note_verify_checkpoints_without_optional_figures(tmp_pat
             "summary": "The source describes the proposed mechanism.",
         }
     ]
-    for element in filled["element_sets"]["method_system"]:
-        name = element["element"]
-        element["content"] = f"Agent-authored {name} synthesis."
-        element["evidence_refs"] = [
-            {
-                "source_unit_id": paper_id,
-                "artifact": "parse-cache.yaml",
-                "locator": "page=1",
-                "quote": quotes[name],
-                "summary": f"Evidence for {name}.",
-            }
-        ]
+    quote_by_section = {
+        "research_problem": quotes["motivation"],
+        "contributions": quotes["insight"],
+        "approach": quotes["method"],
+        "evaluation_design": quotes["experiment"],
+        "results_boundaries": quotes["experiment"],
+        "limitations_reliability": quotes["limitation"],
+        "transfer_open_questions": quotes["insight"],
+        "architecture_mechanism": quotes["method"],
+        "training_inference": quotes["method"],
+        "baselines_ablations": quotes["experiment"],
+        "failure_scenarios": quotes["limitation"],
+    }
+    filled["sections"] = [
+        {
+            "section_id": spec.section_id,
+            "status": "assessed",
+            "summary": f"Agent-authored {spec.section_id} synthesis.",
+            "not_applicable_reason": "",
+            "not_applicable_evidence_refs": [],
+            "claims": [
+                {
+                    "id": "primary",
+                    "text": f"Independent {spec.section_id} judgement.",
+                    "claim_type": spec.claim_types[0],
+                    "evidence_refs": [
+                        {
+                            "source_unit_id": paper_id,
+                            "artifact": "parse-cache.yaml",
+                            "locator": "page=1",
+                            "quote": quote_by_section[spec.section_id],
+                            "summary": f"Evidence for {spec.section_id}.",
+                        }
+                    ],
+                }
+            ],
+        }
+        for spec in paper.required_paper_sections("method_system")
+    ]
     yaml_io.write_yaml_if_changed(fill_path, filled)
     loaded = load_yaml(record_path)
     args = SimpleNamespace(

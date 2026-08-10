@@ -3040,7 +3040,7 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
         upgrade_note = "旧的降级版本已原样保留并归档；" if upgraded_from else ""
         print(
             f"资料已入库并备好统一深读骨架，条目编号是 {public_unit_id}。"
-            f"{upgrade_note}Agent 接下来会用逐字证据填写论文类型及对应五要素并校验；整份判断只在最后请你拍板。"
+            f"{upgrade_note}Agent 接下来会按论文类型完成共同维度和类型专属维度，并逐条核验原文证据；整份判断只在最后请你拍板。"
         )
     else:
         print(f"资料已入库并备好深读骨架，条目编号是 {public_unit_id}。Agent 接下来会补全逐字证据并校验；需要判断时再请你拍板。")
@@ -3054,8 +3054,10 @@ def handle_ingest(args: argparse.Namespace, root: Path) -> int:
                     "paper_type",
                     "paper_type_reason",
                     "paper_type_evidence_refs",
-                    "selected_type_elements",
-                    "element_evidence_refs",
+                    "required_common_sections",
+                    "selected_type_sections",
+                    "independent_claim_evidence_refs",
+                    "explicit_not_applicable_reason_and_evidence",
                 ],
             },
             {

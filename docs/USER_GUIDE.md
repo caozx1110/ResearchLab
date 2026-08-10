@@ -108,7 +108,7 @@ Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完�
 
 论文 PDF、网页 HTML、已有 Markdown 与纯文本会在各自知识单元中获得 `source/document.md`。这是人和 AI 默认先读的完整版本，不受轻量 parse cache 的长度上限影响。HTML 还会生成安全的 `source/archive.html` 离线阅读页；`document.md` 顶部可打开离线页或未经改写的原始响应。arXiv/ar5iv 页面若存在 fatal、空壳或严重结构异常会自动换用 PDF，不能再以“能返回 HTML”为由伪装成功；你指定的 arXiv 版本号会原样保留。网页与 PDF 中成功提取的图片会保存到同一 source bundle 的本地 assets 并用相对链接引用，因此离线阅读和 Obsidian 引用不会依赖远程热链。已有 Markdown 的 front matter、跨行/块代码、标题和本地/Obsidian 图片引用会按语法上下文保留或本地化；其中非代码 raw HTML 会被转成被动内容，复杂 HTML 表格不会被强行压成失真的 pipe table，纯文本中的 Markdown 符号按字面显示。整套派生文件通过完整性检查后才发布；转换不完整时仍可回退到离线页、PDF、原始 HTML 或其他原格式。代码仓保持原始源码结构，不把每个代码文件改造成 Markdown。
 
-新生成的论文深读 `note.md` 会先连续展示论文类型与五个分析小节，再把逐字引文集中放到文末默认收起的证据区。每个小节都可跳到自己的完整证据；若 source map 能唯一定位，`page=N` 或 `section:<anchor>` 会直接打开 `source/document.md` 对应 block。映射缺失、过期或有歧义时只打开全文并保留原始 locator；Markdown 全文不可安全读取时不制造链接。证据不会因此省略，旧笔记也不会在普通刷新中被批量改写。
+新生成的论文深读 `note.md` 会先展示论文类型，再依次展开研究问题、贡献、方法、评测、结果边界、局限与可靠性、可迁移洞见等七个共同维度，以及 method/system、benchmark 或 survey 对应的全部类型维度。每个维度保留 summary 和所有互相独立、有逐字证据的判断；确实不适用时会明确显示一次有证据的 N/A 理由，不会用空白冒充完成。逐字引文集中放到文末默认收起的证据区，每节都可跳到自己的完整证据；若 source map 能唯一定位，`page=N` 或 `section:<anchor>` 会直接打开 `source/document.md` 对应 block。映射缺失、过期或有歧义时只打开全文并保留原始 locator；Markdown 全文不可安全读取时不制造链接。证据不会因此省略，旧版笔记继续可读，也不会在普通刷新中被批量改写。
 
 当资料仍在等待 Agent 填写、等待验证，或处于可重试失败时，它不会进入你的确认收件箱。只有实质内容和 evidence 已过门的判断才会由 `kb review` 提请你决定。
 

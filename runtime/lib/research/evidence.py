@@ -44,6 +44,7 @@ from typing import Any, Callable
 import yaml
 
 from .common import utc_now_iso
+from .paper_notes import is_v2_paper_analysis, v2_paper_substance
 
 # Vocabulary (mirrors research-record information_types + confirmation values).
 CLAIM_TYPES = {"fact", "inference", "evaluation", "user_opinion", "unverified"}
@@ -246,13 +247,19 @@ def confirmation_content_digest(record: Any) -> str:
     if not isinstance(payload, dict):
         payload = {}
     sections: dict[str, Any] = {}
-    selected_fields = CONFIRMABLE_CONTENT_FIELDS.get(kind, {})
-    for section in CONFIRMABLE_CONTENT_SECTIONS.get(kind, ()):
-        value = payload.get(section, {})
-        fields = selected_fields.get(section)
-        if fields is not None and isinstance(value, dict):
-            value = {field: value.get(field) for field in fields}
-        sections[section] = _without_empty_mapping_values(value)
+    if kind == "paper" and is_v2_paper_analysis(record):
+        sections = {
+            section: _without_empty_mapping_values(value)
+            for section, value in v2_paper_substance(record).items()
+        }
+    else:
+        selected_fields = CONFIRMABLE_CONTENT_FIELDS.get(kind, {})
+        for section in CONFIRMABLE_CONTENT_SECTIONS.get(kind, ()):
+            value = payload.get(section, {})
+            fields = selected_fields.get(section)
+            if fields is not None and isinstance(value, dict):
+                value = {field: value.get(field) for field in fields}
+            sections[section] = _without_empty_mapping_values(value)
     return _sha256_canonical({"substance": sections, "claims": confirmation_claims(record)})
 
 
@@ -1113,6 +1120,8 @@ def build_verification_receipt(
         "evidence_digest": verification_evidence_digest(claims, artifacts),
         "artifacts": artifacts,
     }
+    if is_v2_paper_analysis(record):
+        receipt["content_digest"] = confirmation_content_digest(record)
     payload = record.setdefault("payload", {})
     if not isinstance(payload, dict):
         raise SystemExit("Verification requires a mapping record.payload.")
@@ -1148,6 +1157,12 @@ def verification_receipt_violations(
     current_claims_digest = claims_digest(claims)
     if str(receipt.get("claims_digest") or "") != current_claims_digest:
         violations.append("verification claims_digest does not match canonical payload.claims")
+    if is_v2_paper_analysis(record):
+        stored_content_digest = str(receipt.get("content_digest") or "")
+        if re.fullmatch(r"[0-9a-f]{64}", stored_content_digest) is None:
+            violations.append("v2 paper verification receipt has invalid content_digest")
+        elif stored_content_digest != confirmation_content_digest(record):
+            violations.append("v2 paper verification content_digest does not match current analysis")
     stored_artifacts = receipt.get("artifacts")
     if not isinstance(stored_artifacts, list) or not stored_artifacts:
         violations.append("verification receipt artifacts must be a non-empty list")

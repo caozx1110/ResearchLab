@@ -42,10 +42,11 @@ def test_paper_next_for_agent_line_is_machine_readable(tmp_path: Path) -> None:
     # artifact path to read
     assert "kb/units/papers/p-demo-1234/parse-cache.yaml" in line
     assert "kb/units/papers/p-demo-1234/note-fill.yaml" in line
-    # all three paper-type branches are visible; the Agent fills exactly one.
-    assert "method_system=motivation,method,experiment,limitation,insight" in line
-    assert "benchmark=motivation,task_design,metrics,coverage_limitation,insight" in line
-    assert "survey=scope,taxonomy,trends,gaps,insight" in line
+    # Common dimensions and all selected-type additions are explicit.
+    assert "common [research_problem,contributions,approach,evaluation_design" in line
+    assert "method_system=architecture_mechanism,training_inference,baselines_ablations,failure_scenarios" in line
+    assert "benchmark=task_data_construction,metrics_protocol,coverage_bias_leakage,benchmark_reliability" in line
+    assert "survey=scope_inclusion,taxonomy,trend_evidence,gaps_disagreement,coverage_limits" in line
     # exact verify command carries the real id + phase + input
     assert "complete-note --paper-id p-demo-1234 --phase verify --input note-fill.yaml" in line
     assert "<id>" not in line
