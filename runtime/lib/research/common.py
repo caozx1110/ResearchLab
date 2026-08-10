@@ -28,6 +28,11 @@ from .analyzer_registry import UNIT_ANALYZER_SCRIPT_BY_KIND
 from .dedup import canonicalize_url, normalize_remote_url, parse_arxiv_id
 from .slugs import KEYWORD_BLACKLIST, STOPWORDS, normalize_list, normalize_person_name, normalize_ref_key, normalize_title, parse_wikilinks, simple_slug, slugify, slugify_tag
 from .yaml_io import dump_yaml, load_yaml, write_text_if_changed, write_yaml_if_changed, yaml_duplicate_key_issues
+from .workspace_layout import (
+    WorkspaceLayoutError,
+    WorkspaceLayoutSnapshot,
+    resolve_workspace_roots,
+)
 
 
 RUNTIME_MODULES = ("yaml", "markdownify", "bs4", "pymupdf4llm", "fitz", "PyPDF2", "pypdf")
@@ -111,14 +116,17 @@ def ensure_dir(path: Path) -> None:
 def find_project_root(start: Path | None = None, *, explicit_root: str | Path | None = None) -> Path:
     explicit = str(explicit_root or os.getenv("RESEARCH_PROJECT_ROOT") or "").strip()
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        return Path(os.path.abspath(os.fspath(Path(explicit).expanduser())))
     current = (start or Path.cwd()).resolve()
     for candidate in [current] + list(current.parents):
         has_runtime = (
             (candidate / "runtime" / "lib" / "research").is_dir()
             and (candidate / "skills").is_dir()
         ) or (candidate / ".agents" / "lib" / "research").is_dir()
-        has_workspace = (candidate / "kb").is_dir()
+        has_workspace = (
+            (candidate / "config" / "workspace-layout.yaml").is_file()
+            or (candidate / "kb").is_dir()
+        )
         if has_workspace or (has_runtime and (
             (candidate / "AGENTS.md").exists()
             or (candidate / "README.md").exists()
@@ -238,14 +246,18 @@ def warn_if_cwd_differs_from_project_root(project_root: Path, *, command: str) -
         print("提示：当前目录与目标工作区不同；操作仍按已选择的工作区执行。")
 
 
+def workspace_root_roles(project_root: Path) -> WorkspaceLayoutSnapshot:
+    """Resolve the one active physical data root or fail with safe guidance."""
+
+    lexical_root = Path(os.path.abspath(os.fspath(project_root)))
+    try:
+        return resolve_workspace_roots(lexical_root, skills_root())
+    except WorkspaceLayoutError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def research_root(project_root: Path) -> Path:
-    kb_root = project_root / "kb"
-    legacy_root = project_root / "doc" / "research"
-    if kb_root.exists():
-        return kb_root
-    if legacy_root.exists():
-        return legacy_root
-    return kb_root
+    return workspace_root_roles(project_root).roots.data_root
 
 
 def program_root(project_root: Path, program_id: str) -> Path:
@@ -383,12 +395,12 @@ def is_url(value: str) -> bool:
 
 
 def _resolved_project_root(project_root: Path | None = None) -> Path | None:
-    if project_root is not None:
-        return project_root.resolve()
     try:
-        return find_project_root()
-    except FileNotFoundError:
+        candidate = project_root if project_root is not None else find_project_root()
+        workspace_root_roles(candidate)
+    except (FileNotFoundError, SystemExit):
         return None
+    return Path(os.path.abspath(os.fspath(candidate)))
 
 
 def _normalize_domain_tagging_rule(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -1071,7 +1083,11 @@ def _guess_pdf_abstract(pages: list[str], title_lines: list[str]) -> str:
     return _normalize_abstract_text(" ".join(fallback_lines))[:1800]
 
 
-def extract_pdf_record(pdf_path: Path) -> dict[str, Any]:
+def extract_pdf_record(
+    pdf_path: Path,
+    *,
+    project_root: Path | None = None,
+) -> dict[str, Any]:
     reader_backend = pdf_backend()
     reader = reader_backend(str(pdf_path))
     metadata = _normalize_pdf_metadata(reader)
@@ -1103,7 +1119,10 @@ def extract_pdf_record(pdf_path: Path) -> dict[str, Any]:
         r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)",
         "\n".join([metadata.get("DOI", ""), abstract, "\n".join(pages[:2]), metadata.get("Subject", "")]),
     )
-    topics, tags = infer_topics_and_tags(f"{title}\n{abstract}")
+    topics, tags = infer_topics_and_tags(
+        f"{title}\n{abstract}",
+        project_root=project_root,
+    )
     return {
         "title": title,
         "authors": authors,
@@ -1254,10 +1273,11 @@ def load_list_document(path: Path, doc_id: str, generated_by: str) -> dict[str, 
 
 
 def _kb_project_root_for_path(path: Path) -> Path | None:
-    resolved = path.resolve(strict=False)
-    for candidate in [resolved.parent, *resolved.parents]:
-        if candidate.name == "kb":
-            return candidate.parent
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    for candidate in [lexical.parent, *lexical.parents]:
+        marker = candidate / "config" / "workspace-layout.yaml"
+        if marker.exists() or marker.is_symlink():
+            return candidate
     return None
 
 

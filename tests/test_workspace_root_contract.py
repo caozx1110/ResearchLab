@@ -23,6 +23,7 @@ from research.path_contract import (
 )
 from research.paths import units_root
 from research.prefs import ensure_workspace
+from research.workspace_layout import initialize_workspace_layout
 
 
 def _roots(tmp_path: Path, layout: DataLayout) -> RootRoles:
@@ -236,23 +237,24 @@ def test_no_follow_target_rejects_symlinked_data_root(tmp_path: Path) -> None:
         assert_no_follow_target(roots, roots.data_root / "units" / "record.yaml")
 
 
-def test_wave_one_does_not_activate_workspace_root_behavior(
+def test_wave_two_activates_workspace_root_behavior_only_after_explicit_init(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    workspace = tmp_path / "legacy-workspace"
+    workspace = tmp_path / "root-workspace"
     workspace.mkdir()
+    initialize_workspace_layout(workspace, REPO_ROOT)
 
-    assert research_root(workspace) == workspace / "kb"
-    assert units_root(workspace) == workspace / "kb" / "units"
-    assert kb_repo_path(workspace) == workspace / "kb"
+    assert research_root(workspace) == workspace
+    assert units_root(workspace) == workspace / "units"
+    assert kb_repo_path(workspace) == workspace
 
     print_resolved_project_roots(workspace)
     ensure_workspace(workspace)
     assert capsys.readouterr().out == ""
-    assert (workspace / "kb" / "units").is_dir()
-    assert (workspace / "kb" / ".gitignore").is_file()
-    assert not (workspace / "units").exists()
+    assert (workspace / "units").is_dir()
+    assert (workspace / ".gitignore").is_file()
+    assert not (workspace / "kb").exists()
 
 
 def test_wave_one_installer_plan_still_owns_no_kb_target(tmp_path: Path) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -54,7 +56,7 @@ def _kb_module():
 
 def _confirmed_paper(root: Path, index: int, *, with_figure: bool = False) -> tuple[str, str, str]:
     unit_id = f"p-draft-source-{index}-abcdef"
-    unit_root = root / "kb" / "units" / "papers" / unit_id
+    unit_root = root / "units" / "papers" / unit_id
     note = unit_root / "note.md"
     quote = f"Paper {index} provides exact evidence for the draft."
     write_text_if_changed(note, quote + "\n")
@@ -152,11 +154,11 @@ def test_draft_inputs_bind_missing_selection_and_paths_reject_unknown_sections(
 ) -> None:
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     program_id = "paper-draft-late-source"
     late_unit_id = "p-draft-source-9-abcdef"
     write_yaml_if_changed(
-        root / "kb" / "programs" / program_id / "state.yaml",
+        root / "programs" / program_id / "state.yaml",
         {
             "program_id": program_id,
             "status": "active",
@@ -164,7 +166,7 @@ def test_draft_inputs_bind_missing_selection_and_paths_reject_unknown_sections(
             "active_unit_ids": [late_unit_id],
         },
     )
-    outline = root / "kb" / "programs" / program_id / "reports" / "paper-outline.md"
+    outline = root / "programs" / program_id / "reports" / "paper-outline.md"
     outline.parent.mkdir(parents=True, exist_ok=True)
     outline.write_text("# Outline\n", encoding="utf-8")
 
@@ -180,14 +182,14 @@ def test_outline_to_seven_confirmed_sections_and_atomic_publication(tmp_path: Pa
     report = _report_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     program_id = "paper-draft-integration"
     sources = [
         _confirmed_paper(root, index, with_figure=index == 1)
         for index in range(1, 6)
     ]
     write_yaml_if_changed(
-        root / "kb" / "programs" / program_id / "state.yaml",
+        root / "programs" / program_id / "state.yaml",
         {
             "program_id": program_id,
             "status": "active",
@@ -195,13 +197,13 @@ def test_outline_to_seven_confirmed_sections_and_atomic_publication(tmp_path: Pa
             "active_unit_ids": [unit_id for unit_id, _claim_id, _figure in sources],
         },
     )
-    outline_path = root / "kb" / "programs" / program_id / "reports" / "paper-outline.md"
+    outline_path = root / "programs" / program_id / "reports" / "paper-outline.md"
     outline_bytes = b"# Evidence-bound paper outline\n"
     outline_path.parent.mkdir(parents=True, exist_ok=True)
     outline_path.write_bytes(outline_bytes)
 
     assert report.prepare_paper_draft(root, program_id) == 0
-    manifest = load_yaml(root / "kb" / "programs" / program_id / "reports" / "paper-draft" / "manifest.yaml")
+    manifest = load_yaml(root / "programs" / program_id / "reports" / "paper-draft" / "manifest.yaml")
     assert [item["id"] for item in manifest["sections"]] == list(SECTION_IDENTITIES)
     guarded_fill = paper_draft_fill_path(root, program_id, "conclusion")
     guarded_bytes = guarded_fill.read_bytes()
@@ -241,7 +243,7 @@ def test_outline_to_seven_confirmed_sections_and_atomic_publication(tmp_path: Pa
         write_yaml_if_changed(fill_path, fill)
         assert report.verify_paper_draft_section(root, program_id, section_id) == 0
 
-    output_root = root / "kb" / "output" / program_id
+    output_root = root / "output" / program_id
     with pytest.raises(PaperDraftRuntimeError, match="七节"):
         report.export_paper_draft(root, program_id)
     assert not output_root.exists()
@@ -315,7 +317,7 @@ def test_outline_to_seven_confirmed_sections_and_atomic_publication(tmp_path: Pa
         if path.is_file()
     }
     figure_asset = next(
-        (root / "kb" / "units" / "papers" / source_unit / "figures" / "assets").glob("*.png")
+        (root / "units" / "papers" / source_unit / "figures" / "assets").glob("*.png")
     )
     figure_asset.write_bytes(b"tampered")
     with pytest.raises(PaperDraftRuntimeError, match="figure index"):

@@ -5,7 +5,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 
@@ -15,6 +15,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation, write_record
 from research.evidence import build_verification_receipt
 from research.judgements import confirmation_binding
+from research.paths import rel
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.records import canonical_record_snapshot_for_record, normalize_record_snapshot
 
@@ -29,7 +30,7 @@ def _write_confirmed_record(root: Path, unit_id: str, claims: list[dict]) -> Non
         "information_types": ["fact"],
         "payload": {"claims": claims},
     }
-    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    record_path = root / "units" / "papers" / unit_id / "record.yaml"
     write_yaml_if_changed(record_path, record)
     expected_record_snapshot = canonical_record_snapshot_for_record(root, record)
     normalized = normalize_record_snapshot(expected_record_snapshot, root)
@@ -46,11 +47,12 @@ def _write_confirmed_record(root: Path, unit_id: str, claims: list[dict]) -> Non
 
 
 def _write_confirmed_repo_record(root: Path, unit_id: str) -> Path:
+    initialize_test_workspace(root)
     repo_root = root / "repo-fixtures" / unit_id
     repo_root.mkdir(parents=True)
     evidence_path = repo_root / "README.md"
     evidence_path.write_text("External repo evidence remains current.", encoding="utf-8")
-    unit_root = root / "kb" / "units" / "repos" / unit_id
+    unit_root = root / "units" / "repos" / unit_id
     unit_root.mkdir(parents=True)
     record = {
         "id": unit_id,
@@ -107,7 +109,7 @@ def _write_confirmed_repo_record(root: Path, unit_id: str) -> Path:
 
 
 def _write_confirmed_decision(root: Path, program_id: str) -> None:
-    program_root = root / "kb" / "programs" / program_id
+    program_root = root / "programs" / program_id
     evidence_path = program_root / "workflow" / "decision-evidence.md"
     evidence_path.write_text("direct benchmark evidence", encoding="utf-8")
     decision = {
@@ -196,13 +198,14 @@ SURVEY_QUOTE = "Alpha uses a hierarchical controller for long-horizon tasks."
 
 
 def _write_confirmed_program_survey(root: Path, *, program_id: str = "program-survey") -> tuple[Path, Path]:
+    initialize_test_workspace(root)
     synth = _load_synthesizer_module()
-    program_root = root / "kb" / "programs" / program_id
+    program_root = root / "programs" / program_id
     (program_root / "workflow").mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(program_root / "state.yaml", {"program_id": program_id, "active_unit_ids": []})
 
     unit_id = "p-survey-alpha"
-    unit_root = root / "kb" / "units" / "papers" / unit_id
+    unit_root = root / "units" / "papers" / unit_id
     unit_root.mkdir(parents=True, exist_ok=True)
     (unit_root / "note.md").write_text(f"# Evidence\n\n{SURVEY_QUOTE}\n", encoding="utf-8")
     source = {
@@ -257,7 +260,7 @@ def _write_confirmed_program_survey(root: Path, *, program_id: str = "program-su
     )
     violations, verified = synth.verify_survey_fill(survey, root)
     assert violations == [], violations
-    survey_path = root / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    survey_path = root / "synthesis" / "robot-learning" / "survey.yaml"
     survey_path.parent.mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(survey_path, verified)
     apply_confirmation(
@@ -278,7 +281,8 @@ def _write_confirmed_program_survey(root: Path, *, program_id: str = "program-su
 def test_stale_survey_event_isolated_by_pure_read_consumer(tmp_path: Path, monkeypatch) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
-    survey_path = root / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    initialize_test_workspace(root)
+    survey_path = root / "synthesis" / "robot-learning" / "survey.yaml"
     write_yaml_if_changed(survey_path, {"slug": "robot-learning", "consumer_binding": {}})
     before = survey_path.read_bytes()
     monkeypatch.setattr(
@@ -310,9 +314,10 @@ def test_stale_survey_event_isolated_by_pure_read_consumer(tmp_path: Path, monke
 def test_survey_consumer_rejects_symlinked_artifact(tmp_path: Path, monkeypatch) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     outside = tmp_path / "outside-survey.yaml"
     write_yaml_if_changed(outside, {"consumer_binding": {}})
-    survey_path = root / "kb" / "synthesis" / "unsafe" / "survey.yaml"
+    survey_path = root / "synthesis" / "unsafe" / "survey.yaml"
     survey_path.parent.mkdir(parents=True)
     survey_path.symlink_to(outside)
     monkeypatch.setattr(
@@ -482,7 +487,7 @@ def test_unit_discovery_uses_only_exact_unit_identity_namespaces() -> None:
 def test_confirmed_event_prose_is_neutral_and_exact_binding_mutation_is_pending(tmp_path: Path) -> None:
     report = _load_report_module()
     root, program_id, _unit_id = _make_workspace(tmp_path)
-    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    path = root / "programs" / program_id / "workflow" / "decisions.yaml"
     decisions = load_yaml(path)
     record = decisions["items"][0]
     record["owner"] = "research-orchestrator"
@@ -497,7 +502,7 @@ def test_confirmed_event_prose_is_neutral_and_exact_binding_mutation_is_pending(
         "confirmation_binding": confirmation_binding(
             record,
             owner="research-orchestrator",
-            path=path.relative_to(root).as_posix(),
+            path=rel(root, path),
         ),
     }
 
@@ -539,13 +544,13 @@ def test_mutable_survey_event_prose_never_enters_formal_timeline_in_two_rounds(t
 def test_copied_survey_event_is_pending_for_the_wrong_program_after_reload(tmp_path: Path) -> None:
     _survey_path, events_path = _write_confirmed_program_survey(tmp_path, program_id="program-a")
     copied_event = load_yaml(events_path)["items"][0]
-    other_events = tmp_path / "kb" / "programs" / "program-b" / "workflow" / "reporting-events.yaml"
+    other_events = tmp_path / "programs" / "program-b" / "workflow" / "reporting-events.yaml"
     write_yaml_if_changed(
         other_events,
         {"id": "program-b-reporting-events", "program_id": "program-b", "items": [copied_event]},
     )
     write_yaml_if_changed(
-        tmp_path / "kb" / "programs" / "program-b" / "state.yaml",
+        tmp_path / "programs" / "program-b" / "state.yaml",
         {"program_id": "program-b", "active_unit_ids": []},
     )
 
@@ -589,7 +594,7 @@ def test_stale_or_tampered_survey_never_reaches_formal_claims(tmp_path: Path, mu
         survey["payload"]["verification"]["claims_digest"] = "0" * 64
         write_yaml_if_changed(survey_path, survey)
     elif mutation == "evidence":
-        evidence_path = tmp_path / "kb" / "units" / "papers" / "p-survey-alpha" / "note.md"
+        evidence_path = tmp_path / "units" / "papers" / "p-survey-alpha" / "note.md"
         evidence_path.write_text("# Evidence\n\nChanged after confirmation.\n", encoding="utf-8")
     elif mutation == "upstream_binding":
         survey["consumer_binding"]["unit_ids"] = []
@@ -597,7 +602,7 @@ def test_stale_or_tampered_survey_never_reaches_formal_claims(tmp_path: Path, mu
     elif mutation == "invalid_survey_yaml":
         survey_path.write_text("kind: survey_judgement\npayload: [unterminated\n", encoding="utf-8")
     else:
-        upstream = tmp_path / "kb" / "units" / "papers" / "p-survey-alpha" / "record.yaml"
+        upstream = tmp_path / "units" / "papers" / "p-survey-alpha" / "record.yaml"
         upstream.write_text("kind: paper\npayload: [unterminated\n", encoding="utf-8")
 
     inputs = report.load_report_inputs(tmp_path, program_id, stage="survey")
@@ -695,7 +700,7 @@ def test_mutated_survey_confirmation_binding_moves_event_to_pending(
     elif mutation == "missing_path":
         binding["subject"]["path"] = "kb/synthesis/robot-learning/review.yaml"
     else:
-        decoy = tmp_path / "kb" / "synthesis" / "decoy" / "survey.yaml"
+        decoy = tmp_path / "synthesis" / "decoy" / "survey.yaml"
         decoy.parent.mkdir(parents=True, exist_ok=True)
         decoy.write_bytes(survey_path.read_bytes())
         binding["subject"]["path"] = decoy.relative_to(tmp_path).as_posix()
@@ -719,14 +724,15 @@ def test_mutated_survey_confirmation_binding_moves_event_to_pending(
 
 def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, str, str]:
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     (root / ".agents" / "lib").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
     program_id = "grounded-report"
     unit_id = "p-grounded-123456"
-    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow = root / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
     write_yaml_if_changed(
-        root / "kb" / "programs" / program_id / "state.yaml",
+        root / "programs" / program_id / "state.yaml",
         {"program_id": program_id, "active_unit_ids": [unit_id]},
     )
     write_yaml_if_changed(
@@ -747,7 +753,7 @@ def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, s
         },
     )
     _write_confirmed_decision(root, program_id)
-    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    unit_dir = root / "units" / "papers" / unit_id
     unit_dir.mkdir(parents=True)
     claims = []
     if with_claim:
@@ -788,6 +794,7 @@ def test_literal_factual_and_operational_event_types_enter_ordinary_lane(
     event_type: str,
 ) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     event = {
         "event_type": event_type,
         "title": f"Explicit {event_type} event",
@@ -829,7 +836,7 @@ def test_report_rejects_unit_replaced_after_snapshot_selection(
 ) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
-    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    unit_dir = root / "units" / "papers" / unit_id
     original_dir = tmp_path / "original-unit"
     replacement_dir = tmp_path / "outside-replacement"
     replacement_dir.mkdir()
@@ -894,7 +901,7 @@ def test_report_revalidates_unit_after_claim_source_binding(
 ) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
-    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    unit_dir = root / "units" / "papers" / unit_id
     displaced = tmp_path / "displaced-after-binding"
     replacement = tmp_path / "replacement-after-binding"
     replacement.mkdir()
@@ -935,7 +942,7 @@ def test_load_decisions_captures_container_once_and_isolates_bad_sibling(
 ) -> None:
     report = _load_report_module()
     root, program_id, _unit_id = _make_workspace(tmp_path)
-    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    path = root / "programs" / program_id / "workflow" / "decisions.yaml"
     payload = load_yaml(path)
     payload["items"].append({"id": "bad-sibling", "kind": "not-a-judgement"})
     write_yaml_if_changed(path, payload)
@@ -944,7 +951,7 @@ def test_load_decisions_captures_container_once_and_isolates_bad_sibling(
 
     def count_target_capture(project_root, relative_path, **kwargs):
         nonlocal target_captures
-        if Path(relative_path).as_posix() == path.relative_to(root).as_posix():
+        if Path(relative_path).as_posix() == rel(root, path):
             target_captures += 1
         return original_snapshot(project_root, relative_path, **kwargs)
 
@@ -962,7 +969,7 @@ def test_load_decisions_rejects_container_replacement_without_sentinel(
 ) -> None:
     report = _load_report_module()
     root, program_id, _unit_id = _make_workspace(tmp_path)
-    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    path = root / "programs" / program_id / "workflow" / "decisions.yaml"
     displaced = tmp_path / "displaced-decisions.yaml"
     replacement = tmp_path / "replacement-decisions.yaml"
     replacement_payload = load_yaml(path)
@@ -996,7 +1003,7 @@ def test_load_decisions_revalidates_container_after_legacy_parse(
 ) -> None:
     report = _load_report_module()
     root, program_id, _unit_id = _make_workspace(tmp_path)
-    path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    path = root / "programs" / program_id / "workflow" / "decisions.yaml"
     displaced = tmp_path / "displaced-during-legacy.yaml"
     replacement = tmp_path / "replacement-during-legacy.yaml"
     replacement_payload = load_yaml(path)
@@ -1029,8 +1036,9 @@ def test_load_decisions_invalid_same_id_sibling_still_suppresses_legacy_duplicat
 ) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     program_id = "compat-known-ids"
-    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow = root / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
     write_yaml_if_changed(
         workflow / "decisions.yaml",
@@ -1052,8 +1060,9 @@ def test_legacy_decision_log_replacement_is_not_rendered(
 ) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     program_id = "legacy-snapshot"
-    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow = root / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
     legacy_path = workflow / "decision-log.md"
     legacy_path.write_text(
@@ -1109,7 +1118,7 @@ def test_weekly_and_stage_reports_include_claims_evidence_events_and_decisions(t
 def test_legacy_judgement_event_with_confirmed_string_fails_safe_without_canonical_binding(tmp_path: Path) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
-    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    events_path = root / "programs" / program_id / "workflow" / "reporting-events.yaml"
     write_yaml_if_changed(
         events_path,
         {
@@ -1227,7 +1236,7 @@ def test_language_requires_current_task_bound_selection_and_explicit_english(
 ) -> None:
     report = _load_report_module()
     root, program_id, _ = _make_workspace(tmp_path)
-    profile_path = root / "kb" / "config" / "user-profile.yaml"
+    profile_path = root / "config" / "user-profile.yaml"
     write_yaml_if_changed(
         profile_path,
         {
@@ -1340,7 +1349,7 @@ def test_language_requires_current_task_bound_selection_and_explicit_english(
 def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> None:
     report = _load_report_module()
     root, program_id, _ = _make_workspace(tmp_path, with_claim=False)
-    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow = root / "programs" / program_id / "workflow"
     write_yaml_if_changed(
         workflow / "reporting-events.yaml",
         {"id": f"{program_id}-reporting-events", "items": []},
@@ -1362,7 +1371,7 @@ def test_missing_inputs_are_explicit_and_never_fabricated(tmp_path: Path) -> Non
 def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_path: Path) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path, with_claim=False)
-    unit_dir = root / "kb" / "units" / "papers" / unit_id
+    unit_dir = root / "units" / "papers" / unit_id
     claims = [
         {
             "id": f"claim-{index}",
@@ -1374,7 +1383,7 @@ def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_pa
         for index in range(6)
     ]
     _write_confirmed_record(root, unit_id, claims)
-    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    events_path = root / "programs" / program_id / "workflow" / "reporting-events.yaml"
     write_yaml_if_changed(
         events_path,
         {
@@ -1392,7 +1401,7 @@ def test_reporting_style_controls_verbosity_and_preserves_missing_markers(tmp_pa
             ],
         },
     )
-    profile_path = root / "kb" / "config" / "user-profile.yaml"
+    profile_path = root / "config" / "user-profile.yaml"
 
     def selected_style(selection_id: str) -> str:
         eligible = eligible_preferences(root, skill="report-author", operation="weekly")
@@ -1467,7 +1476,7 @@ def test_unparseable_reporting_style_uses_default_behavior(tmp_path: Path) -> No
         report.load_report_inputs(root, program_id),
         report_kind="weekly",
     )
-    profile_path = root / "kb" / "config" / "user-profile.yaml"
+    profile_path = root / "config" / "user-profile.yaml"
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text("reporting_style: [broken\n", encoding="utf-8")
 
@@ -1537,7 +1546,7 @@ def test_aggregate_gate_rejects_unit_replaced_after_source_load(
 ) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
-    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    record_path = root / "units" / "papers" / unit_id / "record.yaml"
     original_load = report.load_confirmed_claim_sources
 
     def replace_after_source_load(*args, **kwargs):
@@ -1564,7 +1573,7 @@ def test_aggregate_gate_rejects_local_evidence_replaced_after_source_load(
 ) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
-    evidence_path = root / "kb" / "units" / "papers" / unit_id / "parse-cache.yaml"
+    evidence_path = root / "units" / "papers" / unit_id / "parse-cache.yaml"
     original_load = report.load_confirmed_claim_sources
 
     def replace_evidence_after_source_load(*args, **kwargs):
@@ -1589,12 +1598,13 @@ def test_aggregate_gate_rejects_external_repo_evidence_replaced_after_source_loa
 ) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     program_id = "external-evidence-report"
     unit_id = "r-external-evidence-123456"
-    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow = root / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
     write_yaml_if_changed(
-        root / "kb" / "programs" / program_id / "state.yaml",
+        root / "programs" / program_id / "state.yaml",
         {"program_id": program_id, "active_unit_ids": [unit_id]},
     )
     write_yaml_if_changed(workflow / "reporting-events.yaml", {"items": []})
@@ -1627,7 +1637,7 @@ def test_aggregate_gate_rejects_direct_decision_replaced_after_load(
 ) -> None:
     report = _load_report_module()
     root, program_id, _unit_id = _make_workspace(tmp_path)
-    decisions_path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+    decisions_path = root / "programs" / program_id / "workflow" / "decisions.yaml"
     original_load = report.load_decisions
 
     def replace_after_decision_load(*args, **kwargs):
@@ -1655,7 +1665,7 @@ def test_final_gate_discards_text_built_before_source_replacement(
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
     inputs = report.load_report_inputs(root, program_id)
-    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    record_path = root / "units" / "papers" / unit_id / "record.yaml"
     original_render = report._render_report_document
     swapped = False
 
@@ -1687,17 +1697,18 @@ def test_report_side_event_batch_capture_and_resolution_are_linear(
     event_count: int,
 ) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     report_program_id = "aggregate-events"
-    report_workflow = tmp_path / "kb" / "programs" / report_program_id / "workflow"
+    report_workflow = tmp_path / "programs" / report_program_id / "workflow"
     report_workflow.mkdir(parents=True)
     write_yaml_if_changed(
-        tmp_path / "kb" / "programs" / report_program_id / "state.yaml",
+        tmp_path / "programs" / report_program_id / "state.yaml",
         {"program_id": report_program_id, "active_unit_ids": []},
     )
     events = []
     for index in range(event_count):
         program_id = f"side-event-{index}"
-        program_root = tmp_path / "kb" / "programs" / program_id
+        program_root = tmp_path / "programs" / program_id
         workflow = program_root / "workflow"
         workflow.mkdir(parents=True)
         evidence_path = workflow / "evidence.md"
@@ -1751,7 +1762,7 @@ def test_report_side_event_batch_capture_and_resolution_are_linear(
                 "confirmation_binding": confirmation_binding(
                     decision,
                     owner="research-orchestrator",
-                    path=decisions_path.relative_to(tmp_path).as_posix(),
+                    path=rel(tmp_path, decisions_path),
                 ),
             }
         )
@@ -1823,13 +1834,13 @@ def test_report_input_snapshot_never_serializes_validators(tmp_path: Path) -> No
 
 def _report_output_path(root: Path, program_id: str, command: str) -> Path:
     if command == "weekly":
-        return root / "kb" / "programs" / program_id / "reports" / "weekly.md"
+        return root / "programs" / program_id / "reports" / "weekly.md"
     if command == "stage-summary":
-        return root / "kb" / "programs" / program_id / "reports" / "stage-summary.md"
+        return root / "programs" / program_id / "reports" / "stage-summary.md"
     if command == "outline":
-        return root / "kb" / "programs" / program_id / "reports" / "paper-outline.md"
+        return root / "programs" / program_id / "reports" / "paper-outline.md"
     suffix = "ppt-materials" if command == "ppt-materials" else "writing-materials"
-    return root / "kb" / "user" / "report-materials" / f"{program_id}-{suffix}.md"
+    return root / "user" / "report-materials" / f"{program_id}-{suffix}.md"
 
 
 def _replace_report_source(record_path: Path, mutation: str) -> None:
@@ -1866,7 +1877,7 @@ def test_cli_rechecks_after_render_before_publishing_any_report_kind(
 ) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
-    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    record_path = root / "units" / "papers" / unit_id / "record.yaml"
     original_render = getattr(report, renderer)
     original_load = report.load_report_inputs
     replaced = False
@@ -1915,7 +1926,7 @@ def test_cli_post_write_gate_rolls_back_exact_report_before_image(
 ) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
-    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    record_path = root / "units" / "papers" / unit_id / "record.yaml"
     output = _report_output_path(root, program_id, "weekly")
     if preexisting:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -1963,7 +1974,7 @@ def test_cli_commit_boundary_gate_rolls_back_report_when_source_changes_after_bo
 ) -> None:
     report = _load_report_module()
     root, program_id, unit_id = _make_workspace(tmp_path)
-    record_path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    record_path = root / "units" / "papers" / unit_id / "record.yaml"
     output = _report_output_path(root, program_id, command)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(b"exact report before commit-gap\n")
@@ -2029,10 +2040,11 @@ def test_unit_claim_source_snapshot_enumeration_is_linear(
     unit_count: int,
 ) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     unit_ids = [f"p-linear-{index:02d}" for index in range(unit_count)]
     for unit_id in unit_ids:
         write_yaml_if_changed(
-            tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml",
+            tmp_path / "units" / "papers" / unit_id / "record.yaml",
             {"id": unit_id, "kind": "paper", "title": unit_id, "payload": {"claims": []}},
         )
     original_iter = report.iter_canonical_record_snapshots
@@ -2055,9 +2067,10 @@ def test_unit_claim_source_snapshot_enumeration_is_linear(
 
 def test_unit_claim_source_requested_ids_are_deduplicated(tmp_path: Path) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     unit_id = "p-requested-twice"
     write_yaml_if_changed(
-        tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml",
+        tmp_path / "units" / "papers" / unit_id / "record.yaml",
         {"id": unit_id, "kind": "paper", "title": unit_id, "payload": {"claims": []}},
     )
 
@@ -2069,14 +2082,15 @@ def test_unit_claim_source_requested_ids_are_deduplicated(tmp_path: Path) -> Non
 
 def test_unit_claim_source_duplicate_identity_fails_closed(tmp_path: Path) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     unit_id = "duplicate-unit"
     record = {"id": unit_id, "title": "Ambiguous", "payload": {"claims": []}}
     write_yaml_if_changed(
-        tmp_path / "kb" / "units" / "papers" / unit_id / "record.yaml",
+        tmp_path / "units" / "papers" / unit_id / "record.yaml",
         {**record, "kind": "paper"},
     )
     write_yaml_if_changed(
-        tmp_path / "kb" / "units" / "repos" / unit_id / "record.yaml",
+        tmp_path / "units" / "repos" / unit_id / "record.yaml",
         {**record, "kind": "repo"},
     )
 
@@ -2131,7 +2145,7 @@ def test_outline_cli_writes_report_without_raw_command_stdout(tmp_path: Path, mo
     )
 
     assert report.main() == 0
-    text = (root / "kb" / "programs" / program_id / "reports" / "paper-outline.md").read_text(encoding="utf-8")
+    text = (root / "programs" / program_id / "reports" / "paper-outline.md").read_text(encoding="utf-8")
     stdout = capsys.readouterr().out
 
     assert "## 相关工作：已确认判断与证据" in text

@@ -43,6 +43,7 @@ from .common import (
     parse_arxiv_id,
     slugify,
     utc_now_iso,
+    workspace_root_roles,
     write_text_if_changed,
     write_yaml_if_changed,
 )
@@ -71,11 +72,18 @@ from .confirm import (
     write_record,
 )
 from .journal import mutation_transaction
+from .path_contract import (
+    PathContractError,
+    TargetClass,
+    classify_data_relative_path,
+    logical_ref_to_physical_path,
+)
 from .source_materials import (
     ARCHIVE_NAME,
     ASSETS_DIR_NAME,
     CONVERSION_NAME,
     DOCUMENT_NAME,
+    MATERIALIZATION_SCHEMA,
     SOURCE_MAP_NAME,
     _extract_source_frontmatter,
     _markdown_heading_positions,
@@ -216,6 +224,12 @@ def _storage_rewrite_paths(project_root: Path) -> list[Path]:
             relative = path.resolve().relative_to(root)
         except ValueError:
             continue
+        try:
+            target_class = classify_data_relative_path(relative.as_posix())
+        except PathContractError:
+            continue
+        if target_class is not TargetClass.CANONICAL_ARTIFACT:
+            continue
         if any(part in {".git", ".journal", ".runtime"} for part in relative.parts):
             continue
         if relative.parts and relative.parts[0] == "raw":
@@ -239,6 +253,8 @@ def storage_sync_target_paths(project_root: Path) -> list[Path]:
     targets: set[Path] = set()
     for name, destination_root in (("raw", raw_storage_root(project_root)), ("output", output_storage_root(project_root))):
         source_root = project_root / name
+        if source_root.absolute() == destination_root.absolute():
+            continue
         if source_root.is_dir() and not source_root.is_symlink():
             targets.update(destination_root / child.name for child in source_root.iterdir())
 
@@ -281,6 +297,8 @@ def _sync_storage_layout_unlocked(project_root: Path) -> dict[str, Any]:
     preserved_legacy_roots: list[str] = []
     for name, destination_root in (("raw", raw_storage_root(project_root)), ("output", output_storage_root(project_root))):
         source_root = project_root / name
+        if source_root.absolute() == destination_root.absolute():
+            continue
         if not source_root.exists():
             continue
         preserved_legacy_roots.append(source_root.as_posix())
@@ -1973,7 +1991,7 @@ def _revalidate_search_stage_ancestor_chain(
         descriptors.append(current)
         if _directory_node_identity(os.fstat(current)) != expected[0]:
             raise SystemExit("Literature search stage ancestor chain changed.")
-        for index, component in enumerate(("kb", "synthesis", "source-search"), start=1):
+        for index, component in enumerate(("synthesis", "source-search"), start=1):
             try:
                 metadata = os.stat(component, dir_fd=current, follow_symlinks=False)
                 child = os.open(component, flags, dir_fd=current)
@@ -2023,7 +2041,7 @@ def _anchored_search_stage_bytes(
             raise SystemExit("Literature search workspace root is unsafe or unavailable.") from exc
         descriptors.append(current_fd)
         ancestor_identities.append(_directory_node_identity(os.fstat(current_fd)))
-        for component in ("kb", "synthesis", "source-search"):
+        for component in ("synthesis", "source-search"):
             try:
                 next_fd = os.open(component, directory_flags, dir_fd=current_fd)
             except FileNotFoundError:
@@ -3512,7 +3530,11 @@ def _abstract_from_text(text: str) -> str:
     return clean_text(match.group(1))[:2000] if match else ""
 
 
-def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any]:
+def _pdf_metadata(
+    project_root: Path,
+    pdf_path: Path,
+    chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Best-effort lightweight metadata from a parsed PDF (title/abstract/year)."""
     title = ""
     year: int | None = None
@@ -3564,7 +3586,7 @@ def _pdf_metadata(pdf_path: Path, chunks: list[dict[str, Any]]) -> dict[str, Any
         year = 2000 + int(arxiv_id[:2])
     richer: dict[str, Any] = {}
     try:
-        richer = extract_pdf_record(pdf_path)
+        richer = extract_pdf_record(pdf_path, project_root=project_root)
     except (OSError, RuntimeError, UnicodeError, ValueError):
         richer = {}
     return {
@@ -3825,12 +3847,117 @@ def source_record_fields(source_info: dict[str, Any]) -> dict[str, Any]:
     return {key: source_info[key] for key in SOURCE_RECORD_KEYS if key in source_info}
 
 
-def _attach_materialization(project_root: Path, source_info: dict[str, Any], result: dict[str, Any]) -> None:
+def _source_path_reference(
+    project_root: Path,
+    path: Path,
+    *,
+    staging_root: Path | None = None,
+) -> str:
+    """Encode canonical refs as ``kb/...`` and private staging refs locally."""
+
+    if staging_root is None:
+        return rel(project_root, path)
+    base = staging_root.resolve(strict=True)
+    resolved = path.resolve(strict=True)
+    try:
+        relative = resolved.relative_to(base)
+    except ValueError as exc:
+        raise ValueError("private source staging path escaped its owned root") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("private source staging path is not canonical")
+    return relative.as_posix()
+
+
+def _source_reference_path(
+    project_root: Path,
+    value: Any,
+    *,
+    staging_root: Path | None = None,
+) -> Path:
+    """Resolve one path emitted by :func:`_source_path_reference`."""
+
+    text = str(value or "").strip()
+    relative = Path(text)
+    if (
+        not text
+        or relative.is_absolute()
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ValueError("source archive reference is not canonical")
+    if staging_root is not None:
+        base = staging_root.resolve(strict=True)
+        candidate = base.joinpath(*relative.parts)
+        try:
+            candidate.resolve(strict=False).relative_to(base)
+        except ValueError as exc:
+            raise ValueError("private source archive reference escaped staging") from exc
+        return candidate
+    if text.startswith("kb/"):
+        return logical_ref_to_physical_path(
+            workspace_root_roles(project_root).roots,
+            text,
+        )
+    return kb_root(project_root).joinpath(*relative.parts)
+
+
+def _scoped_materialization_source_fields(
+    project_root: Path,
+    result: dict[str, Any],
+    *,
+    staging_root: Path | None = None,
+) -> dict[str, Any]:
+    if staging_root is None:
+        return materialization_source_fields(project_root, result)
+
+    def encode(value: Any) -> str:
+        return _source_path_reference(
+            project_root,
+            Path(value),
+            staging_root=staging_root,
+        )
+
+    materialization = {
+        "schema": MATERIALIZATION_SCHEMA,
+        "status": str(result["status"]),
+        "converter": str(result["converter"]),
+        "converter_version": str(result["converter_version"]),
+        "source_map_path": encode(result["source_map_path"]),
+        "conversion_path": encode(result["conversion_path"]),
+        "asset_paths": [encode(path) for path in result.get("asset_paths", [])],
+    }
+    archive_path = result.get("archive_path")
+    if isinstance(archive_path, Path):
+        materialization["archive_path"] = encode(archive_path)
+        materialization["archive_hash"] = str(result.get("archive_hash") or "")
+    return {
+        "markdown_path": encode(result["document_path"]),
+        "markdown_hash": str(result["document_hash"]),
+        "materialization": materialization,
+    }
+
+
+def _attach_materialization(
+    project_root: Path,
+    source_info: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    staging_root: Path | None = None,
+) -> None:
     """Attach additive source fields and archived paths without hiding degradation."""
-    source_info.update(materialization_source_fields(project_root, result))
+    source_info.update(
+        _scoped_materialization_source_fields(
+            project_root,
+            result,
+            staging_root=staging_root,
+        )
+    )
     existing = [str(item) for item in source_info.get("backup_paths", [])]
     for path in materialization_paths(result):
-        relative = rel(project_root, path)
+        relative = _source_path_reference(
+            project_root,
+            path,
+            staging_root=staging_root,
+        )
         if relative not in existing:
             existing.append(relative)
     source_info["backup_paths"] = existing
@@ -3964,18 +4091,27 @@ def _rebase_candidate_source_info(
     *,
     staged_root: Path,
     source_root: Path,
+    staging_root: Path | None = None,
 ) -> dict[str, Any]:
     """Rebase project-relative paths owned by one chosen scratch candidate."""
     rebased = dict(source_info)
     staged_root_resolved = staged_root.resolve()
 
     def rebase_path(value: Any) -> str:
-        absolute = (project_root / str(value)).resolve()
+        absolute = _source_reference_path(
+            project_root,
+            value,
+            staging_root=staging_root,
+        ).resolve()
         try:
             relative = absolute.relative_to(staged_root_resolved)
         except ValueError:
             return str(value)
-        return rel(project_root, source_root / relative)
+        return _source_path_reference(
+            project_root,
+            source_root / relative,
+            staging_root=staging_root,
+        )
 
     rebased["backup_paths"] = [rebase_path(item) for item in source_info.get("backup_paths", [])]
     if str(source_info.get("markdown_path") or "").strip():
@@ -3993,11 +4129,20 @@ def _rebase_candidate_source_info(
     return rebased
 
 
-def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_source: str) -> dict[str, Any]:
+def _backup_arxiv_html(
+    project_root: Path,
+    root: Path,
+    arxiv_id: str,
+    original_source: str,
+    *,
+    staging_root: Path | None = None,
+) -> dict[str, Any]:
     """Download quality-gated HTML, then PDF, then an abstract-only page."""
     txt = root / "source-url.txt"
     write_text_if_changed(txt, original_source.strip() + "\n")
-    backup_paths = [rel(project_root, txt)]
+    backup_paths = [
+        _source_path_reference(project_root, txt, staging_root=staging_root)
+    ]
     abs_uri = f"https://arxiv.org/abs/{arxiv_id}"
     attempts: list[str] = []
     for candidate in _arxiv_html_candidates(arxiv_id):
@@ -4071,7 +4216,10 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
         raw = root / "source.html"
         result: dict[str, Any] = {
             "original_uri": abs_uri,
-            "backup_paths": [*backup_paths, rel(project_root, raw)],
+            "backup_paths": [
+                *backup_paths,
+                _source_path_reference(project_root, raw, staging_root=staging_root),
+            ],
             "backup_kind": "url",
             "file_hash": file_sha256(raw),
             "backup_status": "ok",
@@ -4086,7 +4234,12 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                 "source_encoding": source_encoding,
             },
         }
-        _attach_materialization(project_root, result, materialized)
+        _attach_materialization(
+            project_root,
+            result,
+            materialized,
+            staging_root=staging_root,
+        )
         if result.get("backup_warning"):
             _warn(result["backup_warning"], abs_uri)
         result["source_selection_attempts"] = attempts
@@ -4117,6 +4270,7 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                     abs_uri,
                     backup_kind="url",
                     extra_backup_paths=backup_paths,
+                    staging_root=staging_root,
                 )
                 publish_source_candidate(staged_root, root)
                 result = _rebase_candidate_source_info(
@@ -4124,6 +4278,7 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                     result,
                     staged_root=staged_root,
                     source_root=root,
+                    staging_root=staging_root,
                 )
             result["resolved_url"] = pdf_url
             result["source_selection_attempts"] = attempts
@@ -4185,7 +4340,14 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                 raw = root / "source.html"
                 result = {
                     "original_uri": abs_uri,
-                    "backup_paths": [*backup_paths, rel(project_root, raw)],
+                    "backup_paths": [
+                        *backup_paths,
+                        _source_path_reference(
+                            project_root,
+                            raw,
+                            staging_root=staging_root,
+                        ),
+                    ],
                     "backup_kind": "url",
                     "file_hash": file_sha256(raw),
                     "backup_status": "degraded",
@@ -4201,7 +4363,12 @@ def _backup_arxiv_html(project_root: Path, root: Path, arxiv_id: str, original_s
                     },
                     "source_selection_attempts": attempts,
                 }
-                _attach_materialization(project_root, result, materialized)
+                _attach_materialization(
+                    project_root,
+                    result,
+                    materialized,
+                    staging_root=staging_root,
+                )
                 _warn(result["backup_warning"], abs_uri)
                 return result
             attempts.append(
@@ -4236,11 +4403,14 @@ def _backup_pdf_bytes(
     backup_kind: str,
     file_name: str = "source.pdf",
     extra_backup_paths: list[str] | None = None,
+    staging_root: Path | None = None,
 ) -> dict[str, Any]:
     """Persist PDF bytes + real sha256 and parse to page chunks (page=N locators)."""
     raw = _store_bytes(root, file_name, data)
     backup_paths = list(extra_backup_paths or [])
-    backup_paths.append(rel(project_root, raw))
+    backup_paths.append(
+        _source_path_reference(project_root, raw, staging_root=staging_root)
+    )
     result: dict[str, Any] = {
         "original_uri": original_uri,
         "backup_paths": backup_paths,
@@ -4276,9 +4446,14 @@ def _backup_pdf_bytes(
         result["backup_warning"] = "PDF stored with real bytes+sha256 but PyMuPDF4LLM extracted no text (scanned/image-only?)."
         _warn(result["backup_warning"], original_uri)
     else:
-        result["parse_metadata"] = _pdf_metadata(raw, chunks)
+        result["parse_metadata"] = _pdf_metadata(project_root, raw, chunks)
     if materialized is not None:
-        _attach_materialization(project_root, result, materialized)
+        _attach_materialization(
+            project_root,
+            result,
+            materialized,
+            staging_root=staging_root,
+        )
     return result
 
 
@@ -4309,6 +4484,8 @@ def _backup_huggingface_dataset_card(
     source: str,
     original_uri: str,
     backup_paths: list[str],
+    *,
+    staging_root: Path | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     readme_url = _huggingface_dataset_readme_url(source)
     if not readme_url:
@@ -4337,7 +4514,15 @@ def _backup_huggingface_dataset_card(
         (readme_url + "\n").encode("utf-8"),
     )
     raw = _store_bytes(root, "source.md", data)
-    archived_paths = [*backup_paths, rel(project_root, resolved_receipt), rel(project_root, raw)]
+    archived_paths = [
+        *backup_paths,
+        _source_path_reference(
+            project_root,
+            resolved_receipt,
+            staging_root=staging_root,
+        ),
+        _source_path_reference(project_root, raw, staging_root=staging_root),
+    ]
     chunks = _text_to_section_chunks(markdown, markdown=True)
     pretty_name_match = re.search(r"(?m)^pretty_name\s*:\s*(.+?)\s*$", frontmatter)
     pretty_name = ""
@@ -4378,18 +4563,32 @@ def _backup_huggingface_dataset_card(
         source_type="markdown",
         source_uri=original_uri,
     )
-    _attach_materialization(project_root, result, materialized)
+    _attach_materialization(
+        project_root,
+        result,
+        materialized,
+        staging_root=staging_root,
+    )
     if result.get("backup_warning"):
         _warn(str(result["backup_warning"]), original_uri)
     return result, ""
 
 
-def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: str) -> dict[str, Any]:
+def _backup_generic_url(
+    project_root: Path,
+    root: Path,
+    source: str,
+    *,
+    kind: str,
+    staging_root: Path | None = None,
+) -> dict[str, Any]:
     """Non-arxiv URL: real download, PDF->page chunks, HTML->section chunks."""
     original_uri = normalize_remote_url(source)
     txt = root / "source-url.txt"
     write_text_if_changed(txt, source.strip() + "\n")
-    backup_paths = [rel(project_root, txt)]
+    backup_paths = [
+        _source_path_reference(project_root, txt, staging_root=staging_root)
+    ]
     dataset_adapter_warning = ""
     if kind == "dataset":
         adapted, dataset_adapter_warning = _backup_huggingface_dataset_card(
@@ -4398,6 +4597,7 @@ def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: st
             source,
             original_uri,
             backup_paths,
+            staging_root=staging_root,
         )
         if adapted is not None:
             return adapted
@@ -4420,12 +4620,22 @@ def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: st
 
     data = content if isinstance(content, bytes) else str(content).encode("utf-8")
     if _looks_like_pdf(source, content_type, data):
-        return _backup_pdf_bytes(project_root, root, data, original_uri, backup_kind="url", extra_backup_paths=backup_paths)
+        return _backup_pdf_bytes(
+            project_root,
+            root,
+            data,
+            original_uri,
+            backup_kind="url",
+            extra_backup_paths=backup_paths,
+            staging_root=staging_root,
+        )
 
     html, source_encoding, decode_warning = _decode_source_text(data, content_type)
     if _is_html_response(content_type, html):
         raw = _store_bytes(root, "source.html", data)
-        backup_paths.append(rel(project_root, raw))
+        backup_paths.append(
+            _source_path_reference(project_root, raw, staging_root=staging_root)
+        )
         chunks = _html_to_section_chunks(html)
         quality = inspect_html_quality(html)
         if dataset_adapter_warning:
@@ -4468,7 +4678,12 @@ def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: st
             source_type="html",
             source_uri=original_uri,
         )
-        _attach_materialization(project_root, result, materialized)
+        _attach_materialization(
+            project_root,
+            result,
+            materialized,
+            staging_root=staging_root,
+        )
         if decode_warning:
             _warn(decode_warning, original_uri)
         if dataset_adapter_warning:
@@ -4492,7 +4707,9 @@ def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: st
     if is_text:
         raw_name = "source.md" if is_markdown else "source.txt"
         raw = _store_bytes(root, raw_name, data)
-        backup_paths.append(rel(project_root, raw))
+        backup_paths.append(
+            _source_path_reference(project_root, raw, staging_root=staging_root)
+        )
         chunks = _text_to_section_chunks(html, markdown=is_markdown)
         parsed_title = next(
             (str(chunk.get("heading") or "").strip() for chunk in chunks if str(chunk.get("heading") or "").strip()),
@@ -4531,13 +4748,20 @@ def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: st
             source_type=source_type,
             source_uri=original_uri,
         )
-        _attach_materialization(project_root, result, materialized)
+        _attach_materialization(
+            project_root,
+            result,
+            materialized,
+            staging_root=staging_root,
+        )
         if result.get("backup_warning"):
             _warn(str(result["backup_warning"]), original_uri)
         return result
 
     raw = _store_bytes(root, "source.bin", data)
-    backup_paths.append(rel(project_root, raw))
+    backup_paths.append(
+        _source_path_reference(project_root, raw, staging_root=staging_root)
+    )
     warning = (
         f"URL source bytes were archived but not parsed (unsupported content_type={normalized_type or 'unknown'})."
     )
@@ -4555,7 +4779,13 @@ def _backup_generic_url(project_root: Path, root: Path, source: str, *, kind: st
     return result
 
 
-def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]:
+def _backup_local(
+    project_root: Path,
+    root: Path,
+    source: str,
+    *,
+    staging_root: Path | None = None,
+) -> dict[str, Any]:
     """Local file/dir: copy bytes, then parse every supported text/PDF type."""
     src = validate_local_source(project_root, source)
     if src is None:
@@ -4566,11 +4796,23 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
     source_stat = src.lstat()
     if stat.S_ISDIR(source_stat.st_mode):
         _copy_dir(src, dst)
-        return {"original_uri": src.as_posix(), "backup_paths": [rel(project_root, dst)], "backup_kind": "directory", "file_hash": "", "backup_status": "ok", "source_type": "directory", "locator_kind": ""}
+        return {
+            "original_uri": src.as_posix(),
+            "backup_paths": [
+                _source_path_reference(project_root, dst, staging_root=staging_root)
+            ],
+            "backup_kind": "directory",
+            "file_hash": "",
+            "backup_status": "ok",
+            "source_type": "directory",
+            "locator_kind": "",
+        }
     _copy_regular_file_no_links(src, dst)
     result: dict[str, Any] = {
         "original_uri": src.as_posix(),
-        "backup_paths": [rel(project_root, dst)],
+        "backup_paths": [
+            _source_path_reference(project_root, dst, staging_root=staging_root)
+        ],
         "backup_kind": "file",
         "file_hash": file_sha256(dst),
         "backup_status": "ok",
@@ -4604,9 +4846,14 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
             result["backup_warning"] = "Local PDF stored with real sha256 but PyMuPDF4LLM extracted no text (scanned/image-only?)."
             _warn(result["backup_warning"], src.as_posix())
         else:
-            result["parse_metadata"] = _pdf_metadata(dst, chunks)
+            result["parse_metadata"] = _pdf_metadata(project_root, dst, chunks)
         if materialized is not None:
-            _attach_materialization(project_root, result, materialized)
+            _attach_materialization(
+                project_root,
+                result,
+                materialized,
+                staging_root=staging_root,
+            )
         return result
 
     suffix = src.suffix.lower()
@@ -4683,7 +4930,12 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
         )
         metadata["source_encoding"] = source_encoding
         result["parse_metadata"] = metadata
-        _attach_materialization(project_root, result, materialized)
+        _attach_materialization(
+            project_root,
+            result,
+            materialized,
+            staging_root=staging_root,
+        )
         if decode_warning:
             _warn(decode_warning, src.as_posix())
         if not chunks:
@@ -4704,7 +4956,13 @@ def _backup_local(project_root: Path, root: Path, source: str) -> dict[str, Any]
     return result
 
 
-def source_backup_error(project_root: Path, kind: str, source_info: dict[str, Any]) -> str:
+def source_backup_error(
+    project_root: Path,
+    kind: str,
+    source_info: dict[str, Any],
+    *,
+    staging_root: Path | None = None,
+) -> str:
     """Return why a staged source is not ready for canonical materialization."""
     status = str(source_info.get("backup_status") or "").strip()
     if status not in {"ok", "degraded"}:
@@ -4712,7 +4970,15 @@ def source_backup_error(project_root: Path, kind: str, source_info: dict[str, An
     backup_paths = [str(item).strip() for item in source_info.get("backup_paths", []) if str(item).strip()]
     if not backup_paths:
         return "source backup produced no archived paths"
-    missing_paths = [item for item in backup_paths if not (project_root / item).exists()]
+    missing_paths = [
+        item
+        for item in backup_paths
+        if not _source_reference_path(
+            project_root,
+            item,
+            staging_root=staging_root,
+        ).exists()
+    ]
     if missing_paths:
         return f"source backup paths are missing: {', '.join(missing_paths)}"
     source_type = str(source_info.get("source_type") or "").strip()
@@ -4732,15 +4998,20 @@ def rebase_source_backup_paths(
     *,
     from_unit_dir: Path,
     to_unit_dir: Path,
+    staging_root: Path | None = None,
 ) -> dict[str, Any]:
     """Project staged backup paths onto their post-materialization unit paths."""
     rebased = dict(source_info)
-    staging_root = from_unit_dir.resolve()
+    staged_unit_root = from_unit_dir.resolve()
 
     def rebase_path(item: Any) -> str:
-        archived = (project_root / str(item)).resolve()
+        archived = _source_reference_path(
+            project_root,
+            item,
+            staging_root=staging_root,
+        ).resolve()
         try:
-            relative = archived.relative_to(staging_root)
+            relative = archived.relative_to(staged_unit_root)
         except ValueError as exc:
             raise SystemExit(f"Staged source path escaped its transaction root: {item}") from exc
         return rel(project_root, to_unit_dir / relative)
@@ -4768,6 +5039,7 @@ def backup_source(
     source: str,
     *,
     unit_dir: Path | None = None,
+    staging_root: Path | None = None,
 ) -> dict[str, Any]:
     """Archive a source as real bytes + real sha256, returning an explicit status.
 
@@ -4785,9 +5057,13 @@ def backup_source(
     """
     destination_unit = (unit_dir or unit_root(project_root, kind, unit_id)).resolve()
     try:
-        destination_unit.relative_to(kb_root(project_root).resolve())
+        destination_unit.relative_to(
+            (staging_root if staging_root is not None else kb_root(project_root)).resolve()
+        )
     except ValueError as exc:
-        raise SystemExit(f"Source transaction destination must stay inside kb/: {destination_unit}") from exc
+        raise SystemExit(
+            f"Source transaction destination escaped its owned data root: {destination_unit}"
+        ) from exc
     if kind == "repo" and is_url(source):
         raise SystemExit(
             "远程代码仓库尚未本地化；请让 AI 先建立安全的本地只读快照，再重新入库。"
@@ -4803,15 +5079,38 @@ def backup_source(
     if is_url(source):
         arxiv_id = _arxiv_id_from_source(source)
         if arxiv_id:
-            return _backup_arxiv_html(project_root, root, arxiv_id, source)
-        return _backup_generic_url(project_root, root, source, kind=kind)
+            return _backup_arxiv_html(
+                project_root,
+                root,
+                arxiv_id,
+                source,
+                staging_root=staging_root,
+            )
+        return _backup_generic_url(
+            project_root,
+            root,
+            source,
+            kind=kind,
+            staging_root=staging_root,
+        )
     # A bare arxiv id (not a URL, not an existing local path) is still an arxiv source.
     arxiv_id = _arxiv_id_from_source(source)
     if arxiv_id and resolve_local_reference(project_root, normalize_storage_reference(project_root, source)) is None:
         maybe_local = Path(normalize_storage_reference(project_root, source)).expanduser()
         if not maybe_local.exists():
-            return _backup_arxiv_html(project_root, root, arxiv_id, source)
-    return _backup_local(project_root, root, source)
+            return _backup_arxiv_html(
+                project_root,
+                root,
+                arxiv_id,
+                source,
+                staging_root=staging_root,
+            )
+    return _backup_local(
+        project_root,
+        root,
+        source,
+        staging_root=staging_root,
+    )
 
 
 def _record_blocks_source_retry(project_root: Path, record: dict[str, Any]) -> bool:
@@ -4833,7 +5132,14 @@ def _record_blocks_source_retry(project_root: Path, record: dict[str, Any]) -> b
         return False
     backup_kind = str(source.get("backup_kind") or "").strip()
     backup_paths = [str(item).strip() for item in source.get("backup_paths", []) if str(item).strip()]
-    existing = [(project_root / item) for item in backup_paths if (project_root / item).exists()]
+    existing: list[Path] = []
+    for item in backup_paths:
+        try:
+            candidate = _source_reference_path(project_root, item)
+        except (SystemExit, ValueError):
+            continue
+        if candidate.exists() and not candidate.is_symlink():
+            existing.append(candidate)
     if backup_kind == "directory":
         return any(path.is_dir() for path in existing)
     return bool(str(source.get("file_hash") or "").strip()) and bool(existing)

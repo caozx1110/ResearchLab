@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from datetime import datetime
@@ -28,8 +29,10 @@ from research.bootstrap import ensure_managed_runtime
 if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
-from research.common import write_text_if_changed
+from research.common import find_project_root, write_text_if_changed
 from research.journal import mutation_transaction
+from research.path_contract import logical_ref_to_physical_path
+from research.workspace_layout import resolve_workspace_roots
 
 
 class RetrospectiveAlreadyExists(RuntimeError):
@@ -196,13 +199,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_notes_root(value: str) -> tuple[Path, Path]:
+    requested = Path(value).expanduser()
+    if requested.is_absolute():
+        lexical = Path(os.path.abspath(os.fspath(requested)))
+        workspace = next(
+            (
+                candidate
+                for candidate in (lexical, *lexical.parents)
+                if (candidate / "config" / "workspace-layout.yaml").is_file()
+            ),
+            None,
+        )
+        if workspace is None:
+            raise SystemExit("Retrospective notes require an initialized knowledge workspace.")
+        snapshot = resolve_workspace_roots(workspace, PROJECT_ROOT)
+        notes_root = lexical
+    else:
+        if requested.parts[:1] != ("kb",):
+            raise SystemExit("Retrospective note root must use the canonical kb namespace.")
+        workspace = find_project_root()
+        snapshot = resolve_workspace_roots(workspace, PROJECT_ROOT)
+        notes_root = logical_ref_to_physical_path(
+            snapshot.roots,
+            requested.as_posix(),
+        )
+    expected = snapshot.roots.data_root / "memory" / "skill-evolution"
+    if notes_root != expected:
+        raise SystemExit("Retrospective notes must use the canonical skill-evolution area.")
+    return snapshot.roots.workspace_root, notes_root
+
+
 def main() -> int:
     args = parse_args()
-    root = Path(args.root).expanduser().resolve()
-    kb_dir = next((path for path in [root, *root.parents] if path.name == "kb"), None)
-    if kb_dir is None:
-        raise SystemExit("Retrospective notes must be stored inside the workspace knowledge base.")
-    project_root = kb_dir.parent
+    project_root, root = _resolve_notes_root(args.root)
     notes_dir = root / "retrospectives"
 
     now = datetime.now().astimezone()

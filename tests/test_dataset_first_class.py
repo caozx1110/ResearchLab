@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.machinery
 import importlib.util
 import subprocess
@@ -51,6 +53,7 @@ def test_dataset_profile_scaffold_and_verbatim_verification(tmp_path: Path) -> N
         ".agents/skills/unit-analyst/scripts/dataset.py",
         "dataset_analyst_first_class",
     )
+    initialize_test_workspace(tmp_path)
     record = default_record(
         "dataset",
         title="HIW-500",
@@ -117,7 +120,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
         ".agents/skills/unit-analyst/scripts/dataset.py",
         "dataset_analyst_checkpoint_fill",
     )
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     record = default_record("dataset", title="Checkpoint Dataset", maturity="lightweight")
     dataset_id = record["id"]
     record_file = write_record(tmp_path, record)
@@ -176,7 +179,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
     assert dataset.main() == 0
 
     committed = subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "show", "--format=", "--name-only", "HEAD"],
+        ["git", "-C", str(tmp_path), "show", "--format=", "--name-only", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -184,7 +187,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
     relative_fill = f"units/datasets/{dataset_id}/dataset-fill.yaml"
     assert relative_fill in committed
     assert "dataset-fill.yaml" not in subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        ["git", "-C", str(tmp_path), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,
@@ -192,7 +195,7 @@ def test_dataset_verify_checkpoints_dirty_unit_owned_fill(
 
 
 def test_repo_dataset_migration_is_dry_run_then_journaled_and_undoable(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     repo = default_record(
         "repo",
         title="HIW-500",
@@ -218,7 +221,7 @@ def test_repo_dataset_migration_is_dry_run_then_journaled_and_undoable(tmp_path:
         encoding="utf-8",
     )
     parse_cache_bytes = parse_cache.read_bytes()
-    program_state = tmp_path / "kb/programs/humanoid-review/state.yaml"
+    program_state = tmp_path / "programs/humanoid-review/state.yaml"
     program_state.parent.mkdir(parents=True)
     program_state.write_text(
         yaml.safe_dump({"program_id": "humanoid-review", "active_unit_ids": [repo["id"]]}),
@@ -268,7 +271,7 @@ def test_repo_html_snapshot_is_not_a_structure_scan_target(tmp_path: Path) -> No
             "backup_kind": "url",
         },
     )
-    snapshot = tmp_path / "kb/units/repos/r-remote/source/snapshot.md"
+    snapshot = tmp_path / "units/repos/r-remote/source/snapshot.md"
     snapshot.parent.mkdir(parents=True)
     snapshot.write_text("dataset card", encoding="utf-8")
 

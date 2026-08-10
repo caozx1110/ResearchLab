@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.paths import config_root
@@ -22,6 +22,7 @@ def _experiment_module():
 
 
 def _run_experiment(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    initialize_test_workspace(root)
     project_root = REPO_ROOT
     script = project_root / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
     return subprocess.run(
@@ -45,7 +46,7 @@ def _run_report(root: Path, *args: str, check: bool = True) -> subprocess.Comple
 
 def _kb_git_status(root: Path) -> str:
     return subprocess.run(
-        ["git", "-C", str(root / "kb"), "status", "--short"],
+        ["git", "-C", str(root), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,
@@ -53,11 +54,11 @@ def _kb_git_status(root: Path) -> str:
 
 
 def _commit_kb_fixture(root: Path) -> None:
-    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.email", "experiment@example.invalid"], check=True)
-    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.name", "Experiment Test"], check=True)
-    subprocess.run(["git", "-C", str(root / "kb"), "add", "--all"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "experiment@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Experiment Test"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "--all"], check=True)
     subprocess.run(
-        ["git", "-C", str(root / "kb"), "commit", "-m", "fixture baseline"],
+        ["git", "-C", str(root), "commit", "-m", "fixture baseline"],
         check=True,
         capture_output=True,
         text=True,
@@ -182,7 +183,7 @@ def test_run_fingerprint_excludes_observed_values_and_normalizes_change_order() 
 
 def test_duplicate_run_requires_reasoned_rerun_and_seed_forms_repeat_group(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "fingerprinted", "--program-id", "program-test")
-    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     base_args = (
         "log-run",
@@ -249,7 +250,7 @@ def test_duplicate_run_requires_reasoned_rerun_and_seed_forms_repeat_group(tmp_p
 
 def test_concurrent_runs_allocate_unique_monotonic_ids(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "concurrent runs", "--program-id", "program-test")
-    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     project_root = REPO_ROOT
     script = project_root / "skills" / "experiment-workbench" / "scripts" / "experiment.py"
@@ -284,7 +285,7 @@ def test_concurrent_runs_allocate_unique_monotonic_ids(tmp_path: Path) -> None:
 
 def test_run_rejects_artifact_outside_project_before_write(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "contained artifact", "--program-id", "program-test")
-    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     rejected = _run_experiment(
         tmp_path,
@@ -307,7 +308,7 @@ def test_run_rejects_artifact_outside_project_before_write(tmp_path: Path) -> No
 
 def test_diagnosis_claim_verifies_verbatim_run_evidence_and_rejects_fabrication(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "grounded diagnosis", "--program-id", "program-test")
-    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     _run_experiment(
         tmp_path,
@@ -383,7 +384,7 @@ def test_diagnosis_claim_verifies_verbatim_run_evidence_and_rejects_fabrication(
 
 def test_diagnosis_prepare_verify_and_direct_confirm_checkpoint_exact_outputs(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "checkpointed diagnosis", "--program-id", "program-checkpoint")
-    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     run_summary = "Observed a reproducible validation loss spike."
     _run_experiment(
@@ -473,7 +474,7 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     pending_summary = "The failure was caused by dataset corruption."
     confirmed_summary = "The data refresh likely caused the validation regression."
     _run_experiment(tmp_path, "plan", "--title", "report epistemics", "--program-id", program_id)
-    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     _run_experiment(
         tmp_path,
@@ -519,7 +520,7 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     )
 
     _run_report(tmp_path, "weekly", "--program-id", program_id)
-    report_path = tmp_path / "kb" / "programs" / program_id / "reports" / "weekly.md"
+    report_path = tmp_path / "programs" / program_id / "reports" / "weekly.md"
     pending_report = report_path.read_text(encoding="utf-8")
     ordinary_section = _markdown_section(pending_report, "## 报告事件")
     pending_section = _markdown_section(pending_report, "## 待确认 / 未核验的判断")
@@ -530,7 +531,7 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
     assert "当前缺少有效的确认回执或证据绑定" in pending_section
     assert "报告生成期间正式判断来源已变化" not in pending_report
 
-    events_path = tmp_path / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    events_path = tmp_path / "programs" / program_id / "workflow" / "reporting-events.yaml"
     diagnosis_events = [
         item
         for item in load_yaml(events_path)["items"]
@@ -620,7 +621,7 @@ def test_reports_isolate_pending_diagnoses_and_require_current_receipt_for_judge
 
 def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "validator lifecycle", "--program-id", "program-test")
-    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units" / "experiments").glob("*/record.yaml"))
     record = load_yaml(record_path)
     experiment_id = record["id"]
     checkpoint = tmp_path / "checkpoint.pt"
@@ -728,7 +729,7 @@ def test_experiment_validator_lifecycle(tmp_path: Path) -> None:
 
 def test_experiment_confirmation_rejects_hard_preference_change(tmp_path: Path) -> None:
     _run_experiment(tmp_path, "plan", "--title", "preference freshness", "--program-id", "program-test")
-    record_path = next((tmp_path / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     _run_experiment(
         tmp_path,

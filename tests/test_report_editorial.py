@@ -14,6 +14,7 @@ from research.common import append_program_reporting_event, load_yaml, write_yam
 from research.confirm import apply_confirmation, write_record
 from research.evidence import build_verification_receipt
 from research.figures import build_asset_binding, build_figure_entry, build_figure_index
+from research.git_ops import dirty_kb_paths, ensure_kb_git_repo, git_checkpoint
 from research.records import canonical_record_snapshot_for_record, default_record, normalize_record_snapshot
 from research.report_editorial import (
     build_editorial_fill_scaffold,
@@ -22,6 +23,7 @@ from research.report_editorial import (
     render_weekly_editorial,
     validate_editorial_fill,
 )
+from research.workspace_layout import initialize_workspace_layout
 
 
 PROJECT_ROOT = REPO_ROOT
@@ -279,7 +281,7 @@ def test_report_main_verify_failure_is_actionable_without_schema_terms(
 
 
 def _write_confirmed_paper_with_figure(root: Path, program_id: str, unit_id: str) -> str:
-    unit_root = root / "kb" / "units" / "papers" / unit_id
+    unit_root = root / "units" / "papers" / unit_id
     unit_root.mkdir(parents=True)
     evidence_text = "Success rate improves by 8 points."
     write_yaml_if_changed(unit_root / "parse-cache.yaml", {"chunks": [{"label": "page-3", "text": evidence_text}]})
@@ -364,7 +366,7 @@ def _write_confirmed_paper_with_figure(root: Path, program_id: str, unit_id: str
 
 
 def _write_confirmed_decision(root: Path, program_id: str) -> None:
-    program_root = root / "kb" / "programs" / program_id
+    program_root = root / "programs" / program_id
     evidence_path = program_root / "workflow" / "decision-evidence.md"
     evidence_path.write_text("direct benchmark evidence", encoding="utf-8")
     decision = {
@@ -422,13 +424,14 @@ def _workspace(tmp_path: Path) -> tuple[Path, str, str, str]:
     root = tmp_path / "workspace"
     (root / ".agents" / "lib").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
+    initialize_workspace_layout(root, REPO_ROOT)
     program_id = "program-editorial"
     unit_id = "p-editorial-123456"
     experiment_id = "x-editorial-123456"
-    workflow = root / "kb" / "programs" / program_id / "workflow"
+    workflow = root / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
     write_yaml_if_changed(
-        root / "kb" / "programs" / program_id / "state.yaml",
+        root / "programs" / program_id / "state.yaml",
         {
             "program_id": program_id,
             "question": "证据约束的评估是否达到预期？",
@@ -463,17 +466,17 @@ def _workspace(tmp_path: Path) -> tuple[Path, str, str, str]:
 
 
 def _commit_kb_fixture(root: Path) -> None:
-    kb = root / "kb"
-    subprocess.run(["git", "init", str(kb)], check=True, capture_output=True, text=True)
-    subprocess.run(["git", "-C", str(kb), "config", "user.email", "editorial@example.invalid"], check=True)
-    subprocess.run(["git", "-C", str(kb), "config", "user.name", "Editorial Test"], check=True)
-    subprocess.run(["git", "-C", str(kb), "add", "--all"], check=True)
-    subprocess.run(
-        ["git", "-C", str(kb), "commit", "-m", "fixture baseline"],
-        check=True,
-        capture_output=True,
-        text=True,
+    ensure_kb_git_repo(root, create_initial_commit=False)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "editorial@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Editorial Test"], check=True)
+    targets = [path for path in dirty_kb_paths(root) if path.name != "AGENTS.md"]
+    result = git_checkpoint(
+        root,
+        "fixture baseline",
+        auto_init=False,
+        target_paths=targets,
     )
+    assert result["committed"] is True
 
 
 def _fill_real_weekly(manifest: dict) -> dict:
@@ -586,12 +589,12 @@ def test_verify_checkpoints_agent_fill_in_mixed_program(tmp_path: Path, output_k
     report.verify_editorial_report(root, program_id, output_kind)
 
     status = subprocess.run(
-        ["git", "-C", str(root / "kb"), "status", "--short"],
+        ["git", "-C", str(root), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert status == ""
+    assert status == "?? AGENTS.md"
 
 
 def test_stale_figure_or_input_race_never_overwrites_previous_output(
@@ -607,7 +610,7 @@ def test_stale_figure_or_input_race_never_overwrites_previous_output(
     report.verify_editorial_report(root, program_id, "ppt-materials")
     old_output = output_path.read_bytes()
 
-    asset_path = next((root / "kb" / "units" / "papers" / unit_id / "figures" / "assets").glob("*.png"))
+    asset_path = next((root / "units" / "papers" / unit_id / "figures" / "assets").glob("*.png"))
     asset_path.write_bytes(b"tampered figure bytes")
     with pytest.raises(report.EditorialError, match="manifest inputs changed"):
         report.verify_editorial_report(root, program_id, "ppt-materials")
@@ -625,7 +628,7 @@ def test_stale_figure_or_input_race_never_overwrites_previous_output(
     fill = load_yaml(fill_path)
     fill["sections"]["executive_summary"][0]["text"] = "这段新正文不应在 stale race 后覆盖旧产物。"
     write_yaml_if_changed(fill_path, fill)
-    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    events_path = root / "programs" / program_id / "workflow" / "reporting-events.yaml"
     original_write = report.write_text_if_changed
     raced = False
 

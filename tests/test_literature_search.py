@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import copy
 import importlib.util
 import json
@@ -196,6 +198,7 @@ def test_literature_search_bundles_no_provider_client() -> None:
 
 
 def test_agent_authored_search_stage_persists_queries_budget_and_provenance(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     state["frontier"] = [
         {
@@ -226,6 +229,7 @@ def test_agent_authored_search_stage_persists_queries_budget_and_provenance(tmp_
 
 
 def test_url_only_identity_upgrade_and_doi_merge_preserve_manual_fields(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = stage_search_results(
         tmp_path,
         kind="paper",
@@ -273,6 +277,7 @@ def test_url_only_identity_upgrade_and_doi_merge_preserve_manual_fields(tmp_path
 
 
 def test_identity_that_matches_two_existing_candidates_fails_closed(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = stage_search_results(
         tmp_path,
         kind="paper",
@@ -313,6 +318,7 @@ def test_identity_that_matches_two_existing_candidates_fails_closed(tmp_path: Pa
 
 
 def test_same_url_with_conflicting_strong_identity_fails_closed(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = stage_search_results(
         tmp_path,
         kind="paper",
@@ -345,6 +351,7 @@ def test_same_url_with_conflicting_strong_identity_fails_closed(tmp_path: Path) 
 
 
 def test_same_title_and_year_do_not_auto_merge_without_strong_identity(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = stage_search_results(
         tmp_path,
         kind="paper",
@@ -371,6 +378,7 @@ def test_same_title_and_year_do_not_auto_merge_without_strong_identity(tmp_path:
 
 
 def test_resume_appends_queries_discovery_and_retry_without_duplication(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     first_state = _state(queries=[_query("q1")], usage_queries=1)
     path = stage_search_results(
         tmp_path,
@@ -429,6 +437,7 @@ def test_resume_appends_queries_discovery_and_retry_without_duplication(tmp_path
 
 
 def test_budget_is_persistent_monotonic_and_enforced(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     path = stage_search_results(
         tmp_path,
@@ -476,6 +485,7 @@ def test_budget_is_persistent_monotonic_and_enforced(tmp_path: Path) -> None:
 
 
 def test_query_id_cannot_be_reused_for_different_tool_event(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     path = stage_search_results(
         tmp_path,
@@ -562,6 +572,7 @@ def test_systematic_mode_labels_fail_closed_without_honest_scope(
 
 
 def test_bounded_systematic_scope_is_persisted_as_partial_not_complete(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = {
         "entry_skill": "literature-search",
         "mode": "bounded-systematic",
@@ -645,6 +656,7 @@ def test_bounded_systematic_scope_is_persisted_as_partial_not_complete(tmp_path:
 
 
 def test_systematic_mode_rejects_a_nonreproducible_query_event(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = {
         "entry_skill": "literature-search",
         "mode": "systematic",
@@ -681,6 +693,7 @@ def test_systematic_mode_rejects_a_nonreproducible_query_event(tmp_path: Path) -
 
 
 def test_terminal_systematic_search_requires_complete_flow_counts(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = {
         "entry_skill": "literature-search",
         "mode": "bounded-systematic",
@@ -725,6 +738,7 @@ def test_terminal_systematic_search_requires_complete_flow_counts(tmp_path: Path
 
 
 def test_bounded_systematic_can_stop_cleanly_when_no_search_tool_exists(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = {
         "entry_skill": "literature-search",
         "mode": "bounded-systematic",
@@ -789,6 +803,7 @@ def test_snippet_cannot_support_a_screening_judgement(tmp_path: Path) -> None:
 
 
 def test_screening_update_preserves_previous_review_record(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     first = {
         "candidate_id": "paper-a",
         "title": "A",
@@ -835,6 +850,7 @@ def test_explicit_stage_id_rejects_identity_mismatch_without_mutation(
     kind: str,
     query: str,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     path = stage_search_results(
         tmp_path,
         kind="paper",
@@ -843,7 +859,7 @@ def test_explicit_stage_id_rejects_identity_mismatch_without_mutation(
         candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
     )
     before = path.read_bytes()
-    journal_root = tmp_path / "kb/.journal"
+    journal_root = tmp_path / ".journal"
     journal_before = {item.name: item.read_bytes() for item in journal_root.glob("*.yaml")}
     with pytest.raises(SystemExit, match="identity does not match"):
         stage_search_results(
@@ -858,6 +874,7 @@ def test_explicit_stage_id_rejects_identity_mismatch_without_mutation(
 
 
 def test_stage_identity_mismatch_precedes_workspace_seed_repairs(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = stage_search_results(
         tmp_path,
         kind="paper",
@@ -865,7 +882,7 @@ def test_stage_identity_mismatch_precedes_workspace_seed_repairs(tmp_path: Path)
         stage_id="shared-stage",
         candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
     )
-    current_state = tmp_path / "kb/user/current-state.md"
+    current_state = tmp_path / "user/current-state.md"
     current_state.unlink()
     before = path.read_bytes()
     with pytest.raises(SystemExit, match="identity does not match"):
@@ -881,6 +898,7 @@ def test_stage_identity_mismatch_precedes_workspace_seed_repairs(tmp_path: Path)
 
 
 def test_stage_identity_race_fails_before_journal_write(tmp_path: Path, monkeypatch) -> None:
+    initialize_test_workspace(tmp_path)
     calls = 0
     validate = sources._validate_search_stage_identity
 
@@ -900,11 +918,12 @@ def test_stage_identity_race_fails_before_journal_write(tmp_path: Path, monkeypa
             stage_id="shared-stage",
             candidates=[{"candidate_id": "first", "title": "First", "url": "https://example.test/first"}],
         )
-    assert not (tmp_path / "kb/synthesis/source-search/shared-stage.yaml").exists()
-    assert not list((tmp_path / "kb/.journal").glob("*.yaml"))
+    assert not (tmp_path / "synthesis/source-search/shared-stage.yaml").exists()
+    assert not list((tmp_path / ".journal").glob("*.yaml"))
 
 
 def test_legacy_openalex_doi_is_read_only_compatibility_identity(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = stage_search_results(
         tmp_path,
         kind="paper",
@@ -940,6 +959,7 @@ def test_blocked_no_search_tool_is_recorded_without_empty_success(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    initialize_test_workspace(tmp_path)
     module = _search_module()
     payload = {
         "request": "papers about unavailable tools",
@@ -978,7 +998,7 @@ def test_blocked_no_search_tool_is_recorded_without_empty_success(
     assert str(tmp_path) not in output
     assert "http://" not in output
     assert "https://" not in output
-    stages = list((tmp_path / "kb/synthesis/source-search").glob("*.yaml"))
+    stages = list((tmp_path / "synthesis/source-search").glob("*.yaml"))
     assert len(stages) == 1
     assert load_yaml(stages[0])["stop"]["reason"] == "blocked_no_search_tool"
 
@@ -988,6 +1008,7 @@ def test_public_success_message_is_natural_language_only(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    initialize_test_workspace(tmp_path)
     module = _search_module()
     payload = {
         "request": "robot learning papers",
@@ -1042,6 +1063,7 @@ def test_stage_helper_rejects_unknown_raw_payload_before_workspace_write(tmp_pat
 
 
 def test_stage_helper_accepts_and_persists_immutable_monitor_binding(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     module = _search_module()
     binding = {"run_id": "monitor-run-probe", "task_digest": "0" * 64}
     payload_path = tmp_path / "payload.json"
@@ -1080,7 +1102,7 @@ def test_stage_helper_binds_current_search_preferences_and_rejects_stale_resume(
     tmp_path: Path,
 ) -> None:
     module = _search_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     profile_path = config_root(tmp_path) / "user-profile.yaml"
     write_yaml_if_changed(
         profile_path,
@@ -1130,7 +1152,7 @@ def test_stage_helper_without_selection_keeps_soft_behavior_neutral_and_hard_con
     tmp_path: Path,
 ) -> None:
     module = _search_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(
         config_root(tmp_path) / "user-profile.yaml",
         {
@@ -1217,7 +1239,7 @@ def test_search_old_preference_receipt_rejects_each_scope_replay_before_stage_wr
     mutate,
 ) -> None:
     module = _search_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     base = {
         "request": "robot learning",
         "mode": "exploratory",
@@ -1256,7 +1278,7 @@ def test_search_resume_omissions_reuse_the_persisted_frozen_preference_context(
     tmp_path: Path,
 ) -> None:
     module = _search_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     initial = {
         "request": "resume frozen search",
         "mode": "exploratory",
@@ -1366,8 +1388,9 @@ def test_explicit_stage_id_cannot_escape_or_create_workspace(tmp_path: Path) -> 
 
 
 def test_symlink_stage_target_is_rejected_before_victim_or_journal_mutation(tmp_path: Path) -> None:
-    stage_dir = tmp_path / "kb/synthesis/source-search"
-    stage_dir.mkdir(parents=True)
+    initialize_test_workspace(tmp_path)
+    stage_dir = tmp_path / "synthesis/source-search"
+    stage_dir.mkdir(parents=True, exist_ok=True)
     victim = tmp_path / "victim.yaml"
     victim.write_text("safe: true\n", encoding="utf-8")
     (stage_dir / "linked.yaml").symlink_to(victim)
@@ -1383,13 +1406,15 @@ def test_symlink_stage_target_is_rejected_before_victim_or_journal_mutation(tmp_
         )
 
     assert victim.read_bytes() == before
-    assert not (tmp_path / "kb/.journal").exists()
+    assert not (tmp_path / ".journal").exists()
 
 
 def test_invalid_update_does_not_repair_workspace_or_start_a_journal(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
+    (tmp_path / "user/current-state.md").unlink()
     stage_id = "preexisting-stage"
-    path = tmp_path / "kb/synthesis/source-search" / f"{stage_id}.yaml"
-    path.parent.mkdir(parents=True)
+    path = tmp_path / "synthesis/source-search" / f"{stage_id}.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(
         path,
         {
@@ -1426,11 +1451,12 @@ def test_invalid_update_does_not_repair_workspace_or_start_a_journal(tmp_path: P
         )
 
     assert path.read_bytes() == before
-    assert not (tmp_path / "kb/user/current-state.md").exists()
-    assert not (tmp_path / "kb/.journal").exists()
+    assert not (tmp_path / "user/current-state.md").exists()
+    assert not (tmp_path / ".journal").exists()
 
 
 def test_discovery_must_reference_a_real_query_even_when_query_list_is_empty(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state()
     state["usage"]["candidates_seen"] = 1
     with pytest.raises(SystemExit, match="unknown query event"):
@@ -1447,6 +1473,7 @@ def test_discovery_must_reference_a_real_query_even_when_query_list_is_empty(tmp
 def test_resume_rejects_a_persisted_literature_candidate_without_discovery(
     tmp_path: Path,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     path = stage_search_results(
         tmp_path,
         kind="paper",
@@ -1471,6 +1498,7 @@ def test_resume_rejects_a_persisted_literature_candidate_without_discovery(
 
 
 def test_frontier_and_coverage_updates_preserve_history(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     first = _state(queries=[_query("q1")], usage_queries=1)
     first["frontier"] = [
         {
@@ -1519,6 +1547,7 @@ def test_frontier_and_coverage_updates_preserve_history(tmp_path: Path) -> None:
 
 
 def test_query_event_count_cannot_bypass_budget_by_omitting_usage(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     with pytest.raises(SystemExit, match="must match the persisted query count"):
         stage_search_results(
             tmp_path,
@@ -1542,6 +1571,7 @@ def test_query_event_count_cannot_bypass_budget_by_omitting_usage(tmp_path: Path
 
 
 def test_nontracking_url_query_parameters_remain_distinct_identities(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     state["usage"]["candidates_seen"] = 2
     path = stage_search_results(
@@ -1605,6 +1635,7 @@ def test_screening_basis_cannot_exceed_candidate_evidence_level(tmp_path: Path) 
 
 
 def test_citation_and_frontier_references_must_resolve(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     citation = _candidate("paper-a", "https://example.test/a")
     citation["discovered_by"][0].update(
         {"edge_type": "reference", "parent_candidate_id": "missing-parent"}
@@ -1639,6 +1670,7 @@ def test_citation_and_frontier_references_must_resolve(tmp_path: Path) -> None:
 
 
 def test_actual_fulltext_count_must_be_declared_in_usage(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     candidate = _candidate("paper-a", "https://example.test/a")
     candidate["evidence_level"] = "fulltext"
     state = _state(queries=[_query("q1")], usage_queries=1)
@@ -1657,6 +1689,7 @@ def test_literature_stage_does_not_infer_topics_from_query_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         sources,
         "infer_topics_and_tags",
@@ -1685,6 +1718,7 @@ def test_run_identity_changes_with_mode_scope_and_explicit_fresh_run() -> None:
 
 
 def test_fresh_run_id_is_persisted_in_the_stage(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = _search_module().stage_payload(
         tmp_path,
         {
@@ -1699,6 +1733,7 @@ def test_fresh_run_id_is_persisted_in_the_stage(tmp_path: Path) -> None:
 def test_explicit_generic_legacy_stage_is_preserved_and_replaced_by_safe_new_run(
     tmp_path: Path,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     legacy = stage_search_results(
         tmp_path,
         kind="paper",
@@ -1723,6 +1758,7 @@ def test_explicit_generic_legacy_stage_is_preserved_and_replaced_by_safe_new_run
 
 
 def test_legacy_literature_stage_missing_budget_fields_can_resume(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = _search_module().stage_payload(
         tmp_path,
         {"request": "resume old literature run", "candidates": []},
@@ -1751,6 +1787,7 @@ def test_literature_candidate_materialization_requires_current_user_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     state["usage"]["candidates_seen"] = 1
     path = stage_search_results(
@@ -1778,14 +1815,14 @@ def test_literature_candidate_materialization_requires_current_user_selection(
     )
     with pytest.raises(SystemExit, match="requires user_authorization"):
         _intake_module().main()
-    assert not list((tmp_path / "kb/units/papers").glob("*/record.yaml"))
+    assert not list((tmp_path / "units/papers").glob("*/record.yaml"))
 
 
 def test_kb_root_symlink_is_rejected_before_staging(tmp_path: Path) -> None:
     backing = tmp_path / "backing"
     backing.mkdir()
     (tmp_path / "kb").symlink_to(backing, target_is_directory=True)
-    with pytest.raises(SystemExit, match="unsafe path component"):
+    with pytest.raises(SystemExit, match="kb init.*workspace-root layout"):
         stage_search_results(
             tmp_path,
             kind="paper",
@@ -1826,6 +1863,7 @@ def test_literature_selection_cannot_be_rebound_to_an_explicit_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     state["usage"]["candidates_seen"] = 1
     path = stage_search_results(
@@ -1859,13 +1897,14 @@ def test_literature_selection_cannot_be_rebound_to_an_explicit_source(
     )
     with pytest.raises(SystemExit, match="must be materialized from its staged source"):
         _intake_module().main()
-    assert not list((tmp_path / "kb/units/papers").glob("*/record.yaml"))
+    assert not list((tmp_path / "units/papers").glob("*/record.yaml"))
 
 
 def test_staged_candidate_cannot_be_materialized_as_a_different_source_kind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     state["usage"]["candidates_seen"] = 1
     path = stage_search_results(
@@ -1877,7 +1916,7 @@ def test_staged_candidate_cannot_be_materialized_as_a_different_source_kind(
     )
     before = path.read_bytes()
     journal_before = {
-        item.name: item.read_bytes() for item in (tmp_path / "kb/.journal").glob("*.yaml")
+        item.name: item.read_bytes() for item in (tmp_path / ".journal").glob("*.yaml")
     }
     monkeypatch.setattr(
         sys,
@@ -1902,13 +1941,14 @@ def test_staged_candidate_cannot_be_materialized_as_a_different_source_kind(
     with pytest.raises(SystemExit, match="recorded source kind"):
         _intake_module().main()
     assert path.read_bytes() == before
-    assert not list((tmp_path / "kb/units/repos").glob("*/record.yaml"))
+    assert not list((tmp_path / "units/repos").glob("*/record.yaml"))
     assert {
-        item.name: item.read_bytes() for item in (tmp_path / "kb/.journal").glob("*.yaml")
+        item.name: item.read_bytes() for item in (tmp_path / ".journal").glob("*.yaml")
     } == journal_before
 
 
 def test_terminal_systematic_counts_must_match_candidate_ledger(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = {
         "entry_skill": "literature-search",
         "mode": "systematic",
@@ -1969,6 +2009,7 @@ def test_terminal_systematic_counts_must_match_candidate_ledger(tmp_path: Path) 
 def test_terminal_systematic_unavailable_fulltext_must_match_candidate_fetch(
     tmp_path: Path,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     state = {
         "entry_skill": "literature-search",
         "mode": "bounded-systematic",
@@ -2029,6 +2070,7 @@ def test_terminal_systematic_unavailable_fulltext_must_match_candidate_fetch(
 def test_terminal_systematic_query_and_discovery_occurrences_are_fully_reconciled(
     tmp_path: Path,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     scope = {
         "inclusion": ["peer-reviewed"],
         "exclusion": ["non-research"],
@@ -2135,6 +2177,7 @@ def test_terminal_systematic_query_and_discovery_occurrences_are_fully_reconcile
 
 
 def test_query_usage_must_equal_the_durable_event_ledger(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     state["usage"]["queries"] = 3
     with pytest.raises(SystemExit, match="must match the persisted query count"):
@@ -2148,6 +2191,7 @@ def test_query_usage_must_equal_the_durable_event_ledger(tmp_path: Path) -> None
 
 
 def test_screening_fetch_and_frontier_terminal_states_cannot_regress(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     first = _state(queries=[_query("q1")], usage_queries=1)
     first["usage"].update({"candidates_seen": 1, "full_reads": 1})
     first["frontier"] = [
@@ -2205,6 +2249,7 @@ def test_screening_fetch_and_frontier_terminal_states_cannot_regress(tmp_path: P
 
 
 def test_failed_terminal_fetch_and_completed_run_cannot_be_reopened(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     state = _state(queries=[_query("q1")], usage_queries=1)
     candidate = _candidate(
         "paper-a",
@@ -2260,6 +2305,7 @@ def test_failed_terminal_fetch_and_completed_run_cannot_be_reopened(tmp_path: Pa
 def test_systematic_time_multi_reviewer_and_terminal_stop_contracts_fail_closed(
     tmp_path: Path,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     base_scope = {
         "inclusion": ["peer-reviewed"],
         "exclusion": ["non-research"],
@@ -2473,6 +2519,7 @@ def _multi_candidate(decisions: list[dict], adjudications: list[dict] | None = N
 
 
 def test_multi_reviewer_consensus_derives_effective_screening(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     candidate = _multi_candidate(
         [
             _reviewer_decision("decision-a", "reviewer-a", "include"),
@@ -2495,6 +2542,7 @@ def test_multi_reviewer_consensus_derives_effective_screening(tmp_path: Path) ->
 
 
 def test_multi_reviewer_conflict_requires_adjudication_before_terminal_stop(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     candidate = _multi_candidate(
         [
             _reviewer_decision("decision-a", "reviewer-a", "include"),
@@ -2514,6 +2562,7 @@ def test_multi_reviewer_conflict_requires_adjudication_before_terminal_stop(tmp_
 def test_multi_reviewer_third_reviewer_adjudication_preserves_original_decisions(
     tmp_path: Path,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     decisions = [
         _reviewer_decision("decision-a", "reviewer-a", "include"),
         _reviewer_decision("decision-b", "reviewer-b", "exclude"),
@@ -2550,6 +2599,7 @@ def test_multi_reviewer_third_reviewer_adjudication_preserves_original_decisions
 
 
 def test_independent_reviewers_cannot_share_an_execution_context(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     before = list(tmp_path.rglob("*"))
     with pytest.raises(SystemExit, match="distinct execution/context ids"):
         stage_search_results(
@@ -2563,6 +2613,7 @@ def test_independent_reviewers_cannot_share_an_execution_context(tmp_path: Path)
 
 
 def test_reviewer_decisions_are_append_only_and_supersede_explicitly(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     first = _multi_candidate(
         [
             _reviewer_decision("decision-a", "reviewer-a", "include"),
@@ -2607,6 +2658,7 @@ def test_reviewer_decisions_are_append_only_and_supersede_explicitly(tmp_path: P
 def test_human_reviewer_and_user_adjudication_require_current_message_attestation(
     tmp_path: Path,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     state = _multi_reviewer_state()
     state["reviewers"][1] = {
         "reviewer_id": "reviewer-b",
@@ -2624,6 +2676,7 @@ def test_human_reviewer_and_user_adjudication_require_current_message_attestatio
 
 
 def test_multi_reviewer_phase_order_and_adjudicator_mode_fail_closed(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     reversed_state = _multi_reviewer_state()
     reversed_state["review_protocol"]["phases"] = ["fulltext", "title_abstract"]
     with pytest.raises(SystemExit, match="canonical screening order"):
@@ -2690,6 +2743,7 @@ def test_multi_reviewer_phase_order_and_adjudicator_mode_fail_closed(tmp_path: P
 
 
 def test_multi_reviewer_decision_ledger_cannot_return_to_earlier_phase(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     first = _multi_candidate(
         [
             _reviewer_decision("full-a", "reviewer-a", "include", phase="fulltext"),
@@ -2723,6 +2777,7 @@ def test_multi_reviewer_decision_ledger_cannot_return_to_earlier_phase(tmp_path:
 
 
 def test_persisted_multi_reviewer_ledger_reordering_fails_closed(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     title = _multi_candidate(
         [
             _reviewer_decision("title-a", "reviewer-a", "include", phase="title_abstract"),
@@ -2769,6 +2824,7 @@ def test_persisted_multi_reviewer_ledger_reordering_fails_closed(tmp_path: Path)
 
 
 def test_pending_adjudication_can_be_resolved_append_only_and_replayed(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     decisions = [
         _reviewer_decision("decision-a", "reviewer-a", "include"),
         _reviewer_decision("decision-b", "reviewer-b", "exclude"),
@@ -2825,6 +2881,7 @@ def test_pending_adjudication_can_be_resolved_append_only_and_replayed(tmp_path:
 
 
 def test_persisted_decision_tamper_and_multi_automation_exclusion(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     candidate = _multi_candidate([
         _reviewer_decision("decision-a", "reviewer-a", "exclude"),
         _reviewer_decision("decision-b", "reviewer-b", "exclude"),

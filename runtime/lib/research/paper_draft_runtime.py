@@ -27,7 +27,7 @@ from .paper_drafts import (
     draft_manifest_currentness_violations,
     paper_draft_section_lifecycle_violations,
 )
-from .paths import unit_root
+from .paths import kb_root, rel, unit_root
 from .records import (
     CanonicalRecordSnapshot,
     ProjectFileSnapshot,
@@ -88,7 +88,7 @@ def _safe_program_id(value: Any) -> str:
 
 
 def paper_draft_root(root: Path, program_id: str) -> Path:
-    return root / "kb" / "programs" / _safe_program_id(program_id) / "reports" / "paper-draft"
+    return kb_root(root) / "programs" / _safe_program_id(program_id) / "reports" / "paper-draft"
 
 
 def paper_draft_manifest_path(root: Path, program_id: str) -> Path:
@@ -96,7 +96,7 @@ def paper_draft_manifest_path(root: Path, program_id: str) -> Path:
 
 
 def paper_draft_outline_path(root: Path, program_id: str) -> Path:
-    return root / "kb" / "programs" / _safe_program_id(program_id) / "reports" / "paper-outline.md"
+    return kb_root(root) / "programs" / _safe_program_id(program_id) / "reports" / "paper-outline.md"
 
 
 def _safe_section_id(value: Any) -> str:
@@ -415,7 +415,7 @@ def load_current_draft_manifest(
     inputs: PaperDraftInputs | None = None,
 ) -> tuple[dict[str, Any], ProjectFileSnapshot, PaperDraftInputs]:
     current_inputs = inputs or load_paper_draft_inputs(root, program_id)
-    relative = paper_draft_manifest_path(root, program_id).relative_to(root).as_posix()
+    relative = rel(root, paper_draft_manifest_path(root, program_id))
     snapshot = snapshot_project_file(root, relative)
     if snapshot is None:
         raise PaperDraftRuntimeError("paper draft manifest is missing or unsafe")

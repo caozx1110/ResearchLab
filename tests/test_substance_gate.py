@@ -9,6 +9,8 @@ Covers the Wave-2 Track-Gate work that plugs the hollow confirmation gate:
 """
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -88,6 +90,7 @@ def _with_verified_judgement(
     *,
     claim_type: str = "evaluation",
 ) -> dict:
+    initialize_test_workspace(project_root)
     evidence_root = record_path(project_root, "paper", record["id"]).parent
     evidence_root.mkdir(parents=True, exist_ok=True)
     (evidence_root / "parse-cache.yaml").write_text("grounded analysis evidence", encoding="utf-8")
@@ -117,7 +120,7 @@ def _with_verified_judgement(
 def test_promote_empty_judgement_paper_to_confirmed_is_rejected_and_stays_pending(tmp_path: Path) -> None:
     """CORE ACCEPTANCE: an empty-core_content judgement paper cannot be promoted to
     confirmed even with valid provenance; it stays pending on disk (no write)."""
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-hollow-judgement-123456"
     write_yaml_if_changed(
         record_path(tmp_path, "paper", unit_id),
@@ -141,7 +144,7 @@ def test_promote_empty_judgement_paper_to_confirmed_is_rejected_and_stays_pendin
 
 def test_promote_substantive_judgement_paper_confirms_normally(tmp_path: Path) -> None:
     """A judgement paper with real core_content confirms normally through promote."""
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-substantive-judgement-123456"
     write_yaml_if_changed(
         record_path(tmp_path, "paper", unit_id),
@@ -171,7 +174,7 @@ def test_promote_substantive_judgement_paper_confirms_normally(tmp_path: Path) -
 def test_promote_empty_fact_metadata_paper_to_confirmed_is_exempt(tmp_path: Path) -> None:
     """Fact-track basic metadata is exempt from the deep substance check (light confirm):
     an empty fact-track paper can still be promoted to confirmed with provenance."""
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-fact-metadata-123456"
     write_yaml_if_changed(
         record_path(tmp_path, "paper", unit_id),
@@ -286,7 +289,7 @@ def test_red_line_self_sign_rejected_end_to_end(tmp_path: Path) -> None:
 def test_red_line_judgement_confirm_without_evidence_rejected(tmp_path: Path) -> None:
     """Existing rule preserved: judgement confirmation still requires evidence, even
     when the record HAS substantive content (so substance is not the blocker here)."""
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-no-evidence-123456"
     write_yaml_if_changed(
         record_path(tmp_path, "paper", unit_id),
@@ -302,7 +305,7 @@ def test_red_line_judgement_confirm_without_evidence_rejected(tmp_path: Path) ->
 def test_red_line_substance_rejected_independent_of_evidence(tmp_path: Path) -> None:
     """Substance is an added, independent gate: valid confirmer + evidence still cannot
     confirm a hollow judgement record."""
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-substance-blocked-123456"
     write_yaml_if_changed(
         record_path(tmp_path, "paper", unit_id),
@@ -323,7 +326,7 @@ def test_red_line_fact_track_light_confirm_passes(tmp_path: Path) -> None:
     """Fact-track basic metadata light-confirms successfully via the batch path (kb.py
     review-queue --confirm / apply_batch_confirmation → confirm_unit)."""
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-fact-light-123456"
     write_record(
         tmp_path,
@@ -362,7 +365,7 @@ def test_confirm_unit_hollow_judgement_via_batch_stays_pending_on_disk(tmp_path:
     """kb.py batch path (apply_batch_confirmation -> confirm_unit): a hollow judgement
     paper is rejected and stays pending_user_confirmation on disk (no confirmation)."""
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-hollow-confirm-unit-123456"
     write_yaml_if_changed(
         record_path(tmp_path, "paper", unit_id),
@@ -451,7 +454,7 @@ def test_apply_confirmation_cannot_bypass_user_opinion_claim_with_record_fact(tm
 
 
 def test_promote_cannot_bypass_user_opinion_claim_with_record_fact(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-user-opinion-floor-123456"
     record = _with_verified_judgement(
         tmp_path,
@@ -497,7 +500,7 @@ def test_apply_confirmation_rejects_unverified_claim_even_on_fact_record() -> No
 
 
 def test_promote_rejects_unverified_claim_and_preserves_disk_state(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = "p-unverified-floor-123456"
     record = _paper_record(unit_id, information_types=["fact"], core_content=FILLED_CORE_CONTENT)
     record.setdefault("payload", {})["claims"] = [
@@ -555,7 +558,7 @@ def test_review_queue_confirm_only_touches_fact_track(tmp_path: Path, monkeypatc
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(
         record_path(tmp_path, "paper", "p-fact-000001"),
         _paper_record("p-fact-000001", information_types=["fact"], core_content={}, status="draft"),
@@ -584,7 +587,7 @@ def test_review_queue_display_excludes_unfilled_judgement_shell(tmp_path: Path, 
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(
         record_path(tmp_path, "paper", "p-fact-000001"),
         _paper_record("p-fact-000001", information_types=["fact"], core_content={}, status="draft"),

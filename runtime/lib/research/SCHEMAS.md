@@ -22,6 +22,30 @@
 
 ---
 
+## Workspace layout 与逻辑 artifact namespace <a id="workspace-layout"></a>
+
+全新 dedicated workspace 只有在显式 `kb init` 通过零写 preflight 后才可创建并激活以下 byte-canonical marker；普通 mutation、install、update 与 reinstall 都没有创建或猜测 layout 的权限：
+
+```yaml
+schema: research-workspace-layout/v1
+layout: workspace-root
+```
+
+marker 固定为 `config/workspace-layout.yaml`，属于 workspace Git 的显式 root-owned pathspec，但不是 business mutation 或 journal target。active root roles 固定为：workspace/integration root = marker 所在 workspace，canonical data root = 同一 workspace 根，product bundle root = 已验证安装 payload。marker 缺失、unknown bytes、identity drift、legacy `<workspace>/kb/`、已有 outer Git、partial canonical tree、collision、symlink 或 special node 都在业务写入前 fail closed；runtime 不维护启发式 dual-layout，也不自动迁移 legacy 数据。
+
+`kb/...` 永远是 persisted logical artifact namespace，不是物理目录要求。例如 `kb/units/papers/p/record.yaml` 在 active workspace-root layout 映射到物理 `<workspace>/units/papers/p/record.yaml`，reverse mapping 必须逐字恢复同一 logical ref。record/history/evidence/receipt、survey/report binding、review protocol 与用户可见 artifact ref 不得因物理布局改变而批量重写。
+
+data-root-relative top-level ownership 分为：
+
+- canonical artifact：`.gitignore`、`index.md`、`index.yaml`、`config/`、`eval/`、`memory/`、`monitoring/`、`obsidian/`、`output/`、`programs/`、`raw/`、`synthesis/`、`units/`、`user/`；
+- operational state：`.journal/`、`.runtime/`，只有对应 owner 显式 opt in；
+- reserved integration：`.agents/`、`.git/`、`.venv/`、`.claude/`、根 `AGENTS.md`、`CLAUDE.md`、`bin/`；
+- unknown：其他 top-level，默认拒绝。
+
+journal key 保持 data-root-relative（例如 `units/papers/...`），持久 artifact identity 保持 logical `kb/...`。KB Git repository 位于 workspace root；initial/checkpoint/undo/restore 只能使用 literal canonical pathspec，layout marker 显式纳入，operational/private/reserved/unknown 路径不随祖先 scope 搭车，禁止无范围 workspace `git add -A`。根 `AGENTS.md` 只有已 tracked 或用户明确选择时才可由 Git owner 纳入，任何 business transaction 都不能写它。
+
+---
+
 ## 安装更新源选择 <a id="update-source-choice"></a>
 
 copy install 的 `.agents/.install-manifest.json` 以 `source_origin/source_checkout/source_branch/source_strategy/source_commit` 记录更新 provenance。`kb update` 返回 `needs_source_choice` 时，私有 Agent protocol 必须包含当前可验证 provenance、真正缺失的用户字段、manifest byte digest 与 headless apply contract；不得只返回无法执行的 `choose_update_source` 名称。
@@ -86,7 +110,7 @@ apply 在首个 workspace/HOME/runtime 写入前先执行与 plan generation 相
 
 适用：paper / repo / dataset / blog / idea / experiment / concept 七种 unit 共享的 record 顶层结构。
 
-所有 canonical unit 读者共用同一 strict record snapshot 合同：从 workspace root 逐级 anchored/no-follow 打开 `kb/units/<kind-dir>/<unit-id>/record.yaml`，目录名与 record `kind/id` 必须互相一致；leaf 只接受有界 ordinary file，并以 nonblocking fd 读取，读取前后重验完整 stat identity、长度与祖先目录链。YAML loader 拒绝任意层重复 mapping key。symlink、FIFO/socket/device、过大/变化中的文件、重复 key、目录身份漂移或 schema/路径不一致均不得产出 record。批量 discovery 必须隔离单个坏候选并返回安全 audit finding：normalization 对任意 YAML mapping 是 total boundary，schema/type 错误不得返回 raw payload或抛出普通异常拖垮 status/portfolio/review/find/survey/intake；`KeyboardInterrupt/GeneratorExit` 不吞。任何 owner 若需要精确 bytes/digest，必须消费这个 reader 返回的同一 snapshot，不能再次按路径打开。严格 snapshot 也不得降级成普通 `Path/.parent` 交给 evidence/passage consumer：source-unit evidence、Markdown 与 parse-cache 从同一 anchored unit directory capability 读取为 bytes+digest+artifact identity，并在判断/公开展示前重验整条祖先链；leaf-only no-follow 或先检查后按路径重开不构成能力绑定。`trusted_unit_record_path` 是 informational/existence compatibility API，`report-author`、`idea-workbench`、monitor 或其它 consumer 不得拿其结果再 `load_yaml/read_text/read_bytes`；它们必须使用 strict record / evidence snapshot 并把初始 binding 传入 confirmation/readiness current-check。program-decision 与 method-selection 的跨 unit claim roots 必须是 `EvidenceSourceSnapshot`，不得缓存 `locate_record(...)[1].parent`；`program:<id>` 的本地 evidence 也必须在一个 ancestor-bound snapshot 中一次捕获本判断引用的全部 artifacts，不能让多条 ref 各自从 bare program `Path` 重开后拼接不同目录版本。survey unit binding 的 record、confirmation receipt与 evidence artifact list 必须来自同一个 current `CanonicalUnitSnapshot`；若保留全部 artifact 绑定，递归枚举和 byte hash 也必须由 records 层的 anchored/no-follow/bounded API完成，不能在 survey 层 `rglob/read_bytes/file_sha256`。persisted unit confirmation 必须携带与用户所见/owner 所载 dict 对应的 `CanonicalRecordSnapshot`：evidence capture 消费它，最终 `write_record` 同时比较 expected exact bytes、file identity/current ancestor binding 与 revision；相同 revision 的不同内容或新 inode不得覆盖。judgement report/current consumer 还必须把 subject record、canonical path/owner、verification、ConfirmationReceipt 与 event binding 绑定到同一个 `BoundJudgementSnapshot`：unit 从唯一 record snapshot 读取；side judgement artifact 从 root 逐级 anchored/no-follow、nonblocking、有界 strict-YAML snapshot 读取。consumer 不得在一个判断内重复调用 path loader；正式接纳前重验 leaf 与祖先 identity/current，任何 replacement 或重复 canonical subject 只可降级到 `Pending / Unverified`。review snapshot binding 还必须包含产生卡片的完整 canonical container byte digest；side container 的 sibling 或顶层字段变化同样令旧卡片失效。portfolio 对 program-decision 的引用、survey review-confirmation 与 report-consumption provenance 均属正式 consumer，禁止回退到 dict + path 的二元 current-check。report 必须把所有 accepted source 的 snapshot validator 保留到整批 inputs 装配完成与最终文本返回前；任一失效时整条 formal judgement lane 统一降级，禁止返回已经渲染的旧文本；weekly、stage-summary、ppt-materials、writing-materials、outline 五类 formal publication 还须把同一 current gate 注册到 transaction commit boundary，失败回滚 publication 且不 checkpoint。portfolio validation plan 也必须把 program-decision bound snapshots 保留到 mutation lock 内 history 写入后的 transaction commit boundary；new-write guard 只能引用 lock 内重建的 plan，不能引用 initial/outer plan，replay 保留 final-return gate。report event 的 side subjects 使用一次 batch capture/唯一性索引，捕获复杂度必须为 O(containers + events)。所有 judgement snapshot 入口先 canonicalize project root；macOS `/var` 与 `/private/var` 等价路径必须映射到同一 canonical path identity。`last/current` 的修改时间排序直接使用 snapshot 整数纳秒，禁止转 epoch float 丢精度。
+所有 canonical unit 读者共用同一 strict record snapshot 合同：先验证 workspace marker/root roles，再从 physical data root 逐级 anchored/no-follow 打开 `units/<kind-dir>/<unit-id>/record.yaml`；其 persisted logical identity 仍是 `kb/units/<kind-dir>/<unit-id>/record.yaml`。目录名与 record `kind/id` 必须互相一致；leaf 只接受有界 ordinary file，并以 nonblocking fd 读取，读取前后重验完整 stat identity、长度与祖先目录链。YAML loader 拒绝任意层重复 mapping key。symlink、FIFO/socket/device、过大/变化中的文件、重复 key、目录身份漂移或 schema/路径不一致均不得产出 record。批量 discovery 必须隔离单个坏候选并返回安全 audit finding：normalization 对任意 YAML mapping 是 total boundary，schema/type 错误不得返回 raw payload或抛出普通异常拖垮 status/portfolio/review/find/survey/intake；`KeyboardInterrupt/GeneratorExit` 不吞。任何 owner 若需要精确 bytes/digest，必须消费这个 reader 返回的同一 snapshot，不能再次按路径打开。严格 snapshot 也不得降级成普通 `Path/.parent` 交给 evidence/passage consumer：source-unit evidence、Markdown 与 parse-cache 从同一 anchored unit directory capability 读取为 bytes+digest+artifact identity，并在判断/公开展示前重验整条祖先链；leaf-only no-follow 或先检查后按路径重开不构成能力绑定。`trusted_unit_record_path` 是 informational/existence compatibility API，`report-author`、`idea-workbench`、monitor 或其它 consumer 不得拿其结果再 `load_yaml/read_text/read_bytes`；它们必须使用 strict record / evidence snapshot 并把初始 binding 传入 confirmation/readiness current-check。program-decision 与 method-selection 的跨 unit claim roots 必须是 `EvidenceSourceSnapshot`，不得缓存 `locate_record(...)[1].parent`；`program:<id>` 的本地 evidence 也必须在一个 ancestor-bound snapshot 中一次捕获本判断引用的全部 artifacts，不能让多条 ref 各自从 bare program `Path` 重开后拼接不同目录版本。survey unit binding 的 record、confirmation receipt与 evidence artifact list 必须来自同一个 current `CanonicalUnitSnapshot`；若保留全部 artifact 绑定，递归枚举和 byte hash 也必须由 records 层的 anchored/no-follow/bounded API完成，不能在 survey 层 `rglob/read_bytes/file_sha256`。persisted unit confirmation 必须携带与用户所见/owner 所载 dict 对应的 `CanonicalRecordSnapshot`：evidence capture 消费它，最终 `write_record` 同时比较 expected exact bytes、file identity/current ancestor binding 与 revision；相同 revision 的不同内容或新 inode不得覆盖。judgement report/current consumer 还必须把 subject record、canonical path/owner、verification、ConfirmationReceipt 与 event binding 绑定到同一个 `BoundJudgementSnapshot`：unit 从唯一 record snapshot 读取；side judgement artifact 从 root 逐级 anchored/no-follow、nonblocking、有界 strict-YAML snapshot 读取。consumer 不得在一个判断内重复调用 path loader；正式接纳前重验 leaf 与祖先 identity/current，任何 replacement 或重复 canonical subject 只可降级到 `Pending / Unverified`。review snapshot binding 还必须包含产生卡片的完整 canonical container byte digest；side container 的 sibling 或顶层字段变化同样令旧卡片失效。portfolio 对 program-decision 的引用、survey review-confirmation 与 report-consumption provenance 均属正式 consumer，禁止回退到 dict + path 的二元 current-check。report 必须把所有 accepted source 的 snapshot validator 保留到整批 inputs 装配完成与最终文本返回前；任一失效时整条 formal judgement lane 统一降级，禁止返回已经渲染的旧文本；weekly、stage-summary、ppt-materials、writing-materials、outline 五类 formal publication 还须把同一 current gate 注册到 transaction commit boundary，失败回滚 publication 且不 checkpoint。portfolio validation plan 也必须把 program-decision bound snapshots 保留到 mutation lock 内 history 写入后的 transaction commit boundary；new-write guard 只能引用 lock 内重建的 plan，不能引用 initial/outer plan，replay 保留 final-return gate。report event 的 side subjects 使用一次 batch capture/唯一性索引，捕获复杂度必须为 O(containers + events)。所有 judgement snapshot 入口先 canonicalize project root；macOS `/var` 与 `/private/var` 等价路径必须映射到同一 canonical path identity。`last/current` 的修改时间排序直接使用 snapshot 整数纳秒，禁止转 epoch float 丢精度。
 
 ```yaml
 id: <kind-prefix>-<slug>-<8hex>      # 必填；canonical_unit_id() 生成
@@ -215,10 +239,10 @@ locator 省略等价于 unit 级。`heading.value` 是生成页中精确标题�
 
 ### Obsidian 派生投影 <a id="obsidian-projection"></a>
 
-`kb/` 可直接作为 Obsidian Vault。系统只管理下列派生区，不生成 `.obsidian/`：
+已激活的 workspace root 可直接作为 Obsidian Vault。系统物理上只管理下列派生区，不生成 `.obsidian/`；这些文件的持久逻辑 identity 仍带 `kb/` 前缀：
 
 ```text
-kb/obsidian/
+workspace/obsidian/                # logical: kb/obsidian/
 ├── managed/
 │   ├── Home.md
 │   ├── units/<unit-id>.md

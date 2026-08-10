@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import json
 import sys
@@ -17,7 +19,7 @@ from research.judgements import (
     discover_pending_judgements,
     judgement_confirmation_is_current,
 )
-from research.paths import config_root
+from research.paths import config_root, rel
 from research.records import trusted_claim_source_roots as shared_source_roots
 
 
@@ -44,7 +46,7 @@ def _workspace(tmp_path: Path) -> Path:
     root = tmp_path
     (root / ".agents").mkdir()
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     idea = default_record("idea", title="R2 selected idea", maturity="lightweight", source={"original_uri": "discussion"})
     idea["id"] = IDEA_ID
     idea["status"] = "selected"
@@ -71,15 +73,15 @@ def _run(method, monkeypatch, root: Path, *args: str) -> int:
 
 
 def _paths(root: Path) -> dict[str, Path]:
-    design = root / "kb" / "programs" / PROGRAM_ID / "design"
+    design = root / "programs" / PROGRAM_ID / "design"
     return {
         "design": design,
         "choice": design / f"{IDEA_ID}-repo-choice.yaml",
         "interfaces": design / f"{IDEA_ID}-interfaces.yaml",
         "matrix": design / f"{IDEA_ID}-experiment-matrix.yaml",
         "method": design / f"{IDEA_ID}-method.md",
-        "state": root / "kb" / "programs" / PROGRAM_ID / "state.yaml",
-        "events": root / "kb" / "programs" / PROGRAM_ID / "workflow" / "reporting-events.yaml",
+        "state": root / "programs" / PROGRAM_ID / "state.yaml",
+        "events": root / "programs" / PROGRAM_ID / "workflow" / "reporting-events.yaml",
     }
 
 
@@ -269,7 +271,7 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
         "kind": "method_selection",
         "id": f"method-selection:{PROGRAM_ID}:{IDEA_ID}",
         "owner": "method-designer",
-        "path": paths["choice"].relative_to(root).as_posix(),
+        "path": rel(root, paths["choice"]),
     }
     assert event["confirmation_binding"]["content_digest"] == choice["confirmation"]["content_digest"]
     op_types = {str(item.get("op_type") or "") for item in committed_ops(root)}

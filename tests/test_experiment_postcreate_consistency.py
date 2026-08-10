@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import hashlib
 import importlib.util
 import errno
@@ -18,6 +20,11 @@ import pytest
 from research.common import load_yaml
 from research.core import ensure_workspace
 from research.preference_selection import eligible_preferences, record_effective_selection
+from research.path_contract import (
+    PathContractError,
+    TargetClass,
+    classify_data_relative_path,
+)
 
 
 MUTATIONS = (
@@ -51,12 +58,12 @@ def _experiment_module():
 def _new_experiment(tmp_path: Path, module, name: str) -> tuple[Path, Path, dict]:
     root = tmp_path / f"workspace-{name}"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     plan = module.build_parser().parse_args(
         ["plan", "--title", f"postcreate {name}", "--program-id", "program-r12-postcreate"]
     )
     assert module._dispatch(plan, root) == 0
-    record_path = next((root / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((root / "units" / "experiments").glob("*/record.yaml"))
     return root, record_path, load_yaml(record_path)
 
 
@@ -106,11 +113,14 @@ def _record_selection(root: Path, module, args, record: dict, unit_root: Path, s
 
 
 def _business_snapshot(root: Path) -> dict[str, tuple]:
-    kb = root / "kb"
     snapshot: dict[str, tuple] = {}
-    for path in sorted(kb.rglob("*"), key=lambda item: item.relative_to(kb).as_posix()):
-        relative = path.relative_to(kb)
-        if relative.parts and relative.parts[0] in {".journal", ".runtime"}:
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root)
+        try:
+            target_class = classify_data_relative_path(relative.as_posix())
+        except PathContractError:
+            continue
+        if target_class is not TargetClass.CANONICAL_ARTIFACT:
             continue
         metadata = path.lstat()
         name = relative.as_posix()
@@ -193,6 +203,7 @@ def _run_log_transaction(module, root: Path, args) -> int:
             "experiment-workbench:log-run",
             targets,
             commit_guard=module._validate_created_run_at_commit,
+            allow_operational_state=True,
         ):
             result = module._dispatch(args, root)
         pending = module._PENDING_CHECKPOINT.get()

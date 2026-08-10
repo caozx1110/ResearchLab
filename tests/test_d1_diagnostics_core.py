@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from repo_paths import REPO_ROOT, source_path
+from repo_paths import REPO_ROOT, initialize_test_workspace, source_path
 
 import pytest
 
@@ -42,6 +42,7 @@ def _workspace(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    initialize_test_workspace(root)
     return root
 
 
@@ -87,7 +88,7 @@ def test_absent_root_policy_and_issue_reads_are_byte_identical(tmp_path: Path) -
     assert policy["local_only"] is True
     assert policy["automatic_capture"] is False
     assert list_diagnostic_issues(root) == []
-    assert diagnostics_path(root) == root / "kb" / "memory" / "skill-evolution" / "issues.yaml"
+    assert diagnostics_path(root) == root / "memory" / "skill-evolution" / "issues.yaml"
 
     assert _snapshot(tmp_path) == before
     assert not (root / "kb").exists()
@@ -178,7 +179,7 @@ def test_intake_failure_stage_handoff_is_allowlisted_private_and_consumed(
         operation="add",
         failure_stage="materialization",
     ) is True
-    receipt_directory = root / "kb" / ".runtime" / "diagnostics" / "failure-stages"
+    receipt_directory = root / ".runtime" / "diagnostics" / "failure-stages"
     receipts = list(receipt_directory.glob("*.json"))
     assert len(receipts) == 1
     receipt = json.loads(receipts[0].read_text(encoding="ascii"))
@@ -257,7 +258,7 @@ def test_intake_failure_stage_handoff_has_exactly_one_concurrent_consumer(
         )
 
     assert sorted(outcomes) == ["checkpoint", "unknown"]
-    receipt_directory = root / "kb" / ".runtime" / "diagnostics" / "failure-stages"
+    receipt_directory = root / ".runtime" / "diagnostics" / "failure-stages"
     assert list(receipt_directory.iterdir()) == []
 
 
@@ -274,7 +275,7 @@ def test_intake_failure_stage_handoff_rejects_world_writable_final_directory(
         operation="add",
         failure_stage="checkpoint",
     ) is True
-    receipt_directory = root / "kb" / ".runtime" / "diagnostics" / "failure-stages"
+    receipt_directory = root / ".runtime" / "diagnostics" / "failure-stages"
     receipt = next(receipt_directory.glob("*.json"))
     before = receipt.read_bytes()
     receipt_directory.chmod(0o777)
@@ -303,7 +304,7 @@ def test_intake_failure_stage_handoff_fails_closed_on_unsafe_directory(
     write_runtime_preferences(root, {"diagnostics": {"mode": "errors-only"}})
     outside = tmp_path / "outside"
     outside.mkdir()
-    parent = root / "kb" / ".runtime" / "diagnostics"
+    parent = root / ".runtime" / "diagnostics"
     parent.mkdir(parents=True)
     (parent / "failure-stages").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(diagnostics_module.os, "getppid", diagnostics_module.os.getpid)
@@ -533,7 +534,7 @@ def test_failed_write_rolls_back_without_half_record(tmp_path: Path, monkeypatch
     assert not path.exists()
     operations = [
         load_yaml(item, default={})
-        for item in (root / "kb" / ".journal").glob("*.yaml")
+        for item in (root / ".journal").glob("*.yaml")
         if load_yaml(item, default={}).get("op_type") == "record-diagnostic-issue"
     ]
     assert len(operations) == 1
@@ -578,7 +579,7 @@ def test_config_owner_sets_normalized_diagnostics_in_one_root_transaction(
 
     assert config.main() == 0
     policy = diagnostics_policy(root, "paper-analyst")
-    raw = load_yaml(root / "kb" / "config" / "runtime-preferences.yaml", default={})
+    raw = load_yaml(root / "config" / "runtime-preferences.yaml", default={})
     assert policy["workspace_mode"] == "developer"
     assert policy["mode"] == "errors-only"
     assert policy["workspace_detail_level"] == "local-detailed"
@@ -590,7 +591,7 @@ def test_config_owner_sets_normalized_diagnostics_in_one_root_transaction(
     assert raw["diagnostics"]["local_only"] is True
     operations = [
         load_yaml(item, default={})
-        for item in (root / "kb" / ".journal").glob("*.yaml")
+        for item in (root / ".journal").glob("*.yaml")
         if load_yaml(item, default={}).get("op_type") == "set-diagnostics"
     ]
     assert len(operations) == 1
@@ -624,8 +625,8 @@ def test_diagnostics_owner_script_exposes_locked_operations(tmp_path: Path) -> N
         ]
     )
     assert apply_args.command == "apply-retrospective"
-    analysis_path = root / "kb/.runtime/diagnostic-analysis.json"
-    analysis_path.parent.mkdir(parents=True)
+    analysis_path = root / ".runtime/diagnostic-analysis.json"
+    analysis_path.parent.mkdir(parents=True, exist_ok=True)
     analysis_path.write_text(
         json.dumps(
             {
@@ -653,8 +654,8 @@ def test_owner_analysis_reader_rejects_leaf_swap_before_anchored_open(
         ".agents/skills/skill-evolution-advisor/scripts/diagnostics.py",
         "d1_diagnostics_owner_toc_script",
     )
-    analysis_path = root / "kb/.runtime/diagnostic-analysis.json"
-    analysis_path.parent.mkdir(parents=True)
+    analysis_path = root / ".runtime/diagnostic-analysis.json"
+    analysis_path.parent.mkdir(parents=True, exist_ok=True)
     safe_payload = {
         "explanation": "safe hypothesis",
         "reproduction": [],
@@ -709,7 +710,7 @@ def test_config_owner_accepts_detail_only_skill_override_without_rewriting_mode_
     )
 
     assert config.main() == 0
-    raw = load_yaml(root / "kb/config/runtime-preferences.yaml", default={})
+    raw = load_yaml(root / "config/runtime-preferences.yaml", default={})
     assert raw["diagnostics"]["per_skill"] == {"unit-analyst": "developer"}
     expected_skills = {
         "unit-analyst",

@@ -4,7 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 from research.common import append_list_item, load_list_document
 
@@ -26,7 +26,8 @@ def _load_orchestrator_module():
 
 def _make_workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
-    (root / ".agents" / "lib").mkdir(parents=True)
+    initialize_test_workspace(root)
+    (root / ".agents" / "lib").mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
     return root
 

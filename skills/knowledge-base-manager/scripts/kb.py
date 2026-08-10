@@ -75,6 +75,7 @@ from research.core import (
 from research.git_ops import dirty_kb_paths
 from research.journal import incomplete_ops, mutation_transaction
 from research.judgements import apply_judgement_rejection, require_judgement_snapshot
+from research.path_contract import TargetClass
 from research.paths import (
     KB_GITIGNORE_LINES,
     TEXT_REWRITE_SUFFIXES,
@@ -84,6 +85,7 @@ from research.paths import (
     runtime_preferences_path,
     user_root,
 )
+from research.workspace_layout import initialize_workspace_layout, layout_marker_path
 
 COMMAND_PREFIX = "${RESEARCH_PYTHON:-python3}"
 SCRIPT_BY_KIND = {
@@ -130,7 +132,7 @@ def _gitignore_needs_update(root: Path) -> bool:
 def workspace_creation_targets(root: Path) -> list[Path]:
     """Exact files that ensure_workspace would create or amend right now."""
     candidates = [
-        root / "kb" / "config" / "research-settings.md",
+        kb_root(root) / "config" / "research-settings.md",
         user_root(root) / "navigation.md",
         user_root(root) / "current-state.md",
         topic_taxonomy_path(root),
@@ -158,8 +160,8 @@ def index_mutation_targets(root: Path) -> list[Path]:
         [
             topic_taxonomy_path(root),
             candidate_pools_path(root),
-            root / "kb" / "index.yaml",
-            root / "kb" / "index.md",
+            kb_root(root) / "index.yaml",
+            kb_root(root) / "index.md",
             passage_search_cache_path(root),
         ]
     )
@@ -200,7 +202,7 @@ def compact_operation_targets(root: Path, plan: dict) -> list[Path]:
     for item in plan.get("items", []):
         if not isinstance(item, dict):
             continue
-        old_root = root / "kb" / "units" / f"{item.get('kind')}s" / str(item.get("old_id") or "")
+        old_root = kb_root(root) / "units" / f"{item.get('kind')}s" / str(item.get("old_id") or "")
         new_root = old_root.with_name(str(item.get("new_id") or ""))
         if old_root.exists():
             for old_path in old_root.rglob("*"):
@@ -230,6 +232,8 @@ def storage_sync_operation_targets(root: Path) -> list[Path]:
                 targets.append(path)
     for name in ("raw", "output"):
         source_root = root / name
+        if source_root.absolute() == (research / name).absolute():
+            continue
         if not source_root.exists():
             continue
         destination_root = research / name
@@ -366,7 +370,7 @@ def _prepare_review_batch_decision_bound(
         record,
         expected_snapshot=json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         owner="knowledge-base-manager",
-        path=path.relative_to(root).as_posix(),
+        path=rel(root, path),
         root=root,
     )
     candidate = copy.deepcopy(record)
@@ -643,8 +647,8 @@ def _audit_unit_records(root: Path) -> dict[str, tuple[dict, str]]:
             if not unit_id:
                 continue
             try:
-                subject = record_file.relative_to(root).as_posix()
-            except ValueError:
+                subject = rel(root, record_file)
+            except (SystemExit, ValueError):
                 subject = "kb"
             records[unit_id] = (payload, subject)
     return records
@@ -663,8 +667,8 @@ def _recomputed_program_link_findings(root: Path) -> list[dict]:
     state_by_program: dict[str, dict | None] = {}
     for program_id, state_file in _audit_program_state_files(root):
         try:
-            subject = state_file.relative_to(root).as_posix()
-        except ValueError:
+            subject = rel(root, state_file)
+        except (SystemExit, ValueError):
             subject = "kb"
         payload = load_yaml(state_file, default={})
         if not isinstance(payload, dict):
@@ -837,6 +841,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = project_root(PROJECT_ROOT, explicit_root=args.root)
+    if args.command == "init":
+        initialize_workspace_layout(root, PROJECT_ROOT)
     if args.command not in {"audit", "current-state", "resume", "undo", "restore"}:
         print_resolved_project_roots(root)
 
@@ -858,21 +864,40 @@ def main() -> int:
 
     if args.command == "init":
         warn_if_cwd_differs_from_project_root(root, command="kb.py init")
-        init_paths = mutation_targets(root, index_mutation_targets(root))
-        with mutation_transaction(root, "initialize_workspace", init_paths):
+        init_transaction_paths = mutation_targets(root, index_mutation_targets(root))
+        # The explicit init activates the tracked layout marker before the
+        # runtime can resolve canonical targets. The marker is immutable to
+        # business transactions, but it must join the exact Git checkpoint.
+        init_checkpoint_paths = _unique_paths(
+            [layout_marker_path(root), *init_transaction_paths]
+        )
+        with mutation_transaction(
+            root,
+            "initialize_workspace",
+            init_transaction_paths,
+            allowed_target_classes=(
+                TargetClass.CANONICAL_ARTIFACT,
+                TargetClass.OPERATIONAL_STATE,
+            ),
+        ):
             ensure_workspace(root)
             build_index(root)
         checkpoint_and_report(
             root,
             trigger="milestone",
             message="milestone: initialize knowledge workspace",
-            target_paths=init_paths,
+            target_paths=init_checkpoint_paths,
         )
         print("[ok] initialized kb core workspace")
         return 0
     if args.command == "storage-sync":
         storage_paths = mutation_targets(root, storage_sync_operation_targets(root))
-        with mutation_transaction(root, "storage_sync", storage_paths):
+        with mutation_transaction(
+            root,
+            "storage_sync",
+            storage_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             payload = sync_storage_layout(root)
             build_index(root)
@@ -956,7 +981,12 @@ def main() -> int:
         return 1 if report["status"] == "FAIL" else 0
     if args.command == "index":
         index_paths = mutation_targets(root, index_mutation_targets(root))
-        with mutation_transaction(root, "rebuild_index", index_paths):
+        with mutation_transaction(
+            root,
+            "rebuild_index",
+            index_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             yaml_path, md_path = build_index(root)
         print(f"[ok] rebuilt index: {yaml_path.relative_to(root)} and {md_path.relative_to(root)}")
@@ -966,7 +996,12 @@ def main() -> int:
         plan = compact_unit_ids(root, kind=args.kind, apply=False)
         if args.apply and plan.get("changed"):
             compact_paths = mutation_targets(root, compact_operation_targets(root, plan))
-            with mutation_transaction(root, "compact_unit_ids", compact_paths):
+            with mutation_transaction(
+                root,
+                "compact_unit_ids",
+                compact_paths,
+                allow_operational_state=True,
+            ):
                 payload = compact_unit_ids(root, kind=args.kind, apply=True)
         else:
             compact_paths = []
@@ -992,7 +1027,12 @@ def main() -> int:
         if not args.apply:
             return 0
         migration_paths = dataset_migration_targets(root, plan)
-        with mutation_transaction(root, "migrate_repo_to_dataset", migration_paths):
+        with mutation_transaction(
+            root,
+            "migrate_repo_to_dataset",
+            migration_paths,
+            allow_operational_state=True,
+        ):
             payload = migrate_repo_to_dataset(root, args.repo_id)
         checkpoint_and_report(
             root,
@@ -1016,7 +1056,12 @@ def main() -> int:
             root,
             [*governance_paths, passage_search_cache_path(root)],
         )
-        with mutation_transaction(root, "rebuild_governance", transaction_paths):
+        with mutation_transaction(
+            root,
+            "rebuild_governance",
+            transaction_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             index_yaml_path, index_md_path = build_index(root)
             taxonomy_path = topic_taxonomy_path(root)
@@ -1084,7 +1129,12 @@ def main() -> int:
             # items need per-item substance + evidence and are never confirmed here.
             fact_track, judgement_track = partition_review_tracks(hits)
             batch_paths = mutation_targets(root, record_targets(fact_track, root), index_mutation_targets(root))
-            with mutation_transaction(root, "batch_confirm_review_queue", batch_paths):
+            with mutation_transaction(
+                root,
+                "batch_confirm_review_queue",
+                batch_paths,
+                allow_operational_state=True,
+            ):
                 ensure_workspace(root)
                 written = apply_batch_confirmation(
                     root,
@@ -1128,7 +1178,12 @@ def main() -> int:
                 record, _ = locate_record(root, unit_id, kind=args.kind)
                 records.append(record)
         batch_paths = mutation_targets(root, record_targets(records, root), index_mutation_targets(root))
-        with mutation_transaction(root, "batch_confirm", batch_paths):
+        with mutation_transaction(
+            root,
+            "batch_confirm",
+            batch_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             if args.expected_snapshot:
                 if len(records) != 1:
@@ -1139,7 +1194,7 @@ def main() -> int:
                         current,
                         expected_snapshot=args.expected_snapshot,
                         owner="knowledge-base-manager",
-                        path=current_path.relative_to(root).as_posix(),
+                        path=rel(root, current_path),
                         root=root,
                     )
                 except ValueError as exc:
@@ -1169,7 +1224,12 @@ def main() -> int:
     if args.command == "refresh-schema":
         scoped_records = records_for_scope(root, unit_ids=args.id or None, kind=args.kind)
         operation_paths = mutation_targets(root, record_targets(scoped_records, root), index_mutation_targets(root))
-        with mutation_transaction(root, "refresh_record_schemas", operation_paths):
+        with mutation_transaction(
+            root,
+            "refresh_record_schemas",
+            operation_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             paths = refresh_record_schemas(root, unit_ids=args.id or None, kind=args.kind)
             build_index(root)
@@ -1185,7 +1245,12 @@ def main() -> int:
         scoped_kind = None if args.all or args.id else args.kind
         scoped_records = records_for_scope(root, unit_ids=args.id or None, kind=scoped_kind)
         operation_paths = mutation_targets(root, record_targets(scoped_records, root), index_mutation_targets(root))
-        with mutation_transaction(root, "govern_records", operation_paths):
+        with mutation_transaction(
+            root,
+            "govern_records",
+            operation_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             paths = govern_records(
                 root,
@@ -1216,7 +1281,12 @@ def main() -> int:
         from_record, _ = locate_record(root, args.from_id)
         locate_record(root, args.to_id)
         operation_paths = mutation_targets(root, record_targets([from_record], root), index_mutation_targets(root))
-        with mutation_transaction(root, "link_records", operation_paths):
+        with mutation_transaction(
+            root,
+            "link_records",
+            operation_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             source_locator = (
                 {"kind": args.source_locator_kind, "value": args.source_locator_value}
@@ -1249,7 +1319,12 @@ def main() -> int:
     if args.command == "promote":
         record, _ = locate_record(root, args.id)
         operation_paths = mutation_targets(root, record_targets([record], root), index_mutation_targets(root))
-        with mutation_transaction(root, "promote_record", operation_paths):
+        with mutation_transaction(
+            root,
+            "promote_record",
+            operation_paths,
+            allow_operational_state=True,
+        ):
             ensure_workspace(root)
             if args.expected_snapshot:
                 current, current_path = locate_record(root, args.id)
@@ -1258,7 +1333,7 @@ def main() -> int:
                         current,
                         expected_snapshot=args.expected_snapshot,
                         owner="knowledge-base-manager",
-                        path=current_path.relative_to(root).as_posix(),
+                        path=rel(root, current_path),
                         root=root,
                     )
                 except ValueError as exc:

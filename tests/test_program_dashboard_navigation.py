@@ -6,7 +6,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from repo_paths import MAINTAINER_NAVIGATOR_ROOT, REPO_ROOT
+from repo_paths import MAINTAINER_NAVIGATOR_ROOT, REPO_ROOT, initialize_test_workspace
 
 import pytest
 
@@ -36,7 +36,8 @@ def _load_script(skill: str, script_name: str, module_name: str):
 
 def _make_workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
-    (root / ".agents" / "lib").mkdir(parents=True)
+    initialize_test_workspace(root)
+    (root / ".agents" / "lib").mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
     return root
 
@@ -64,7 +65,7 @@ def test_navigator_current_state_renders_program_states() -> None:
 def test_navigator_projects_survey_freshness_without_mutation(tmp_path: Path, monkeypatch) -> None:
     navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_survey_freshness")
     root = _make_workspace(tmp_path)
-    survey_path = root / "kb" / "synthesis" / "robot-learning" / "survey.yaml"
+    survey_path = root / "synthesis" / "robot-learning" / "survey.yaml"
     write_yaml_if_changed(survey_path, {"slug": "robot-learning", "consumer_binding": {}})
     before = survey_path.read_bytes()
     monkeypatch.setattr(
@@ -87,8 +88,8 @@ def test_navigator_skips_survey_below_symlinked_directory(tmp_path: Path, monkey
     root = _make_workspace(tmp_path)
     outside = tmp_path / "outside-surveys"
     write_yaml_if_changed(outside / "survey.yaml", {"slug": "outside", "consumer_binding": {}})
-    synthesis = root / "kb" / "synthesis"
-    synthesis.mkdir(parents=True)
+    synthesis = root / "synthesis"
+    synthesis.mkdir(parents=True, exist_ok=True)
     (synthesis / "outside").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(
         navigate,
@@ -127,6 +128,8 @@ def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path
     with pytest.raises(ValueError, match="unified kb review snapshot"):
         review_learning(root, learning_id=pref["id"], status="confirmed")
     review_learning(root, learning_id=gotcha["id"], status="confirmed")
+    current_state = root / "user" / "current-state.md"
+    before = current_state.read_bytes()
     monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "current-state"])
 
     assert navigate.main() == 0
@@ -136,16 +139,16 @@ def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path
     assert "Prefer compact Chinese status pages." not in text
     assert "Do not skip confirmation gates." in text
     assert "Pending skill defects: 1" in text
-    assert not (root / "kb" / "user" / "current-state.md").exists()
+    assert current_state.read_bytes() == before
 
 
 def test_navigator_refresh_transactions_exact_pages_before_checkpoint(tmp_path: Path, monkeypatch) -> None:
     navigate = _load_script("research-navigator", "navigate.py", "navigator_script_for_refresh_transaction")
     root = _make_workspace(tmp_path)
     expected = [
-        root / "kb" / "user" / "current-state.md",
-        root / "kb" / "user" / "navigation.md",
-        root / "kb" / "user" / "reading-lists" / "current-reading.md",
+        root / "user" / "current-state.md",
+        root / "user" / "navigation.md",
+        root / "user" / "reading-lists" / "current-reading.md",
     ]
     events: list[str] = []
 
@@ -986,8 +989,8 @@ def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(t
                     "    raise SystemExit('Could not locate .agents/lib')",
                     "from research.common import find_project_root",
                     "root = find_project_root(Path(__file__).resolve())",
-                "(root / 'kb' / 'child-root.txt').parent.mkdir(parents=True, exist_ok=True)",
-                "(root / 'kb' / 'child-root.txt').write_text(str(root), encoding='utf-8')",
+                "(root / 'child-root.txt').parent.mkdir(parents=True, exist_ok=True)",
+                "(root / 'child-root.txt').write_text(str(root), encoding='utf-8')",
                 "print(root)",
             ]
         )
@@ -1013,8 +1016,8 @@ def test_orchestrator_auto_execute_passes_root_to_child_under_symlinked_agents(t
     exit_code = orchestrate.execute_auto_plan(sandbox_root, plan)
 
     assert exit_code == 0
-    assert (sandbox_root / "kb" / "child-root.txt").read_text(encoding="utf-8") == str(sandbox_root)
-    assert not (symlink_target / "kb" / "child-root.txt").exists()
+    assert (sandbox_root / "child-root.txt").read_text(encoding="utf-8") == str(sandbox_root)
+    assert not (symlink_target / "child-root.txt").exists()
 
 
 def test_is_user_confirmable_rejects_unverified_not_started_screening_paper() -> None:

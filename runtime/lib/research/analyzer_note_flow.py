@@ -31,6 +31,7 @@ from .git_ops import checkpoint_and_report as default_checkpoint_and_report
 from .index import build_index
 from .paths import (
     candidate_pools_path,
+    kb_root,
     passage_search_cache_path,
     project_root,
     rel,
@@ -119,8 +120,8 @@ class AnalyzerNoteFlow:
 
     def index_targets(self, root: Path) -> list[Path]:
         return [
-            root / "kb" / "index.yaml",
-            root / "kb" / "index.md",
+            kb_root(root) / "index.yaml",
+            kb_root(root) / "index.md",
             topic_taxonomy_path(root),
             candidate_pools_path(root),
             passage_search_cache_path(root),
@@ -141,6 +142,7 @@ class AnalyzerNoteFlow:
                 root,
                 f"{self.spec.preference_skill}:{op_name}",
                 list(targets),
+                allow_operational_state=True,
             ):
                 result = operation()
             pending = self._pending_checkpoint.get()

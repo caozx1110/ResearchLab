@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import argparse
 import importlib.util
 import json
@@ -14,6 +16,7 @@ from repo_paths import REPO_ROOT
 import pytest
 
 from research.prefs import ensure_workspace
+from research.path_contract import CANONICAL_ARTIFACT_TOP_LEVEL, OPERATIONAL_STATE_TOP_LEVEL
 
 
 def _load_intake_module():
@@ -69,6 +72,17 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     }
 
 
+def _owned_snapshot(root: Path) -> dict[str, bytes]:
+    owned = set(CANONICAL_ARTIFACT_TOP_LEVEL) | set(OPERATIONAL_STATE_TOP_LEVEL)
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+        and path.relative_to(root).parts
+        and path.relative_to(root).parts[0] in owned
+    }
+
+
 def test_consumed_prepared_token_cannot_be_replayed(
     tmp_path: Path,
     monkeypatch,
@@ -76,7 +90,7 @@ def test_consumed_prepared_token_cannot_be_replayed(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     prepared = intake._prepare_intake_snapshot(root, args)
     token = str(prepared["token"])
@@ -103,7 +117,7 @@ def test_expired_prepared_snapshot_rejects_without_workspace_write_and_cleans_up
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     prepared = intake._prepare_intake_snapshot(root, args)
     token = str(prepared["token"])
@@ -131,7 +145,7 @@ def test_symlink_swap_inside_prepared_stage_is_nofollow_and_zero_write(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     prepared = intake._prepare_intake_snapshot(root, args)
     token = str(prepared["token"])
@@ -160,7 +174,7 @@ def test_prepare_failure_leaves_no_workspace_or_external_stage(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     before = _snapshot(root)
     monkeypatch.setattr(
@@ -177,7 +191,7 @@ def test_prepare_failure_leaves_no_workspace_or_external_stage(
     assert not list(root.parent.glob(f".research-intake-{intake._prepared_scope(root)}-*"))
 
 
-def test_missing_receipt_on_uninitialized_workspace_is_zero_write(
+def test_uninitialized_workspace_refuses_before_write(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -190,7 +204,7 @@ def test_missing_receipt_on_uninitialized_workspace_is_zero_write(
     argv.extend(["--preference-selection-id", "prefsel-does-not-exist"])
     monkeypatch.setattr(sys, "argv", argv)
 
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(SystemExit, match="kb init"):
         intake.main()
 
     assert _snapshot(root) == before
@@ -205,12 +219,12 @@ def test_source_mutation_during_preference_resolution_is_caught_by_second_revali
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     args = _args(root)
     source = Path(args.source)
     prepared = intake._prepare_intake_snapshot(root, args)
     token = str(prepared["token"])
-    before_kb = _snapshot(root / "kb")
+    before_kb = _owned_snapshot(root)
     original = intake.resolve_intake_preferences
 
     def mutate_after_resolution(*call_args, **call_kwargs):
@@ -224,9 +238,9 @@ def test_source_mutation_during_preference_resolution_is_caught_by_second_revali
     with pytest.raises(SystemExit, match="changed after preparation"):
         intake.main()
 
-    assert _snapshot(root / "kb") == before_kb
+    assert _owned_snapshot(root) == before_kb
     assert not intake._prepared_dir(root, token).exists()
-    assert not list((root / "kb/units/blogs").glob("*/record.yaml"))
+    assert not list((root / "units/blogs").glob("*/record.yaml"))
 
 
 def test_snapshot_digest_enforces_file_entry_and_total_byte_budgets(

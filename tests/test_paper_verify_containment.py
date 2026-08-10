@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import os
 import sys
@@ -54,7 +56,7 @@ def _paper_record(paper_id: str) -> dict:
 
 
 def _setup_paper(root: Path, paper_id: str) -> Path:
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     write_record(root, _paper_record(paper_id))
     unit_root = record_path(root, "paper", paper_id).parent
     write_yaml_if_changed(

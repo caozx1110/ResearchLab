@@ -46,7 +46,7 @@ from research.diagnostics import (
     record_diagnostic_issue,
     review_diagnostic_issue,
 )
-from research.paths import project_root
+from research.paths import kb_root, project_root
 
 
 def _print_json(value: object) -> None:
@@ -107,8 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_private_analysis(root: Path, value: str) -> dict[str, object]:
-    resolved_root = root.resolve(strict=True)
-    runtime_root = resolved_root / "kb" / ".runtime"
+    resolved_root = root.absolute()
+    runtime_root = kb_root(resolved_root) / ".runtime"
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
         candidate = runtime_root / candidate
@@ -136,7 +136,7 @@ def _load_private_analysis(root: Path, value: str) -> dict[str, object]:
     descriptor = -1
     try:
         directory = os.open(resolved_root, directory_flags)
-        for part in ("kb", ".runtime", *relative.parts[:-1]):
+        for part in (".runtime", *relative.parts[:-1]):
             child = os.open(part, directory_flags, dir_fd=directory)
             os.close(directory)
             directory = child

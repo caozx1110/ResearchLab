@@ -153,7 +153,11 @@ _AUDIT_GIT_EXCLUDED_PREFIXES = (".journal/", ".runtime/", "raw/", "output/", "us
 
 
 def load_topic_taxonomy(project_root: Path) -> dict[str, Any]:
-    payload = load_yaml(topic_taxonomy_path(project_root), default={})
+    try:
+        path = topic_taxonomy_path(project_root)
+    except SystemExit:
+        path = None
+    payload = load_yaml(path, default={}) if path is not None else {}
     if not isinstance(payload, dict):
         payload = {}
     # Loading is a pure, deterministic projection.  A volatile default here
@@ -205,7 +209,11 @@ def write_topic_taxonomy(project_root: Path, payload: dict[str, Any]) -> Path:
 
 
 def load_candidate_pools(project_root: Path) -> dict[str, Any]:
-    payload = load_yaml(candidate_pools_path(project_root), default={})
+    try:
+        path = candidate_pools_path(project_root)
+    except SystemExit:
+        path = None
+    payload = load_yaml(path, default={}) if path is not None else {}
     if not isinstance(payload, dict):
         payload = {}
     normalized = _deep_fill_missing(payload, {**DEFAULT_CANDIDATE_POOLS, "generated_at": ""})
@@ -829,11 +837,9 @@ def _path_has_symlink_component(project_root: Path, path: Path) -> bool:
 
 
 def _project_relative_artifact(project_root: Path, path: Path) -> str:
-    root = Path(os.path.abspath(project_root))
-    candidate = Path(os.path.abspath(path))
     try:
-        return candidate.relative_to(root).as_posix()
-    except ValueError as exc:
+        return rel(project_root, Path(os.path.abspath(path)))
+    except (ValueError, SystemExit) as exc:
         raise PassageCacheError("passage artifact escapes the project root") from exc
 
 
@@ -1537,6 +1543,11 @@ def lint_workspace_integrity(project_root: Path, *, records: list[dict[str, Any]
 
 
 def lint_records(project_root: Path) -> tuple[str, list[str]]:
+    # Lint is a pure reader: an absent workspace is an empty, valid input and
+    # must not be initialized as a side effect. Existing roots still flow
+    # through the strict resolver and reject missing/invalid layout markers.
+    if not project_root.exists():
+        return "PASS", []
     issues: list[str] = []
     records = _safe_lint_records(project_root)
     for raw_record in records:
@@ -1880,7 +1891,34 @@ def _audit_counts(findings: list[dict[str, str]]) -> dict[str, int]:
 def audit_workspace(project_root: Path) -> dict[str, Any]:
     """Run deterministic, layered, byte-read-only mechanical KB health checks."""
     root = Path(project_root)
-    findings, unsafe_root = _symlink_findings(root)
+    if not root.exists() and not root.is_symlink():
+        findings: list[dict[str, str]] = []
+        unsafe_root = True
+    elif (root / "kb").is_symlink():
+        findings = [
+            _audit_finding(
+                "SECURITY_SYMLINK_ESCAPE",
+                "security",
+                "error",
+                "kb",
+                "The legacy KB root is a symlink and cannot define a trusted workspace boundary.",
+            )
+        ]
+        unsafe_root = True
+    else:
+        try:
+            findings, unsafe_root = _symlink_findings(root)
+        except SystemExit:
+            findings = [
+                _audit_finding(
+                    "SECURITY_WORKSPACE_LAYOUT_UNTRUSTED",
+                    "security",
+                    "error",
+                    "kb/config/workspace-layout.yaml",
+                    "The workspace layout is missing, unknown, or unsafe.",
+                )
+            ]
+            unsafe_root = True
     if not unsafe_root:
         _, lint_issues = lint_records(root)
         findings.extend(_lint_finding(issue) for issue in lint_issues)

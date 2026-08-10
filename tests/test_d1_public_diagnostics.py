@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 from research.diagnostics import load_diagnostic_detail, list_diagnostic_issues
 from research.prefs import write_runtime_preferences
@@ -83,7 +83,7 @@ class CaptureDependencyStub:
         if effective == "off":
             return None
 
-        issue_path = project_root / "kb" / "memory" / "skill-evolution" / "issues.yaml"
+        issue_path = project_root / "memory" / "skill-evolution" / "issues.yaml"
         if issue_path.exists():
             stored = json.loads(issue_path.read_text(encoding="utf-8"))
         else:
@@ -160,7 +160,7 @@ def test_enabled_failure_creates_one_issue_and_repeat_bumps(monkeypatch, tmp_pat
     assert kb.main(["--root", str(tmp_path), "status"]) == 9
     capsys.readouterr()
 
-    issue_path = tmp_path / "kb" / "memory" / "skill-evolution" / "issues.yaml"
+    issue_path = tmp_path / "memory" / "skill-evolution" / "issues.yaml"
     issues = json.loads(issue_path.read_text(encoding="utf-8"))["issues"]
     assert len(issues) == 1
     assert issues[0]["occurrences"] == 2
@@ -198,6 +198,7 @@ def test_capture_exception_preserves_original_exit_and_public_text(
     tmp_path: Path,
     capsys,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     kb = _load_kb_cli()
 
     def fail_capture(*args, **kwargs):
@@ -213,7 +214,7 @@ def test_capture_exception_preserves_original_exit_and_public_text(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "知识库状态暂时无法读取；详细诊断已保留给 Agent。\n"
-    protocol_text = (tmp_path / "kb" / ".runtime" / "failure.json").read_text(encoding="utf-8")
+    protocol_text = (tmp_path / ".runtime" / "failure.json").read_text(encoding="utf-8")
     protocol = json.loads(protocol_text)
     assert protocol["exit_code"] == 23
     assert protocol["details"]["diagnostic_events"] == [
@@ -229,6 +230,7 @@ def test_capture_exception_preserves_original_exit_and_public_text(
 
 def test_real_intake_child_hands_allowlisted_failure_stage_to_dispatcher(tmp_path: Path) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     write_runtime_preferences(
         tmp_path,
         {"diagnostics": {"mode": "errors-only", "detail_level": "local-detailed"}},
@@ -249,12 +251,12 @@ def test_real_intake_child_hands_allowlisted_failure_stage_to_dispatcher(tmp_pat
     assert issues[0]["error_class"] == "owner-nonzero-exit.source-recognition"
     detail = load_diagnostic_detail(tmp_path, issue_id=str(issues[0]["id"]))
     assert detail["occurrence_history"][-1]["observation"]["failure_stage"] == "source-recognition"
-    serialized = (tmp_path / "kb" / "memory" / "skill-evolution" / "issues.yaml").read_text(
+    serialized = (tmp_path / "memory" / "skill-evolution" / "issues.yaml").read_text(
         encoding="utf-8"
     )
     assert str(tmp_path) not in serialized
     assert list(
-        (tmp_path / "kb" / ".runtime" / "diagnostics" / "failure-stages").glob("*.json")
+        (tmp_path / ".runtime" / "diagnostics" / "failure-stages").glob("*.json")
     ) == []
 
 
@@ -263,6 +265,7 @@ def test_dispatcher_hands_only_closed_mechanical_detail_to_private_store(
     tmp_path: Path,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     write_runtime_preferences(
         tmp_path,
         {"diagnostics": {"mode": "errors-only", "detail_level": "local-detailed"}},
@@ -294,7 +297,7 @@ def test_dispatcher_hands_only_closed_mechanical_detail_to_private_store(
     assert latest["relevant_trace"] == []
     assert latest["safe_events"] == ["owner-nonzero-exit", "dispatcher-capture"]
     assert latest["output_excerpt"] == []
-    private_text = (tmp_path / "kb" / issue["detail_ref"]).read_text(encoding="utf-8")
+    private_text = (tmp_path / issue["detail_ref"]).read_text(encoding="utf-8")
     for forbidden in (
         "private paper text",
         "unsafe-value",
@@ -311,6 +314,7 @@ def test_developer_local_detail_emits_digest_bound_private_agent_action(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     write_runtime_preferences(
         tmp_path,
         {
@@ -350,7 +354,7 @@ def test_developer_local_detail_emits_digest_bound_private_agent_action(
         assert forbidden not in captured.out + captured.err
     issue = list_diagnostic_issues(tmp_path, skill="knowledge-base-manager")[0]
     protocol = json.loads(
-        (tmp_path / "kb" / ".runtime" / "failure.json").read_text(encoding="utf-8")
+        (tmp_path / ".runtime" / "failure.json").read_text(encoding="utf-8")
     )
     assert protocol["next_actions"] == [
         {
@@ -381,6 +385,7 @@ def test_noneligible_detail_states_emit_no_retrospective_action(
     ):
         root = tmp_path / f"case-{index}"
         kb = _load_kb_cli()
+        initialize_test_workspace(root)
         write_runtime_preferences(root, {"diagnostics": diagnostics})
         monkeypatch.setattr(kb.subprocess, "run", lambda *args, **kwargs: _child_result(31))
 
@@ -389,7 +394,7 @@ def test_noneligible_detail_states_emit_no_retrospective_action(
         ) == 31
 
         protocol = json.loads(
-            (root / "kb" / ".runtime" / "failure.json").read_text(encoding="utf-8")
+            (root / ".runtime" / "failure.json").read_text(encoding="utf-8")
         )
         assert protocol["next_actions"] == []
 
@@ -435,6 +440,7 @@ def test_doctor_agent_protocol_contains_only_policy_and_mechanical_audit_summary
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "current_runtime_capabilities",
@@ -462,7 +468,7 @@ def test_doctor_agent_protocol_contains_only_policy_and_mechanical_audit_summary
     output = capsys.readouterr().out
     for forbidden in ("developer", "WARN", "quality", "private-paper", "/private/path"):
         assert forbidden not in output
-    protocol_text = (tmp_path / "kb" / ".runtime" / "doctor.json").read_text(encoding="utf-8")
+    protocol_text = (tmp_path / ".runtime" / "doctor.json").read_text(encoding="utf-8")
     protocol = json.loads(protocol_text)
     assert protocol["details"]["diagnostics"] == {
         "audit": {

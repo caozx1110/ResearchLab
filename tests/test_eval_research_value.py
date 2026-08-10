@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 
@@ -39,8 +39,9 @@ def _write(path: Path, text: str) -> None:
 
 
 def _build_workspace(root: Path) -> None:
+    initialize_test_workspace(root)
     # one paper unit with empty core_content but real note + parse-cache text
-    unit = root / "kb" / "units" / "papers" / "p-smoke-0001"
+    unit = root / "units" / "papers" / "p-smoke-0001"
     _write(
         unit / "record.yaml",
         "id: p-smoke-0001\n"
@@ -78,7 +79,7 @@ def _build_workspace(root: Path) -> None:
     )
 
     # one program with state + workflow
-    prog = root / "kb" / "programs" / "smoke-prog"
+    prog = root / "programs" / "smoke-prog"
     _write(
         prog / "state.yaml",
         "id: smoke-prog-state\n"
@@ -94,7 +95,7 @@ def _build_workspace(root: Path) -> None:
 
     # dataset: one tier-1 unit fact, one program fact, one no-data control
     _write(
-        root / "kb" / "eval" / "research-value" / "dataset" / "smoke-prog.yaml",
+        root / "eval" / "research-value" / "dataset" / "smoke-prog.yaml",
         "dataset_id: smoke-prog\n"
         "program_id: smoke-prog\n"
         "questions:\n"

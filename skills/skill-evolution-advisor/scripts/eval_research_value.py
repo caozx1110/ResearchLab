@@ -96,8 +96,8 @@ STOPWORDS = {
     "which", "also", "e", "g", "eg", "ie", "et", "al", "s",
 }
 
-DATASET_DIRNAME = Path("kb") / "eval" / "research-value" / "dataset"
-REPORT_DIRNAME = Path("kb") / "eval" / "research-value" / "reports"
+DATASET_DIRNAME = Path("eval") / "research-value" / "dataset"
+REPORT_DIRNAME = Path("eval") / "research-value" / "reports"
 
 AXES = ["A", "B", "C", "D", "E", "F", "G"]
 AXIS_NAMES = {
@@ -288,7 +288,7 @@ def next_available_report_path(report_dir: Path, stamp: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def load_datasets(root: Path, program: str | None) -> list[dict]:
-    dataset_dir = root / DATASET_DIRNAME
+    dataset_dir = kb_root(root) / DATASET_DIRNAME
     datasets: list[dict] = []
     for path in sorted(dataset_dir.glob("*.yaml")):
         data = load_yaml(path, default={}) or {}
@@ -302,7 +302,7 @@ def load_datasets(root: Path, program: str | None) -> list[dict]:
 def evaluate(root: Path, program: str | None) -> dict:
     datasets = load_datasets(root, program)
     if not datasets:
-        raise SystemExit(f"No datasets found under {root / DATASET_DIRNAME}")
+        raise SystemExit("No research-value datasets are available in this workspace.")
 
     records = iter_records(root)
     record_by_id = {str(r.get("id") or ""): r for r in records}
@@ -664,9 +664,10 @@ def main() -> int:
             print(f"  papers with empty core_content: {gi['papers_empty_core_content']}/{gi['papers_total']}")
         return 0
 
+    canonical_root = root if args.no_write and not root.exists() else kb_root(root)
     meta = {
         "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "kb_head": git_short_head(root / "kb"),
+        "kb_head": git_short_head(canonical_root),
         "repo_head": git_short_head(root),
         "n_questions": len(result["questions"]),
         "programs": [str(p) for p in (
@@ -679,7 +680,7 @@ def main() -> int:
 
     if not args.no_write:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        report_dir = root / REPORT_DIRNAME
+        report_dir = kb_root(root) / REPORT_DIRNAME
         with mutation_transaction(root, "write-research-value-report", [report_dir]):
             report_path = next_available_report_path(report_dir, stamp)
             write_text_if_changed(report_path, report)

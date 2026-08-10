@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from repo_paths import initialize_test_workspace
 import research.prefs as prefs_module
 from research.journal import load_op
 from research.learnings import (
@@ -27,7 +28,8 @@ NOW = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
 
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
-    (root / ".agents").mkdir(parents=True)
+    initialize_test_workspace(root)
+    (root / ".agents").mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     return root
 
@@ -43,7 +45,7 @@ def _file_snapshot(root: Path) -> dict[str, bytes]:
 
 
 def _journal_entries(root: Path, op_type: str) -> list[dict]:
-    journal_root = root / "kb" / ".journal"
+    journal_root = root / ".journal"
     entries = [
         entry
         for entry in (load_yaml(path, default={}) for path in journal_root.glob("*.yaml"))

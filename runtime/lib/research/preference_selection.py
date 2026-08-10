@@ -1154,7 +1154,14 @@ def eligible_preferences(project_root: Path, *, skill: str, operation: str = "")
         (normalized_skill, normalized_operation), SKILL_ELIGIBILITY[normalized_skill]
     )
     selected: list[dict[str, object]] = []
-    for item in _base_catalog(project_root):
+    try:
+        catalog = _base_catalog(project_root)
+    except SystemExit:
+        legacy_root = Path(project_root) / "kb"
+        if legacy_root.is_symlink():
+            raise ValueError("preference workspace ancestor is an unsafe symlink")
+        catalog = []
+    for item in catalog:
         path = str(item.get("path") or "")
         if not _path_eligible(path, patterns):
             continue

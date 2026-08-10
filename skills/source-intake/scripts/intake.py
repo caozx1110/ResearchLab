@@ -73,7 +73,7 @@ from research.core import (
     write_record,
 )
 from research.surveys import literature_candidate_identity_digest
-from research.paths import passage_search_cache_path
+from research.paths import passage_search_cache_path, rel
 from research.records import snapshot_project_file
 from research.sources import literature_stage_snapshot
 from research.slugs import normalize_title
@@ -1421,12 +1421,12 @@ def _finish_prepared_record(
     if title != initial_title:
         record["title"] = title
     canonical_dir = unit_root(root, args.kind, str(record["id"]))
-    mirrored_canonical_dir = prepared_root / canonical_dir.relative_to(root)
     canonical_source_info = rebase_source_backup_paths(
-        prepared_root,
+        root,
         source_info,
         from_unit_dir=stage_dir,
-        to_unit_dir=mirrored_canonical_dir,
+        to_unit_dir=canonical_dir,
+        staging_root=prepared_root,
     )
     record["source"] = source_record_fields(canonical_source_info)
     record["status"] = "active"
@@ -1545,7 +1545,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                 source=source,
                 hash_value=human_snapshot.byte_sha256,
             )
-        stage_dir = prepared_root / "kb" / "intake-staging" / str(preliminary_record["id"])
+        stage_dir = prepared_root / ".runtime" / "intake-staging" / str(preliminary_record["id"])
         duplicate_record_relative = ""
         duplicate_record_binding_digest = ""
         superseded_record_relative = ""
@@ -1575,7 +1575,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                 kind=str(duplicate.get("kind") or args.kind),
                 fuzzy=False,
             )
-            superseded_record_relative = old_path.relative_to(root).as_posix()
+            superseded_record_relative = rel(root, old_path)
             superseded_record_binding_digest = _path_snapshot_digest(old_path)
             duplicate = None
         if duplicate is not None:
@@ -1585,7 +1585,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                 kind=str(duplicate.get("kind") or args.kind),
                 fuzzy=False,
             )
-            duplicate_record_relative = duplicate_record_path.relative_to(root).as_posix()
+            duplicate_record_relative = rel(root, duplicate_record_path)
             duplicate_record_binding_digest = _path_snapshot_digest(duplicate_record_path)
             stage_dir.mkdir(parents=True, exist_ok=False)
             canonical_source_info = {
@@ -1595,11 +1595,12 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
             title = str(record.get("title") or initial_title)
         else:
             source_info = backup_source(
-                prepared_root,
+                root,
                 args.kind,
                 str(preliminary_record["id"]),
                 source,
                 unit_dir=stage_dir,
+                staging_root=prepared_root,
             )
             if source_origin == HUMAN_NOTE_ORIGIN:
                 source_info["original_uri"] = _human_note_relative_path(
@@ -1608,7 +1609,12 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                 )
                 source_info["source_origin"] = HUMAN_NOTE_ORIGIN
             write_parse_cache(stage_dir, str(preliminary_record["id"]), source_info)
-            readiness_error = source_backup_error(prepared_root, args.kind, source_info)
+            readiness_error = source_backup_error(
+                root,
+                args.kind,
+                source_info,
+                staging_root=prepared_root,
+            )
             if readiness_error:
                 raise RuntimeError(readiness_error)
             parse_metadata = source_info.get("parse_metadata")
@@ -1650,7 +1656,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                     kind=str(byte_duplicate.get("kind") or args.kind),
                     fuzzy=False,
                 )
-                current_relative = old_path.relative_to(root).as_posix()
+                current_relative = rel(root, old_path)
                 current_digest = _path_snapshot_digest(old_path)
                 if superseded_record_relative and (
                     current_relative != superseded_record_relative
@@ -1667,7 +1673,7 @@ def _prepare_intake_snapshot(root: Path, args: argparse.Namespace) -> dict[str, 
                     kind=str(byte_duplicate.get("kind") or args.kind),
                     fuzzy=False,
                 )
-                duplicate_record_relative = duplicate_record_path.relative_to(root).as_posix()
+                duplicate_record_relative = rel(root, duplicate_record_path)
                 duplicate_record_binding_digest = _path_snapshot_digest(
                     duplicate_record_path
                 )
@@ -1845,7 +1851,7 @@ def _load_prepared_intake(
             kind=str(record.get("kind") or args.kind),
             fuzzy=False,
         )
-        if current_duplicate_path.relative_to(root).as_posix() != duplicate_record_relative:
+        if rel(root, current_duplicate_path) != duplicate_record_relative:
             raise SystemExit("Prepared intake duplicate record identity changed.")
         if _path_snapshot_digest(current_duplicate_path) != duplicate_record_binding_digest:
             raise SystemExit("Prepared intake duplicate record changed after preparation.")
@@ -1868,7 +1874,7 @@ def _load_prepared_intake(
             kind="paper",
             fuzzy=False,
         )
-        if current_superseded_path.relative_to(root).as_posix() != superseded_record_relative:
+        if rel(root, current_superseded_path) != superseded_record_relative:
             raise SystemExit("Prepared intake source-upgrade identity changed.")
         if _path_snapshot_digest(current_superseded_path) != superseded_record_binding_digest:
             raise SystemExit("Prepared intake source-upgrade record changed after preparation.")
@@ -2139,6 +2145,7 @@ def _run_batch_add(root: Path, raw_items: list[str]) -> dict[str, object]:
                 "source-intake-batch-add",
                 transaction_targets,
                 commit_guard=lambda: _batch_commit_guard(root, prepared_for_guard),
+                allow_operational_state=True,
             ):
                 ensure_workspace(root)
                 for item in ready:
@@ -2235,7 +2242,12 @@ def _materialize_staged_source(
         / str(record["id"])
     )
     rollback_targets = [canonical_dir, quarantine_root]
-    with mutation_transaction(root, "source-intake-materialize", rollback_targets):
+    with mutation_transaction(
+        root,
+        "source-intake-materialize",
+        rollback_targets,
+        allow_operational_state=True,
+    ):
         duplicate = detect_duplicate(
             root,
             kind,
@@ -2262,7 +2274,12 @@ def _materialize_staged_source(
 
 def _build_index_transaction(root: Path) -> tuple[Path, Path]:
     targets = _index_transaction_target_paths(root)
-    with mutation_transaction(root, "source-intake-build-index", targets):
+    with mutation_transaction(
+        root,
+        "source-intake-build-index",
+        targets,
+        allow_operational_state=True,
+    ):
         return build_index(root)
 
 
@@ -2477,7 +2494,11 @@ def _execute_intake_transaction(
     """Materialize and derive one intake as one undoable command transaction."""
     superseded_relative = str(prepared.get("superseded_record_relative") or "")
     superseded_digest = str(prepared.get("superseded_record_binding_digest") or "")
-    superseded_path = root / superseded_relative if superseded_relative else None
+    superseded_path = (
+        resolve_local_reference(root, superseded_relative)
+        if superseded_relative
+        else None
+    )
     superseded_id = Path(superseded_relative).parent.name if superseded_relative else ""
     targets = _intake_transaction_targets(
         root,
@@ -2495,6 +2516,7 @@ def _execute_intake_transaction(
             "source-intake-add",
             targets,
             commit_guard=lambda: _single_commit_guard(root, args, prepared),
+            allow_operational_state=True,
         ):
             _assert_expected_literature_stage_digest(root, args)
             superseded_record: dict | None = None
@@ -2592,7 +2614,7 @@ def main() -> int:
             stage_id=args.stage_id,
             note=args.note,
         )
-        print(f"[ok] wrote {path.relative_to(root)}")
+        print(f"[ok] wrote {rel(root, path)}")
         return 0
 
     if args.command == "show-stage":
@@ -2760,7 +2782,7 @@ def main() -> int:
         has_pdf = str(source_info.get("source_type") or "") == "pdf" or source.lower().endswith(
             ".pdf"
         )
-        print(f"[ok] created {path.relative_to(root)}")
+        print(f"[ok] created {rel(root, path)}")
         backup_status = str(source_info.get("backup_status") or "").strip()
         if backup_status:
             print(
@@ -2770,7 +2792,7 @@ def main() -> int:
             )
         if parse_cache_path is not None:
             print(
-                f"[source] parse-cache: {parse_cache_path.relative_to(root)} "
+                f"[source] parse-cache: {rel(root, parse_cache_path)} "
                 f"({len(source_info.get('parse_chunks') or [])} chunks)"
             )
         if backup_warning:
@@ -2780,7 +2802,10 @@ def main() -> int:
             print(f"[auto] {line}")
         checkpoint_targets = [unit_dir, *_index_target_paths(root), *created_seed_paths]
         if superseded_relative:
-            checkpoint_targets.append(root / superseded_relative)
+            superseded_checkpoint = resolve_local_reference(root, superseded_relative)
+            if superseded_checkpoint is None:
+                raise RuntimeError("Superseded source record disappeared before checkpoint.")
+            checkpoint_targets.append(superseded_checkpoint)
         if updated_stage_path is not None:
             checkpoint_targets.append(updated_stage_path)
         failure_stage = "checkpoint"

@@ -16,6 +16,12 @@ from .common import (
     skills_root as common_skills_root,
     slugify,
     write_text_if_changed,
+    workspace_root_roles,
+)
+from .path_contract import (
+    PathContractError,
+    logical_ref_to_physical_path,
+    physical_path_to_logical_ref,
 )
 
 UNIT_KIND_DIRS = {
@@ -36,27 +42,34 @@ PRIVATE_DIAGNOSTIC_PREFIX = "memory/skill-evolution/.private"
 
 
 KB_GITIGNORE_LINES = [
+    "# Installed workspace integrations",
+    "/.agents/",
+    "/.venv/",
+    "/.claude/",
+    "/bin/",
+    "/CLAUDE.md",
+    "",
     "# Runtime state",
-    ".runtime/",
+    "/.runtime/",
     "",
     "# Operation recovery journal",
-    ".journal/",
+    "/.journal/",
     "",
     "# Raw and exported artifacts",
-    "raw/",
-    "output/",
+    "/raw/",
+    "/output/",
     "",
     "# Generated browser workspace",
-    "user/kb/",
+    "/user/kb/",
     "",
     "# Private local diagnostics",
-    f"{PRIVATE_DIAGNOSTIC_PREFIX}/",
+    f"/{PRIVATE_DIAGNOSTIC_PREFIX}/",
     "",
     "# Generated Obsidian projection",
-    "obsidian/managed/",
+    "/obsidian/managed/",
     "",
     "# Local noise",
-    ".DS_Store",
+    "/.DS_Store",
 ]
 
 
@@ -147,7 +160,24 @@ def skills_root(start: Path | None = None, *, explicit_home: str | Path | None =
 
 
 def rel(project_root: Path, path: Path) -> str:
-    return path.resolve().relative_to(project_root.resolve()).as_posix()
+    roots = workspace_root_roles(project_root).roots
+    try:
+        return physical_path_to_logical_ref(roots, path)
+    except PathContractError as original:
+        # macOS exposes /var as an ancestor alias of /private/var. A strict
+        # reader may canonicalize the workspace capability while its caller
+        # retains the alias (or vice versa). Rebase only that root identity;
+        # never resolve artifact components or broaden containment.
+        try:
+            canonical_data_root = roots.data_root.resolve(strict=True)
+            candidate = Path(path).absolute()
+            relative = candidate.relative_to(canonical_data_root)
+        except (OSError, ValueError):
+            raise original
+        return physical_path_to_logical_ref(
+            roots,
+            roots.data_root / relative,
+        )
 
 
 def ensure_kb_gitignore(project_root: Path) -> Path:
@@ -194,6 +224,8 @@ def _legacy_storage_map(project_root: Path, value: str) -> tuple[Path | None, Pa
         except RuntimeError:
             resolved = path
         for name, legacy_root in legacy_roots.items():
+            if legacy_root == new_roots[name]:
+                continue
             try:
                 relative = resolved.relative_to(legacy_root)
             except ValueError:
@@ -219,6 +251,19 @@ def _legacy_storage_map(project_root: Path, value: str) -> tuple[Path | None, Pa
 
 
 def resolve_local_reference(project_root: Path, value: str) -> Path | None:
+    text = str(value or "").strip().replace("\\", "/")
+    if text.startswith("kb/"):
+        try:
+            candidate = logical_ref_to_physical_path(
+                workspace_root_roles(project_root).roots,
+                text,
+            )
+        except (ValueError, SystemExit):
+            return None
+        try:
+            return candidate.resolve() if candidate.exists() else None
+        except OSError:
+            return None
     original, remapped = _legacy_storage_map(project_root, value)
     candidates = [remapped, original]
     for candidate in candidates:

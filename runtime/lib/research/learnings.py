@@ -32,7 +32,11 @@ def learnings_path(project_root: Path) -> Path:
 
 
 def load_learnings(project_root: Path) -> list[dict[str, Any]]:
-    payload = load_yaml(learnings_path(project_root), default=[])
+    try:
+        path = learnings_path(project_root)
+    except SystemExit:
+        return []
+    payload = load_yaml(path, default=[])
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict)]
@@ -311,7 +315,10 @@ def discover_pending_preference_review_cards(
     limit: int = 2,
 ) -> list[dict[str, Any]]:
     """Pure-read projection of at most two grounded preference observations."""
-    captured = _strict_learning_snapshot(project_root)
+    try:
+        captured = _strict_learning_snapshot(project_root)
+    except SystemExit:
+        return []
     if captured is None:
         return []
     snapshot, entries = captured

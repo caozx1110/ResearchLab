@@ -25,6 +25,7 @@ from .paper_draft_runtime import (
     paper_draft_section_currentness_violations,
     paper_draft_section_path,
 )
+from .paths import kb_root, rel
 from .confirm import has_complete_confirmation_receipt
 from .evidence import (
     CONFIRMABLE_CONTENT_FIELDS,
@@ -160,8 +161,8 @@ class BoundJudgementBatchSnapshot:
             return None
         if supplied_path:
             try:
-                canonical_path = bound.path.relative_to(self.root).as_posix()
-            except ValueError:
+                canonical_path = rel(self.root, bound.path)
+            except (SystemExit, ValueError):
                 return None
             if supplied_path != canonical_path:
                 return None
@@ -211,10 +212,10 @@ def _safe_relative_path(root: Path, path: Path) -> str:
     resolved = trusted_project_path(
         resolved_root,
         path,
-        allowed_root=resolved_root / "kb",
+        allowed_root=kb_root(resolved_root),
         require="file",
     )
-    return resolved.relative_to(resolved_root).as_posix()
+    return rel(resolved_root, resolved)
 
 
 def _unit_path(root: Path, unit_id: str) -> Path | None:
@@ -237,21 +238,21 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
     expected_owner = UNIT_OWNER_BY_KIND.get(kind)
     expected_path: Path | None = None
     if expected_owner:
-        expected_path = root / "kb" / "units" / UNIT_DIR_BY_KIND[kind] / subject_id / "record.yaml"
+        expected_path = kb_root(root) / "units" / UNIT_DIR_BY_KIND[kind] / subject_id / "record.yaml"
     elif kind == "program_decision":
         program_id = _text(record.get("program_id"))
         expected_owner = "research-orchestrator"
         if not program_id:
             violations.append("program decision has no program_id")
         else:
-            expected_path = root / "kb" / "programs" / program_id / "workflow" / "decisions.yaml"
+            expected_path = kb_root(root) / "programs" / program_id / "workflow" / "decisions.yaml"
     elif kind == "idea_discussion_conclusion":
         idea_id = _text(record.get("idea_id"))
         expected_owner = "idea-workbench"
         if not idea_id:
             violations.append("discussion conclusion has no idea_id")
         else:
-            expected_path = root / "kb" / "units" / "ideas" / idea_id / "discussion-judgements.yaml"
+            expected_path = kb_root(root) / "units" / "ideas" / idea_id / "discussion-judgements.yaml"
     elif kind == "method_selection":
         program_id = _text(record.get("program_id"))
         idea_id = _text(record.get("idea_id"))
@@ -261,7 +262,7 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
         else:
             if subject_id != f"method-selection:{program_id}:{idea_id}":
                 violations.append("method selection id does not match program_id/idea_id")
-            expected_path = root / "kb" / "programs" / program_id / "design" / f"{idea_id}-repo-choice.yaml"
+            expected_path = kb_root(root) / "programs" / program_id / "design" / f"{idea_id}-repo-choice.yaml"
         payload = record.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         selection = payload.get("method_selection")
@@ -310,13 +311,13 @@ def _identity_violations(root: Path, record: dict[str, Any], owner: str, artifac
             safe_artifact = trusted_project_path(
                 root,
                 artifact_path,
-                allowed_root=root / "kb",
+                allowed_root=kb_root(root),
                 require="file",
             )
             safe_expected = trusted_project_path(
                 root,
                 expected_path,
-                allowed_root=root / "kb",
+                allowed_root=kb_root(root),
                 require="file",
             )
         except ValueError:
@@ -351,7 +352,7 @@ def _verification_root(root: Path, record: dict[str, Any], artifact_path: Path) 
     return trusted_project_path(
         root,
         artifact_path.parent,
-        allowed_root=root / "kb",
+        allowed_root=kb_root(root),
         require="dir",
     )
 
@@ -427,8 +428,18 @@ def _judgement_confirmation_matches(
     record_snapshot: CanonicalRecordSnapshot | None = None,
     bound_snapshot: BoundJudgementSnapshot | None = None,
 ) -> bool:
-    root = root.absolute()
-    artifact_path = artifact_path.absolute()
+    lexical_root = Path(root).absolute()
+    canonical_root = _canonical_project_root(lexical_root)
+    artifact_path = Path(artifact_path).absolute()
+    try:
+        artifact_relative = artifact_path.relative_to(lexical_root)
+    except ValueError:
+        pass
+    else:
+        # Canonicalize only the workspace-root alias. Do not resolve artifact
+        # components here: downstream strict readers must still reject symlinks.
+        artifact_path = canonical_root / artifact_relative
+    root = canonical_root
     valid = True
     if bound_snapshot is not None:
         if bound_snapshot.record != record or bound_snapshot.path != artifact_path:
@@ -643,7 +654,7 @@ def _safe_candidate_file(root: Path, path: Path) -> Path | None:
         return trusted_project_path(
             root,
             path,
-            allowed_root=root / "kb",
+            allowed_root=kb_root(root),
             require="file",
         )
     except ValueError:
@@ -696,16 +707,16 @@ class _SideJudgementDiscoverySnapshot:
 
 
 def _side_container_specs(root: Path) -> Iterable[tuple[Path, str, bool]]:
-    for path in sorted((root / "kb" / "programs").glob("*/workflow/decisions.yaml")):
+    for path in sorted((kb_root(root) / "programs").glob("*/workflow/decisions.yaml")):
         yield path, "research-orchestrator", True
-    for path in sorted((root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml")):
+    for path in sorted((kb_root(root) / "units" / "ideas").glob("*/discussion-judgements.yaml")):
         yield path, "idea-workbench", True
-    for path in sorted((root / "kb" / "programs").glob("*/design/*-repo-choice.yaml")):
+    for path in sorted((kb_root(root) / "programs").glob("*/design/*-repo-choice.yaml")):
         yield path, "method-designer", False
-    for path in sorted((root / "kb" / "synthesis").glob("*/*.yaml")):
+    for path in sorted((kb_root(root) / "synthesis").glob("*/*.yaml")):
         if not path.name.endswith("-fill.yaml"):
             yield path, "literature-synthesizer", False
-    for path in sorted((root / "kb" / "programs").glob("*/reports/paper-draft/sections/*.yaml")):
+    for path in sorted((kb_root(root) / "programs").glob("*/reports/paper-draft/sections/*.yaml")):
         yield path, "report-author", False
 
 
@@ -725,8 +736,8 @@ def _capture_side_judgement_discovery(
     specs = list(_side_container_specs(root))
     for path, owner, is_list in specs:
         try:
-            relative = path.absolute().relative_to(root).as_posix()
-        except ValueError:
+            relative = rel(root, path.absolute())
+        except (SystemExit, ValueError):
             continue
         file_snapshot = snapshot_project_file(root, relative)
         if file_snapshot is None:
@@ -808,6 +819,12 @@ def discover_pending_judgements(root: str | Path) -> list[dict[str, Any]]:
     if not lexical_root.exists() and not lexical_root.is_symlink():
         return []
     project_root = _canonical_project_root(root)
+    try:
+        kb_root(project_root)
+    except SystemExit:
+        # Status/review discovery is a pure rescue read.  A missing or unsafe
+        # layout yields no trusted cards and never creates workspace state.
+        return []
     unit_candidates: list[dict[str, Any]] = []
     for snapshot in iter_canonical_record_snapshots(project_root):
         try:
@@ -940,7 +957,7 @@ def discover_stale_confirmed_surveys(root: str | Path) -> list[dict[str, Any]]:
                     "kind": "survey_judgement",
                     "id": subject_id,
                     "owner": bound.owner,
-                    "path": bound.path.relative_to(project_root).as_posix(),
+                    "path": rel(project_root, bound.path),
                 },
                 "slug": _text(record.get("slug")),
                 "mode": _text(record.get("mode")),
@@ -1087,7 +1104,11 @@ def require_judgement_snapshot(
         raise ValueError("review snapshot binding is incomplete")
     if root is not None and judgement_claim_present:
         project_root = Path(root).resolve()
-        artifact_path = (project_root / path).resolve()
+        artifact_snapshot = snapshot_project_file(project_root, path)
+        if artifact_snapshot is None:
+            raise ValueError("review subject no longer has its canonical owner or path identity")
+        artifact_path = artifact_snapshot.path
+        canonical_path = artifact_snapshot.relative_path
         identity_owner = UNIT_OWNER_BY_KIND.get(_text(record.get("kind")), owner)
         if _identity_violations(project_root, record, identity_owner, artifact_path):
             raise ValueError("review subject no longer has its canonical owner or path identity")
@@ -1106,7 +1127,11 @@ def require_judgement_snapshot(
             current_binding = dict(current_binding) if isinstance(current_binding, dict) else {}
             if current_binding != expected:
                 raise ValueError("review snapshot is stale; show the current judgement before applying a decision")
-    record_binding = judgement_snapshot_binding(record, owner=owner, path=path)
+    record_binding = judgement_snapshot_binding(
+        record,
+        owner=owner,
+        path=canonical_path if root is not None and judgement_claim_present else path,
+    )
     expected_record_binding = dict(expected)
     expected_record_binding.pop("source_digest", None)
     if record_binding != expected_record_binding:
@@ -1126,7 +1151,7 @@ def _bound_unit_from_snapshot(
     if record is None:
         raise ValueError(f"bound judgement is not a valid canonical record: {subject_kind}:{subject_id}")
     owner = UNIT_OWNER_BY_KIND[subject_kind]
-    relative_path = snapshot.path.relative_to(project_root).as_posix()
+    relative_path = rel(project_root, snapshot.path)
     supplied_owner = _text(subject.get("owner")) if subject is not None else ""
     supplied_path = _text(subject.get("path")) if subject is not None else ""
     if supplied_owner and supplied_owner != owner:
@@ -1166,7 +1191,7 @@ def _bound_side_from_candidate(
     subject_id = _text(record.get("id"))
     owner = SIDE_OWNER_BY_KIND[subject_kind]
     container = selected.container
-    relative_path = container.path.relative_to(project_root).as_posix()
+    relative_path = rel(project_root, container.path)
     supplied_owner = _text(subject.get("owner")) if subject is not None else ""
     supplied_path = _text(subject.get("path")) if subject is not None else ""
     if supplied_owner and supplied_owner != owner:
@@ -1228,20 +1253,23 @@ def load_bound_judgement_container_snapshot(
     relative = Path(relative_path)
     if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise ValueError("side judgement container path is not canonical")
-    target_path = project_root / relative
+    target_relative = relative.as_posix()
+    discovery = _capture_side_judgement_discovery(project_root)
     matching_specs = [
         spec
         for spec in _side_container_specs(project_root)
-        if spec[0].absolute() == target_path.absolute() and spec[1] == owner
+        if rel(project_root, spec[0].absolute()) == target_relative and spec[1] == owner
     ]
     if len(matching_specs) != 1 or SIDE_OWNER_BY_KIND.get(expected_kind) != owner:
         raise ValueError("side judgement container is not canonical for its owner")
-    discovery = _capture_side_judgement_discovery(project_root)
     target_containers = [
-        container for container in discovery.containers if container.path == target_path.absolute()
+        container
+        for container in discovery.containers
+        if container.file.relative_path == target_relative
     ]
     if len(target_containers) != 1:
         raise ValueError("side judgement container is not a strict YAML mapping")
+    target_path = target_containers[0].path
     valid_candidates = [
         candidate
         for candidate in discovery.candidates
@@ -1430,34 +1458,28 @@ def load_bound_judgement(root: str | Path, subject: Any) -> tuple[dict[str, Any]
     relative = _text(subject.get("path"))
     candidates: list[Path] = []
     if relative:
-        candidate = project_root / relative
-        candidates.append(
-            trusted_project_path(
-                project_root,
-                candidate,
-                allowed_root=project_root / "kb",
-                require="file",
-            )
-        )
+        candidate_snapshot = snapshot_project_file(project_root, relative)
+        if candidate_snapshot is not None:
+            candidates.append(candidate_snapshot.path)
     unit = _unit_path(project_root, subject_id)
     if unit is not None:
         candidates.append(unit)
     if subject_kind == "program_decision":
-        candidates.extend((project_root / "kb" / "programs").glob("*/workflow/decisions.yaml"))
+        candidates.extend((kb_root(project_root) / "programs").glob("*/workflow/decisions.yaml"))
     if subject_kind == "idea_discussion_conclusion":
-        candidates.extend((project_root / "kb" / "units" / "ideas").glob("*/discussion-judgements.yaml"))
+        candidates.extend((kb_root(project_root) / "units" / "ideas").glob("*/discussion-judgements.yaml"))
     if subject_kind == "survey_judgement":
-        candidates.extend((project_root / "kb" / "synthesis").glob("*/*.yaml"))
+        candidates.extend((kb_root(project_root) / "synthesis").glob("*/*.yaml"))
     if subject_kind == "paper_draft_section":
         candidates.extend(
-            (project_root / "kb" / "programs").glob("*/reports/paper-draft/sections/*.yaml")
+            (kb_root(project_root) / "programs").glob("*/reports/paper-draft/sections/*.yaml")
         )
     for path in candidates:
         try:
             safe_path = trusted_project_path(
                 project_root,
                 path,
-                allowed_root=project_root / "kb",
+                allowed_root=kb_root(project_root),
                 require="file",
             )
         except ValueError:

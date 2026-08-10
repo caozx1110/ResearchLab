@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import argparse
 import importlib.util
 import json
@@ -12,7 +14,7 @@ import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, record_path, write_record
-from research.paths import config_root, runtime_preferences_path
+from research.paths import config_root, rel, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences, ensure_workspace
 
@@ -253,7 +255,7 @@ def test_intake_old_preference_receipt_rejects_scope_replay_without_unit_write(
     canonical_pools: list[str],
 ) -> None:
     intake = _load_intake_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     args = argparse.Namespace(
         kind="paper",
         maturity="lightweight",
@@ -275,7 +277,7 @@ def test_intake_old_preference_receipt_rejects_scope_replay_without_unit_write(
     )
     if mutation == "authorization":
         args.user_authorization = "Keep candidate B."
-    units_root = tmp_path / "kb/units"
+    units_root = tmp_path / "units"
     before_units = {
         path.relative_to(units_root): path.read_bytes()
         for path in units_root.rglob("*")
@@ -322,7 +324,7 @@ def test_all_intake_kinds_reject_wrong_receipts_without_workspace_writes(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     write_yaml_if_changed(
         config_root(root) / "user-profile.yaml",
         {"constraints": ["no cloud upload"]},
@@ -365,7 +367,7 @@ def test_all_intake_kinds_reject_wrong_receipts_without_workspace_writes(
 
     assert _workspace_snapshot(root) == before
     assert not intake._prepared_dir(root, token).exists()
-    assert not list((root / "kb").glob(".runtime/intake-staging/**/*"))
+    assert not list(root.glob(".runtime/intake-staging/**/*"))
 
 
 def test_no_receipt_uses_only_hard_fallback_and_persists_value_free_digests(
@@ -375,7 +377,7 @@ def test_no_receipt_uses_only_hard_fallback_and_persists_value_free_digests(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     hard_text = "never upload private source material"
     write_yaml_if_changed(
         config_root(root) / "user-profile.yaml",
@@ -390,7 +392,7 @@ def test_no_receipt_uses_only_hard_fallback_and_persists_value_free_digests(
 
     assert intake.main() == 0
 
-    records = list((root / "kb/units/papers").glob("*/record.yaml"))
+    records = list((root / "units/papers").glob("*/record.yaml"))
     assert len(records) == 1
     record = load_yaml(records[0])
     state = record["payload"]["preference_context"]
@@ -461,7 +463,7 @@ def test_prepared_intake_mutation_rejects_old_receipt_before_promotion(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     source = root / "blog.md"
     source.write_text("# Blog\n\nOriginal bytes.\n", encoding="utf-8")
     args = _prepared_args(root, "blog", source)
@@ -493,7 +495,7 @@ def test_prepared_intake_mutation_rejects_old_receipt_before_promotion(
 
     assert _workspace_snapshot(root) == before
     assert not intake._prepared_dir(root, token).exists()
-    assert not list((root / "kb/units/blogs").glob("*/record.yaml"))
+    assert not list((root / "units/blogs").glob("*/record.yaml"))
 
 
 def test_ordinary_success_and_duplicate_keep_one_canonical_unit_and_cleanup(
@@ -503,7 +505,7 @@ def test_ordinary_success_and_duplicate_keep_one_canonical_unit_and_cleanup(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     source = root / "blog.md"
     source.write_text("# Blog\n\nStable duplicate bytes.\n", encoding="utf-8")
     args = _prepared_args(root, "blog", source)
@@ -511,7 +513,7 @@ def test_ordinary_success_and_duplicate_keep_one_canonical_unit_and_cleanup(
     monkeypatch.setattr(sys, "argv", _add_argv(root, args))
 
     assert intake.main() == 0
-    records = list((root / "kb/units/blogs").glob("*/record.yaml"))
+    records = list((root / "units/blogs").glob("*/record.yaml"))
     assert len(records) == 1
     record = load_yaml(records[0])
     assert record["source"]["file_hash"]
@@ -521,7 +523,7 @@ def test_ordinary_success_and_duplicate_keep_one_canonical_unit_and_cleanup(
 
     assert intake.main() == 0
 
-    assert len(list((root / "kb/units/blogs").glob("*/record.yaml"))) == 1
+    assert len(list((root / "units/blogs").glob("*/record.yaml"))) == 1
     assert _workspace_snapshot(root) == before_duplicate
     assert not list(root.parent.glob(f".research-intake-{intake._prepared_scope(root)}-*"))
 
@@ -533,7 +535,7 @@ def test_complete_local_paper_revision_archives_degraded_unconfirmed_unit_withou
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     title = "Ordered Action Tokens for Robot Learning"
     old = default_record(
         "paper",
@@ -553,11 +555,11 @@ def test_complete_local_paper_revision_archives_degraded_unconfirmed_unit_withou
     old["source"].update(
         {
             "backup_kind": "file",
-            "backup_paths": [old_original.relative_to(root).as_posix()],
+            "backup_paths": [rel(root, old_original)],
             "file_hash": intake.hashlib.sha256(old_original.read_bytes()).hexdigest(),
             "backup_status": "degraded",
             "source_type": "arxiv-html",
-            "markdown_path": old_document.relative_to(root).as_posix(),
+            "markdown_path": rel(root, old_document),
             "materialization": {"status": "degraded"},
         }
     )
@@ -602,7 +604,7 @@ def test_complete_local_paper_revision_archives_degraded_unconfirmed_unit_withou
 
     assert intake.main() == 0
 
-    records = [load_yaml(path) for path in (root / "kb/units/papers").glob("*/record.yaml")]
+    records = [load_yaml(path) for path in (root / "units/papers").glob("*/record.yaml")]
     assert len(records) == 2
     archived = next(record for record in records if record["id"] == old["id"])
     current = next(record for record in records if record["id"] != old["id"])
@@ -659,7 +661,7 @@ def test_verified_degraded_paper_requires_decision_before_source_revision(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     title = "Protected Degraded Paper"
     old = default_record(
         "paper",
@@ -678,7 +680,7 @@ def test_verified_degraded_paper_requires_decision_before_source_revision(
     old["source"].update(
         {
             "backup_kind": "file",
-            "backup_paths": [original.relative_to(root).as_posix()],
+            "backup_paths": [rel(root, original)],
             "file_hash": intake.hashlib.sha256(original.read_bytes()).hexdigest(),
             "backup_status": "degraded",
             "source_type": "arxiv-html",
@@ -716,7 +718,7 @@ def test_external_stage_is_cleaned_when_post_validation_execution_raises(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     source = root / "dataset.md"
     source.write_text("# Dataset\n\nSchema.\n", encoding="utf-8")
     args = _prepared_args(root, "dataset", source)
@@ -744,7 +746,7 @@ def test_prepared_token_concurrent_consumer_fails_closed_without_deleting_owner_
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     source = root / "blog.md"
     source.write_text("# Blog\n\nConcurrent snapshot.\n", encoding="utf-8")
     args = _prepared_args(root, "blog", source)
@@ -779,7 +781,7 @@ def test_safe_fixture_failure_matrix_reports_stable_intake_stage(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     source = root / "safe-fixture.md"
     source.write_text("# Safe fixture\n\nSynthetic public test bytes.\n", encoding="utf-8")
     args = _prepared_args(root, "blog", source)
@@ -846,7 +848,7 @@ def test_safe_fixture_failure_matrix_reports_stable_intake_stage(
             "failure_stage": expected_stage,
         }
     ]
-    records = list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))
+    records = list((root / "units" / "blogs").glob("*/record.yaml"))
     if expected_stage == "checkpoint":
         # A post-commit checkpoint failure must be distinguishable because
         # retrying it as a failed canonical transaction would be unsafe.
@@ -864,7 +866,7 @@ def test_batch_post_checkpoint_internal_failure_falls_back_to_unknown_stage(
     intake = _load_intake_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     source = root / "batch-blog.md"
     source.write_text("# Batch blog\n\nSafe fixture bytes.\n", encoding="utf-8")
     checkpointed: list[bool] = []
@@ -885,4 +887,4 @@ def test_batch_post_checkpoint_internal_failure_falls_back_to_unknown_stage(
 
     assert checkpointed == [True]
     assert intake._intake_failure_stage(raised.value, default="missing") == "unknown"
-    assert len(list((root / "kb" / "units" / "blogs").glob("*/record.yaml"))) == 1
+    assert len(list((root / "units" / "blogs").glob("*/record.yaml"))) == 1

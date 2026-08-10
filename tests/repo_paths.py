@@ -37,3 +37,16 @@ def source_path(relative_path: str | Path) -> Path:
     if path.parts[:3] == (".agents", "lib", "research"):
         return RESEARCH_LIB_ROOT.joinpath(*path.parts[3:])
     return REPO_ROOT / path
+
+
+def initialize_test_workspace(root: str | Path) -> Path:
+    """Activate and seed an isolated workspace through the explicit test owner."""
+
+    workspace = Path(root).absolute()
+    workspace.mkdir(parents=True, exist_ok=True)
+    from research.workspace_layout import initialize_workspace_layout
+    from research.prefs import ensure_workspace
+
+    initialize_workspace_layout(workspace, REPO_ROOT)
+    ensure_workspace(workspace)
+    return workspace

@@ -27,6 +27,7 @@ from research.diagnostics import (
 from research.git_ops import dirty_kb_paths, ensure_kb_git_repo, git_checkpoint
 from research.prefs import load_runtime_preferences, write_runtime_preferences
 from research.yaml_io import load_yaml, write_yaml_if_changed
+from repo_paths import initialize_test_workspace
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -37,6 +38,7 @@ def _workspace(tmp_path: Path) -> Path:
         json.dumps({"source_commit": "a" * 40}),
         encoding="utf-8",
     )
+    initialize_test_workspace(root)
     return root
 
 
@@ -106,7 +108,7 @@ def test_detail_policy_is_orthogonal_and_legacy_scalar_modes_survive_round_trip(
 ) -> None:
     root = _workspace(tmp_path)
     write_yaml_if_changed(
-        root / "kb/config/runtime-preferences.yaml",
+        root / "config/runtime-preferences.yaml",
         {
             "diagnostics": {
                 "mode": "developer",
@@ -131,7 +133,7 @@ def test_detail_policy_is_orthogonal_and_legacy_scalar_modes_survive_round_trip(
     assert unit["persist_local_detail"] is True
 
     write_runtime_preferences(root, {})
-    stored = load_yaml(root / "kb/config/runtime-preferences.yaml")
+    stored = load_yaml(root / "config/runtime-preferences.yaml")
     assert stored["diagnostics"]["per_skill"] == {"source-intake": "errors-only"}
     assert stored["diagnostics"]["per_skill_detail_level"] == {
         "source-intake": "redacted",
@@ -239,7 +241,7 @@ def test_closed_envelope_rejects_arbitrary_output_and_falls_back_to_redacted_sum
     }
     issue = _capture(root, envelope=unsafe)
     assert "detail_ref" not in issue
-    assert not (root / "kb/memory/skill-evolution/.private").exists()
+    assert not (root / "memory/skill-evolution/.private").exists()
     serialized = diagnostics_path(root).read_text(encoding="utf-8")
     assert "raw user" not in serialized
     assert "secret-value" not in serialized
@@ -566,7 +568,7 @@ def test_detail_creation_uses_atomic_no_clobber_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
-    (root / "kb/memory/skill-evolution").mkdir(parents=True)
+    (root / "memory/skill-evolution").mkdir(parents=True)
     directory = diagnostics._open_detail_directory(root, create=True)
     os.close(directory)
     issue_id = "diag-create-race"
@@ -620,7 +622,7 @@ def test_detail_update_rechecks_linked_bytes_before_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
-    (root / "kb/memory/skill-evolution").mkdir(parents=True)
+    (root / "memory/skill-evolution").mkdir(parents=True)
     directory = diagnostics._open_detail_directory(root, create=True)
     os.close(directory)
     issue_id = "diag-update-race"
@@ -680,7 +682,7 @@ def test_detail_update_preserves_backup_changed_during_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
-    (root / "kb/memory/skill-evolution").mkdir(parents=True)
+    (root / "memory/skill-evolution").mkdir(parents=True)
     directory = diagnostics._open_detail_directory(root, create=True)
     os.close(directory)
     issue_id = "diag-update-post-race"
@@ -801,7 +803,7 @@ def test_owner_failure_stage_conflict_falls_back_to_redacted_summary(
 
     assert issue["failure_stage"] == "source-recognition"
     assert "detail_ref" not in issue
-    assert not (root / "kb/memory/skill-evolution/.private").exists()
+    assert not (root / "memory/skill-evolution/.private").exists()
 
 
 def test_detail_signature_splits_stable_roots_and_merges_equivalent_occurrences(
@@ -894,11 +896,11 @@ def test_detail_create_fault_leaves_one_redacted_fallback_without_dangling_ref(
     issue = _capture(root, envelope=_envelope())
     assert "detail_ref" not in issue
     assert list_diagnostic_issues(root) == [issue]
-    detail_root = root / "kb/memory/skill-evolution/.private/details"
+    detail_root = root / "memory/skill-evolution/.private/details"
     assert list(detail_root.glob("*.yaml")) == []
     operations = [
         load_yaml(path, default={})
-        for path in (root / "kb/.journal").glob("*.yaml")
+        for path in (root / ".journal").glob("*.yaml")
         if load_yaml(path, default={}).get("op_type") == "record-diagnostic-issue"
     ]
     assert sorted(item["state"] for item in operations) == ["abort", "commit"]
@@ -909,7 +911,7 @@ def test_unsafe_private_store_fails_soft_without_writing_outside(tmp_path: Path)
     _enable_detail(root)
     outside = tmp_path / "outside"
     outside.mkdir()
-    private_parent = root / "kb/memory/skill-evolution"
+    private_parent = root / "memory/skill-evolution"
     private_parent.mkdir(parents=True, exist_ok=True)
     (private_parent / ".private").symlink_to(outside, target_is_directory=True)
 
@@ -949,11 +951,11 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
         [
             "git",
             "-C",
-            str(root / "kb"),
+            str(root),
             "add",
             "-f",
             "--",
-            detail_path.relative_to(root / "kb").as_posix(),
+            detail_path.relative_to(root).as_posix(),
         ],
         check=True,
     )
@@ -965,14 +967,14 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
         target_paths=[detail_path],
     )
     assert result["status"] == "no-changes"
-    public_memory = root / "kb/memory/public-checkpoint.md"
+    public_memory = root / "memory/public-checkpoint.md"
     public_memory.write_text("public\n", encoding="utf-8")
 
     ancestor_result = git_checkpoint(
         root,
         "checkpoint public memory without private diagnostics",
         auto_init=False,
-        target_paths=[root / "kb/memory"],
+        target_paths=[root / "memory"],
     )
     assert ancestor_result["committed"] is True
     assert all("/.private/" not in f"/{path}" for path in ancestor_result["files"])
@@ -980,7 +982,7 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
         [
             "git",
             "-C",
-            str(root / "kb"),
+            str(root),
             "ls-tree",
             "-r",
             "--name-only",
@@ -994,20 +996,20 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
     ).stdout
     assert private_in_head == ""
 
-    public_skill_memory = root / "kb/memory/skill-evolution/public-checkpoint.md"
+    public_skill_memory = root / "memory/skill-evolution/public-checkpoint.md"
     public_skill_memory.write_text("public skill memory\n", encoding="utf-8")
     nested_ancestor_result = git_checkpoint(
         root,
         "checkpoint public skill memory without private diagnostics",
         auto_init=False,
-        target_paths=[root / "kb/memory/skill-evolution"],
+        target_paths=[root / "memory/skill-evolution"],
     )
     assert nested_ancestor_result["files"] == ["memory/skill-evolution/public-checkpoint.md"]
     private_in_head = subprocess.run(
         [
             "git",
             "-C",
-            str(root / "kb"),
+            str(root),
             "ls-tree",
             "-r",
             "--name-only",
@@ -1024,7 +1026,7 @@ def test_private_detail_is_hard_excluded_from_dirty_discovery_and_checkpoint(
 
 def test_private_detail_creation_survives_restrictive_umask(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
-    (root / "kb/memory/skill-evolution").mkdir(parents=True, exist_ok=True)
+    (root / "memory/skill-evolution").mkdir(parents=True, exist_ok=True)
 
     previous_umask = os.umask(0o700)
     try:
@@ -1033,14 +1035,14 @@ def test_private_detail_creation_survives_restrictive_umask(tmp_path: Path) -> N
         os.umask(previous_umask)
     os.close(descriptor)
 
-    private_root = root / "kb/memory/skill-evolution/.private"
+    private_root = root / "memory/skill-evolution/.private"
     assert stat.S_IMODE(private_root.stat().st_mode) == 0o700
     assert stat.S_IMODE((private_root / "details").stat().st_mode) == 0o700
 
 
 def test_private_detail_file_survives_restrictive_umask(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
-    (root / "kb/memory/skill-evolution").mkdir(parents=True, exist_ok=True)
+    (root / "memory/skill-evolution").mkdir(parents=True, exist_ok=True)
     directory = diagnostics._open_detail_directory(root, create=True)
     os.close(directory)
 
@@ -1060,7 +1062,7 @@ def test_private_detail_creation_rejects_displaced_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
-    parent = root / "kb/memory/skill-evolution"
+    parent = root / "memory/skill-evolution"
     parent.mkdir(parents=True, exist_ok=True)
     displaced = parent / ".private-created"
     original_open = os.open
@@ -1088,7 +1090,7 @@ def test_private_detail_creation_rejects_replacement_after_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
-    parent = root / "kb/memory/skill-evolution"
+    parent = root / "memory/skill-evolution"
     parent.mkdir(parents=True, exist_ok=True)
     displaced = parent / ".private-created"
     original_open = os.open
@@ -1123,7 +1125,7 @@ def test_private_detail_write_falls_back_when_visible_directory_moves_after_open
 ) -> None:
     root = _workspace(tmp_path)
     _enable_detail(root)
-    details = root / "kb/memory/skill-evolution/.private/details"
+    details = root / "memory/skill-evolution/.private/details"
     displaced = details.parent / "details-displaced"
     original_open = os.open
     original_write = diagnostics._write_detail_bytes
@@ -1340,7 +1342,7 @@ def test_private_detail_creation_closes_child_when_identity_check_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
-    (root / "kb/memory/skill-evolution").mkdir(parents=True, exist_ok=True)
+    (root / "memory/skill-evolution").mkdir(parents=True, exist_ok=True)
     original_open = os.open
     original_fstat = os.fstat
     created_child = -1

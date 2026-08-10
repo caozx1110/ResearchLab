@@ -33,6 +33,7 @@ from research.common import (  # type: ignore
     load_yaml,
     normalize_list,
     preferred_runtime_record,
+    research_root as runtime_research_root,
     utc_now_iso,
 )
 from research.core import (  # type: ignore
@@ -73,13 +74,7 @@ def add_browser_project_root_argument(parser: ArgumentParser) -> None:
 
 
 def research_root(project_root: Path) -> Path:
-    kb_root = project_root / "kb"
-    legacy_root = project_root / "doc" / "research"
-    if kb_root.exists():
-        return kb_root
-    if legacy_root.exists():
-        return legacy_root
-    return kb_root
+    return runtime_research_root(project_root)
 
 
 def kb_root(project_root: Path) -> Path:

@@ -15,6 +15,8 @@ is deterministic and offline. Blog parse-caches use HTML section/anchor locators
 """
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -232,6 +234,7 @@ def test_evidence_digest_has_section_locators(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 def test_note_fill_legit_evidence_validates_and_clears_substance_gate(tmp_path: Path) -> None:
     blog = _load_blog_module()
+    initialize_test_workspace(tmp_path)
     record = _blog_record("b-fill-legit-1")
     unit_dir = record_path(tmp_path, "blog", record["id"]).parent
     unit_dir.mkdir(parents=True)
@@ -333,7 +336,7 @@ def _run_cli(blog, monkeypatch, root: Path, *argv: str) -> int:
 
 def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     blog = _load_blog_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     blog_id = "b-e2e-000001"
     record = _blog_record(blog_id)
     write_record(tmp_path, record)

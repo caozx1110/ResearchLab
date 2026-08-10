@@ -68,7 +68,7 @@ def _index(entries: list[dict], *, settings: dict | None = None) -> dict:
 
 
 def _materialize_index(root: Path, index: dict) -> tuple[Path, Path]:
-    unit_root = root / "kb" / "units" / "papers" / PAPER_ID
+    unit_root = root / "units" / "papers" / PAPER_ID
     source = unit_root / "source" / "document.pdf"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"source-pdf")

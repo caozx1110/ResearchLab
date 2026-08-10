@@ -59,7 +59,7 @@ INTAKE_FAILURE_STAGES = frozenset(
     }
 )
 
-_FAILURE_STAGE_RECEIPT_DIRECTORY = "kb/.runtime/diagnostics/failure-stages"
+_FAILURE_STAGE_RECEIPT_DIRECTORY = ".runtime/diagnostics/failure-stages"
 _FAILURE_STAGE_RECEIPT_SCHEMA = 1
 _FAILURE_STAGE_RECEIPT_MAX_BYTES = 1024
 _FAILURE_STAGE_RECEIPT_TTL_SECONDS = 120
@@ -89,7 +89,7 @@ _SAFE_IDENTIFIER_RE = re.compile(r"[^a-z0-9_.-]+")
 _AUTOMATIC_RUNTIME_CAPTURE = object()
 
 _DETAIL_SCHEMA = "skill-diagnostic-detail/v1"
-_DETAIL_DIRECTORY = "kb/memory/skill-evolution/.private/details"
+_DETAIL_DIRECTORY = "memory/skill-evolution/.private/details"
 _DETAIL_REF_PREFIX = "memory/skill-evolution/.private/details"
 _DETAIL_MAX_BYTES = 64 * 1024
 _DETAIL_HISTORY_LIMIT = 5
@@ -144,14 +144,19 @@ _DETAIL_EVENT_CODES = frozenset(
     }
 )
 def diagnostics_path(project_root: Path) -> Path:
-    return kb_root(project_root) / "memory" / "skill-evolution" / "issues.yaml"
+    # This builder is also used by zero-write rescue/read paths before a
+    # workspace has been initialized.  Mutations still pass through the
+    # layout-aware journal boundary; a missing marker never authorizes writes.
+    lexical_root = Path(os.path.abspath(os.fspath(project_root)))
+    return lexical_root / "memory" / "skill-evolution" / "issues.yaml"
 
 
 def diagnostic_detail_path(project_root: Path, issue_id: str) -> Path:
     normalized = _safe_identifier(issue_id)
     if not normalized or normalized != str(issue_id or "").strip().lower():
         raise ValueError("diagnostic issue id must be one safe identifier")
-    return kb_root(project_root) / _DETAIL_REF_PREFIX / f"{normalized}.yaml"
+    lexical_root = Path(os.path.abspath(os.fspath(project_root)))
+    return lexical_root / _DETAIL_REF_PREFIX / f"{normalized}.yaml"
 
 
 def _integer(value: Any, default: int, *, minimum: int) -> int:
@@ -1340,6 +1345,10 @@ def _serialize_detail_document(document: Mapping[str, Any]) -> bytes:
 
 
 def _load_document(project_root: Path) -> dict[str, Any]:
+    try:
+        kb_root(project_root)
+    except SystemExit:
+        return {"schema_version": 1, "generated_by": "skill-evolution-advisor", "issues": []}
     payload = load_yaml(diagnostics_path(project_root), default={})
     if not isinstance(payload, dict):
         return {"schema_version": 1, "generated_by": "skill-evolution-advisor", "issues": []}

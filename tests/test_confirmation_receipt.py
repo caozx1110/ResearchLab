@@ -9,6 +9,7 @@ from research.evidence import (
 from research.confirm import apply_confirmation
 from research.paths import unit_root
 from research.records import normalize_record_schema
+from repo_paths import initialize_test_workspace
 
 
 def _record() -> dict:
@@ -49,6 +50,7 @@ def _record() -> dict:
 
 
 def _write_verified_artifact(project_root) -> None:
+    initialize_test_workspace(project_root)
     root = unit_root(project_root, "paper", "p-receipt-123456")
     root.mkdir(parents=True, exist_ok=True)
     (root / "parse-cache.yaml").write_text("source text with exact quote included", encoding="utf-8")

@@ -6,9 +6,15 @@ import re
 from pathlib import Path
 
 import pytest
+from repo_paths import initialize_test_workspace
 
 import research.core as core
 import research.sources as sources
+
+
+@pytest.fixture(autouse=True)
+def _active_workspace(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
 
 
 _PNG_BYTES = base64.b64decode(

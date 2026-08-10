@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import hashlib
 import importlib.util
 import os
@@ -31,12 +33,12 @@ def _experiment_module():
 def _new_experiment(tmp_path: Path, module, name: str) -> tuple[Path, Path, dict]:
     root = tmp_path / f"workspace-{name}"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     plan = module.build_parser().parse_args(
         ["plan", "--title", f"allocator {name}", "--program-id", "program-r12"]
     )
     assert module._dispatch(plan, root) == 0
-    record_path = next((root / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((root / "units" / "experiments").glob("*/record.yaml"))
     return root, record_path, load_yaml(record_path)
 
 
@@ -375,7 +377,12 @@ def test_transaction_recovery_removes_exclusive_run_after_later_failure(
 
     monkeypatch.setattr(module, "append_list_item", fail_after_run_write)
     with pytest.raises(RuntimeError, match="injected post-run failure"):
-        with module.command_mutation(root, "experiment-workbench:log-run", targets):
+        with module.command_mutation(
+            root,
+            "experiment-workbench:log-run",
+            targets,
+            allow_operational_state=True,
+        ):
             module._dispatch(args, root)
 
     assert not (record_path.parent / "runs").exists()

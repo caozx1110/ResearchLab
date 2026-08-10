@@ -11,6 +11,11 @@ All notable changes to this project will be documented here. The format follows 
 - Source comments and analyzer scaffold/note explanations no longer cite retired private design section numbers; current contracts are self-contained or point to tracked `docs/DESIGN.md` and `SCHEMAS.md` anchors, without changing the evidence or confirmation semantics.
 - Obsidian refresh now treats every manifest-owned regular `.base` as a fully rebuildable renderer output: manual sort, filter, query, comments, invalid YAML, and other Base bytes are discarded in favor of renderer defaults. Symlinks, special files, unowned paths, managed Markdown drift, canonical data, human areas, and `.obsidian/` remain protected.
 - Optional diagnostics now separate capture mode from persistence detail. Existing `off | errors-only | developer` and scalar per-skill mode settings remain compatible, while explicit `redacted | local-detailed` workspace/per-skill policy can retain a bounded private mechanical artifact and digest-bound Agent hypothesis. Private detail is transactionally bound to the redacted index, hardened against unsafe paths, and excluded from public output, export, versioning, sync, install, and update.
+- Fresh explicit `kb init` workspaces now use the workspace root as the physical canonical data root, activated by a tracked byte-canonical layout marker. Persisted `kb/...` artifact identities remain unchanged, KB Git uses exact root pathspecs, and install/update/reinstall never silently migrate a legacy physical `kb/` workspace.
+
+### Security
+
+- Runtime owners, journal/recovery/CAS, strict readers, indexes, diagnostics, and checkpoints share one root-role resolver. Missing or ambiguous markers, legacy/outer-Git layouts, reserved or unknown targets, collisions, symlinks, special nodes, and incomplete journals fail closed before business mutation; `.journal` and `.runtime` require explicit owner opt-in.
 
 ## [0.2.0-rc.7] - 2026-07-29
 

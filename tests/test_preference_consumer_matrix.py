@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import argparse
 import copy
 import importlib.util
@@ -13,7 +15,7 @@ from repo_paths import REPO_ROOT
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.paths import config_root, runtime_preferences_path
+from research.paths import config_root, resolve_local_reference, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.core import default_record, record_path
 from research.prefs import default_runtime_preferences, ensure_workspace
@@ -50,7 +52,7 @@ def _script(skill: str, filename: str):
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     write_yaml_if_changed(
         config_root(root) / "user-profile.yaml",
         {
@@ -122,7 +124,7 @@ def _paper_args(operation: str, *, phase: str = "", input_path: str = "") -> arg
 def _paper_workspace(tmp_path: Path) -> tuple[Path, dict[str, object], Path, Path]:
     root = _workspace(tmp_path)
     paper_id = "p-preference-matrix"
-    unit_root = root / "kb" / "units" / "papers" / paper_id
+    unit_root = root / "units" / "papers" / paper_id
     unit_root.mkdir(parents=True, exist_ok=True)
     source_path = unit_root / "source.txt"
     source_path.write_text("immutable paper source bytes", encoding="utf-8")
@@ -356,7 +358,10 @@ def test_literature_synthesis_persists_selected_binding_and_hard_fallback(
         as_of="2026-07-24",
         preference_context=preference_context,
     )
-    state = load_yaml(root / str(binding["state_path"]))
+    assert str(binding["state_path"]).startswith("kb/synthesis/")
+    state_path = resolve_local_reference(root, str(binding["state_path"]))
+    assert state_path is not None
+    state = load_yaml(state_path)
     assert state["stages"][0]["inputs"][0]["context"] == preference_context
 
     with pytest.raises(SystemExit, match="another task"):
@@ -410,7 +415,7 @@ def test_experiment_consumers_bind_each_operation_and_neutral_keeps_hard_context
         selected_paths={"learned.experiment-format"},
     )
     assert experiment._dispatch(plan_args, root) == 0
-    record_path = next((root / "kb/units/experiments").glob("*/record.yaml"))
+    record_path = next((root / "units/experiments").glob("*/record.yaml"))
     record = load_yaml(record_path)
     experiment_id = str(record["id"])
     assert record["payload"]["preference_contexts"]["plan"]["selection_binding"]["selection_id"] == plan_args.preference_selection_id
@@ -558,7 +563,7 @@ def test_experiment_operation_consumed_input_mutation_matrix_rejects_old_selecti
 ) -> None:
     experiment = _script("experiment-workbench", "experiment.py")
     root = _workspace(tmp_path)
-    unit_root = root / "kb/units/experiments/x-preference-matrix"
+    unit_root = root / "units/experiments/x-preference-matrix"
     unit_root.mkdir(parents=True)
     artifact = root / "artifact.bin"
     artifact.write_bytes(b"artifact-v1")
@@ -717,7 +722,7 @@ def test_experiment_stale_receipts_write_no_run_follow_up_or_diagnosis_artifacts
         ["plan", "--title", "stale write gate", "--program-id", "program-stale"]
     )
     assert experiment._dispatch(plan, root) == 0
-    path = next((root / "kb/units/experiments").glob("*/record.yaml"))
+    path = next((root / "units/experiments").glob("*/record.yaml"))
     record = load_yaml(path)
     experiment_id = str(record["id"])
     artifact = root / "bound-artifact.txt"
@@ -801,7 +806,7 @@ def test_diagnosis_claims_outside_workspace_fail_closed_without_writes(
         ["plan", "--title", "claims containment", "--program-id", "program-containment"]
     )
     assert experiment._dispatch(plan, root) == 0
-    path = next((root / "kb/units/experiments").glob("*/record.yaml"))
+    path = next((root / "units/experiments").glob("*/record.yaml"))
     record = load_yaml(path)
     outside = tmp_path / "outside-claims.yaml"
     write_yaml_if_changed(outside, {"claims": []})
@@ -829,7 +834,7 @@ def test_report_operation_matrix_rejects_event_replay(
     report = _script("report-author", "report.py")
     root = _workspace(tmp_path)
     program_id = "program-report-matrix"
-    events_path = root / "kb" / "programs" / program_id / "workflow" / "reporting-events.yaml"
+    events_path = root / "programs" / program_id / "workflow" / "reporting-events.yaml"
     write_yaml_if_changed(
         events_path,
         {
@@ -892,11 +897,11 @@ def test_report_operation_matrix_rejects_event_replay(
             preference_operation=operation,
         )
     output_by_operation = {
-        "weekly": root / "kb" / "programs" / program_id / "reports" / "weekly.md",
-        "stage-summary": root / "kb" / "programs" / program_id / "reports" / "stage-summary.md",
-        "outline": root / "kb" / "programs" / program_id / "reports" / "paper-outline.md",
-        "ppt-materials": root / "kb" / "user" / "report-materials" / f"{program_id}-ppt-materials.md",
-        "writing-materials": root / "kb" / "user" / "report-materials" / f"{program_id}-writing-materials.md",
+        "weekly": root / "programs" / program_id / "reports" / "weekly.md",
+        "stage-summary": root / "programs" / program_id / "reports" / "stage-summary.md",
+        "outline": root / "programs" / program_id / "reports" / "paper-outline.md",
+        "ppt-materials": root / "user" / "report-materials" / f"{program_id}-ppt-materials.md",
+        "writing-materials": root / "user" / "report-materials" / f"{program_id}-writing-materials.md",
     }
     output_path = output_by_operation[operation]
     monkeypatch.setattr(
@@ -1199,7 +1204,7 @@ def test_paper_verify_same_path_byte_change_fails_before_canonical_write(
     assert (unit_root / "parse-cache.yaml").read_bytes() == cache_before
     assert (canonical_output.read_bytes() if canonical_output.exists() else None) == output_before
 
-    receipt = (root / "kb" / "config" / "effective-preferences" / f"{selection_id}.yaml").read_text(
+    receipt = (root / "config" / "effective-preferences" / f"{selection_id}.yaml").read_text(
         encoding="utf-8"
     )
     assert str(root) not in receipt

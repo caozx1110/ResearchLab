@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .common import file_sha256, load_list_document, program_reporting_events_path, utc_now_iso
+from .common import file_sha256, load_list_document, program_reporting_events_path, utc_now_iso, workspace_root_roles
 from .journal import mutation_transaction
-from .paths import kb_root, search_stage_path, source_search_root, synthesis_root, units_root
+from .path_contract import logical_ref_to_physical_path
+from .paths import kb_root, rel, search_stage_path, source_search_root, synthesis_root, units_root
 from .preference_selection import (
     canonical_digest,
     operation_contract,
@@ -232,7 +233,7 @@ def _append_completion_events_unlocked(
                     ),
                     "stage": "monitoring",
                     "tags": ["monitor", "completed"],
-                    "artifacts": [run_path(project_root, str(run.get("id") or "")).relative_to(project_root).as_posix()],
+                    "artifacts": [rel(project_root, run_path(project_root, str(run.get("id") or "")))],
                     "idea_ids": [],
                     "paper_ids": [],
                     "repo_ids": [],
@@ -1364,9 +1365,15 @@ def _trusted_referenced_file(
     allowed_roots: tuple[Path, ...],
 ) -> Path:
     text = _bounded_text(relative_path, field="reference path", required=True, limit=1000)
-    candidate = project_root / text
     if Path(text).is_absolute():
         raise SystemExit("Research monitor references must be project-relative.")
+    try:
+        candidate = logical_ref_to_physical_path(
+            workspace_root_roles(project_root).roots,
+            text,
+        )
+    except ValueError:
+        raise SystemExit("Research monitor references must use canonical kb/... paths.") from None
     for allowed in allowed_roots:
         try:
             candidate.resolve(strict=False).relative_to(allowed.resolve())
@@ -1426,7 +1433,7 @@ def _sanitize_survey_binding(project_root: Path, value: Any) -> dict[str, str]:
     )
     if SHA256_RE.fullmatch(digest) is None or file_sha256(path) != digest:
         raise SystemExit("Research monitor survey binding digest is stale or invalid.")
-    return {"path": path.relative_to(project_root).as_posix(), "byte_sha256": digest}
+    return {"path": rel(project_root, path), "byte_sha256": digest}
 
 
 def _validate_new_subscription_target(
@@ -1536,7 +1543,7 @@ def _sanitize_reference(project_root: Path, value: Any) -> dict[str, Any]:
         raise SystemExit("Research monitor artifact quote is not verbatim evidence.")
     return {
         "kind": kind,
-        "path": path.relative_to(project_root).as_posix(),
+        "path": rel(project_root, path),
         "byte_sha256": digest,
         "locator": _bounded_text(value.get("locator"), field="artifact locator", required=True, limit=500),
         "quote": quote,

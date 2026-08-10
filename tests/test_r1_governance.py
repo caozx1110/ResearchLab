@@ -18,6 +18,12 @@ from research.records import normalize_record_schema, trusted_claim_source_roots
 from research.core import default_record, locate_record, write_record
 from research.common import load_yaml, write_yaml_if_changed
 from research.judgements import discover_pending_judgements
+from research.workspace_layout import initialize_workspace_layout
+
+
+@pytest.fixture(autouse=True)
+def _activate_workspace_root(tmp_path: Path) -> None:
+    initialize_workspace_layout(tmp_path, REPO_ROOT)
 
 
 def _load_skill_script(skill: str, script_name: str):
@@ -223,7 +229,7 @@ def test_r1_orchestrator_status_is_byte_identical_read(tmp_path: Path, monkeypat
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     program_id = "legacy-status"
-    program = tmp_path / "kb" / "programs" / program_id
+    program = tmp_path / "programs" / program_id
     workflow = program / "workflow"
     workflow.mkdir(parents=True)
     write_yaml_if_changed(program / "state.yaml", {"program_id": program_id, "stage": "review"})
@@ -232,7 +238,7 @@ def test_r1_orchestrator_status_is_byte_identical_read(tmp_path: Path, monkeypat
         "- Confirmation: `confirmed`\n",
         encoding="utf-8",
     )
-    before = _tree_bytes(tmp_path / "kb")
+    before = _tree_bytes(tmp_path)
     monkeypatch.setattr(orchestrate, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(
         sys,
@@ -241,13 +247,12 @@ def test_r1_orchestrator_status_is_byte_identical_read(tmp_path: Path, monkeypat
     )
 
     assert orchestrate.main() == 0
-    assert _tree_bytes(tmp_path / "kb") == before
+    assert _tree_bytes(tmp_path) == before
     assert "'decisions': 1" in capsys.readouterr().out
 
 
 def test_r1_program_mutation_abort_journals_extra_target(tmp_path: Path) -> None:
     orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
-    (tmp_path / "kb").mkdir()
     program_id = "fault-scope"
     query_path = orchestrate.program_root(tmp_path, program_id) / "queries" / "fault.md"
 
@@ -258,11 +263,11 @@ def test_r1_program_mutation_abort_journals_extra_target(tmp_path: Path) -> None
             query_path.write_text("partial\n", encoding="utf-8")
             raise RuntimeError("injected")
 
-    entries = [load_yaml(path) for path in (tmp_path / "kb" / ".journal").glob("*.yaml")]
+    entries = [load_yaml(path) for path in (tmp_path / ".journal").glob("*.yaml")]
     aborted = [entry for entry in entries if entry.get("op_type") == "research-orchestrator:fault-test"]
     assert len(aborted) == 1 and aborted[0]["state"] == "abort"
-    assert query_path.relative_to(tmp_path / "kb").as_posix() in aborted[0]["target_paths"]
-    assert orchestrate.decisions_path(tmp_path, program_id).relative_to(tmp_path / "kb").as_posix() in aborted[0]["target_paths"]
+    assert query_path.relative_to(tmp_path).as_posix() in aborted[0]["target_paths"]
+    assert orchestrate.decisions_path(tmp_path, program_id).relative_to(tmp_path).as_posix() in aborted[0]["target_paths"]
     assert not query_path.exists()
     assert not orchestrate.decisions_path(tmp_path, program_id).exists()
 
@@ -316,7 +321,7 @@ def test_r1_program_decision_requires_two_stage_confirmation(tmp_path: Path, mon
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     program_id = "decision-gate"
-    program = tmp_path / "kb" / "programs" / program_id
+    program = tmp_path / "programs" / program_id
     workflow = program / "workflow"
     workflow.mkdir(parents=True)
     evidence_path = workflow / "decision-evidence.md"
@@ -416,7 +421,7 @@ def test_program_decision_cross_unit_evidence_uses_anchored_snapshot(tmp_path: P
     orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
     program_id = "decision-cross-unit"
     source_id = "p-decision-source-123456"
-    (tmp_path / "kb" / "programs" / program_id).mkdir(parents=True)
+    (tmp_path / "programs" / program_id).mkdir(parents=True)
     source = default_record("paper", title="Decision source", maturity="lightweight")
     source["id"] = source_id
     source["summary"] = "stable decision evidence"
@@ -453,7 +458,7 @@ def test_program_decision_rejects_source_replaced_after_snapshot_capture(
     orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
     program_id = "decision-replaced-source"
     source_id = "p-decision-replaced-123456"
-    workflow = tmp_path / "kb" / "programs" / program_id / "workflow"
+    workflow = tmp_path / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
     source = default_record("paper", title="Original decision source", maturity="lightweight")
     source["id"] = source_id
@@ -685,7 +690,7 @@ def test_r1_report_failure_restores_output_and_skips_checkpoint(tmp_path: Path, 
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
     program_id = "report-rollback"
-    output = tmp_path / "kb" / "programs" / program_id / "reports" / "weekly.md"
+    output = tmp_path / "programs" / program_id / "reports" / "weekly.md"
     output.parent.mkdir(parents=True)
     output.write_text("before\n", encoding="utf-8")
     checkpoint_calls: list[object] = []

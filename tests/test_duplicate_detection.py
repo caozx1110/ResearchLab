@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import hashlib
 from pathlib import Path
 
@@ -23,7 +25,7 @@ def _write_record(root: Path, record: dict) -> None:
 
 
 def test_detect_duplicate_by_url(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         {
@@ -41,7 +43,7 @@ def test_detect_duplicate_by_url(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_by_file_hash(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     source = tmp_path / "paper.pdf"
     source.write_bytes(b"same file")
     other = tmp_path / "other.pdf"
@@ -66,7 +68,7 @@ def test_detect_duplicate_by_file_hash(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_by_staged_remote_file_hash(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     source = tmp_path / "query-planning.html"
     source.write_bytes(b"<html><body><h1>Query Planning</h1></body></html>")
     _write_record(
@@ -92,7 +94,7 @@ def test_detect_duplicate_by_staged_remote_file_hash(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_by_arxiv_id_in_title(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         {
@@ -110,7 +112,7 @@ def test_detect_duplicate_by_arxiv_id_in_title(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_by_normalized_title(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         {
@@ -128,7 +130,7 @@ def test_detect_duplicate_by_normalized_title(tmp_path: Path) -> None:
 
 
 def test_detect_duplicate_returns_none_for_distinct_source_and_title(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         {

@@ -16,6 +16,8 @@ is deterministic and offline.
 """
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -395,6 +397,7 @@ def test_legacy_quick_screen_type_can_verify_old_flat_fill_without_writeback(tmp
 # 3. Legit filled content + verbatim evidence -> validates, fills, persists.
 # --------------------------------------------------------------------------- #
 def test_note_fill_legit_evidence_validates_and_clears_substance_gate(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     paper = _load_paper_module()
     record = _paper_record("p-fill-legit-1")
     unit_dir = record_path(tmp_path, "paper", record["id"]).parent
@@ -667,7 +670,7 @@ def test_prepare_fill_verify_requires_fresh_phase_receipt_and_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paper = _load_paper_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     paper_id = "p-phase-receipt-0001"
     write_record(tmp_path, _paper_record(paper_id))
     unit_dir = record_path(tmp_path, "paper", paper_id).parent
@@ -760,7 +763,7 @@ def test_cli_rejects_symlinked_paper_inputs_without_a_preference_selection(
     artifact: str,
 ) -> None:
     paper = _load_paper_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     paper_id = f"p-symlink-{artifact}"
     record = _paper_record(paper_id)
     record["payload"]["quick_screen"] = {}
@@ -805,7 +808,7 @@ def test_complete_note_prepare_needs_no_screening_and_does_not_guess_type(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paper = _load_paper_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     paper_id = "p-unclassified-0001"
     write_record(tmp_path, _paper_record(paper_id))
     unit_dir = record_path(tmp_path, "paper", paper_id).parent
@@ -831,7 +834,7 @@ def test_new_paper_rejects_legacy_screen_without_creating_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     paper = _load_paper_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     paper_id = "p-no-legacy-screen"
     write_record(tmp_path, _paper_record(paper_id))
     unit_dir = record_path(tmp_path, "paper", paper_id).parent
@@ -856,7 +859,7 @@ def test_new_paper_rejects_legacy_screen_without_creating_artifacts(
 
 def test_cli_end_to_end_prepare_fill_verify_persist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paper = _load_paper_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     paper_id = "p-e2e-000001"
     record = _paper_record(paper_id)
     write_record(tmp_path, record)
@@ -934,7 +937,7 @@ def test_cli_reject_is_not_misclassified_as_a_preference_consumer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paper = _load_paper_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     paper_id = "p-reject-000001"
     write_record(tmp_path, _paper_record(paper_id))
 

@@ -541,7 +541,7 @@ def _idea_verify_preflight(args, root: Path) -> None:
         )
         fill, _binding = _bound_yaml(
             candidate_path,
-            logical_identity=candidate_path.relative_to(root).as_posix(),
+            logical_identity=rel(root, candidate_path),
             trusted_root=root,
         )
         if not isinstance(fill, Mapping):
@@ -939,9 +939,10 @@ def _evidence_corpus_snapshot(
             total_bytes += metadata.st_size
             if total_bytes > MAX_CORPUS_TOTAL_BYTES:
                 raise ValueError("citable idea evidence corpus exceeds the total byte budget")
+            logical_path = rel(root, path)
             binding = regular_file_binding(
                 path,
-                logical_identity=path.relative_to(root).as_posix(),
+                logical_identity=logical_path,
                 trusted_root=root,
             )
             try:
@@ -952,13 +953,13 @@ def _evidence_corpus_snapshot(
                 raise ValueError("citable idea evidence artifact is unreadable") from exc
             if binding != regular_file_binding(
                 path,
-                logical_identity=path.relative_to(root).as_posix(),
+                logical_identity=logical_path,
                 trusted_root=root,
             ):
                 raise ValueError("citable idea evidence artifact changed while it was read")
             entries.append(
                 {
-                    "path": path.relative_to(root).as_posix(),
+                    "path": logical_path,
                     "identity_digest": binding["identity_digest"],
                     "bytes_digest": binding["bytes_digest"],
                     "size": metadata.st_size,
@@ -1115,7 +1116,7 @@ def _validated_frozen_corpus(
 ) -> tuple[dict[str, object], dict[str, str]]:
     payload, binding = _bound_yaml(
         corpus_path,
-        logical_identity=corpus_path.relative_to(root).as_posix(),
+        logical_identity=rel(root, corpus_path),
         trusted_root=root,
     )
     if not isinstance(payload, dict) or set(payload) != {
@@ -1365,7 +1366,7 @@ def _load_prepared_generation_bundle(
     index_path = bundle_index_path(root, bundle_id)
     payload, binding = _bound_yaml(
         index_path,
-        logical_identity=index_path.relative_to(root).as_posix(),
+        logical_identity=rel(root, index_path),
         trusted_root=root,
     )
     expected = _prepared_generation_bundle(bundle_id, request_context, current_anchor)
@@ -1441,7 +1442,7 @@ def _guard_existing_empty_fill(
     try:
         payload, binding = _bound_yaml(
             fill_path,
-            logical_identity=fill_path.relative_to(root).as_posix(),
+            logical_identity=rel(root, fill_path),
             trusted_root=root,
         )
     except ValueError as exc:
@@ -1475,7 +1476,7 @@ def _consumed_fill_bindings(
         try:
             result, _result_binding = _bound_yaml(
                 result_path,
-                logical_identity=result_path.relative_to(root).as_posix(),
+                logical_identity=rel(root, result_path),
                 trusted_root=root,
             )
         except ValueError:
@@ -1493,7 +1494,7 @@ def _consumed_fill_bindings(
         try:
             sidecar, _sidecar_binding = _bound_yaml(
                 sidecar_path,
-                logical_identity=sidecar_path.relative_to(root).as_posix(),
+                logical_identity=rel(root, sidecar_path),
                 trusted_root=root,
             )
         except ValueError:
@@ -1515,7 +1516,7 @@ def _guard_existing_contract_target(root: Path, path: Path) -> None:
     try:
         regular_file_binding(
             path,
-            logical_identity=path.relative_to(root).as_posix(),
+            logical_identity=rel(root, path),
             trusted_root=root,
         )
     except ValueError as exc:
@@ -1583,7 +1584,7 @@ def _load_refreshable_analysis_fill(
     try:
         fill, _binding = _bound_yaml(
             fill_path,
-            logical_identity=fill_path.relative_to(root).as_posix(),
+            logical_identity=rel(root, fill_path),
             trusted_root=root,
         )
         if not isinstance(fill, Mapping):
@@ -1654,7 +1655,7 @@ def _assert_bound_fill_unchanged(
 ) -> None:
     current_fill, current_binding = _bound_yaml(
         fill_path,
-        logical_identity=fill_path.relative_to(root).as_posix(),
+        logical_identity=rel(root, fill_path),
         trusted_root=root,
     )
     if current_binding != initial_binding or current_fill != initial_fill:
@@ -1868,7 +1869,7 @@ def idea_preference_context(
             record_binding["identity_digest"]
             if corpus.get("schema") == "idea-evidence-corpus/v1"
             else canonical_digest(
-                {"logical_identity": record_path_value.relative_to(root).as_posix()}
+                {"logical_identity": rel(root, record_path_value)}
             )
         ),
         "record_bytes_digest": record_binding["bytes_digest"],
@@ -2003,7 +2004,7 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
     if index_path.exists() or index_path.is_symlink():
         prepared_bundle, prepared_bundle_binding = _bound_yaml(
             index_path,
-            logical_identity=index_path.relative_to(root).as_posix(),
+            logical_identity=rel(root, index_path),
             trusted_root=root,
         )
         corpus, corpus_binding = _validated_frozen_corpus(root, corpus_path)
@@ -2052,7 +2053,7 @@ def generation_materialization_plan(root: Path, args, *, bundle_id: str) -> dict
     fill_path = _generation_fill_path(root, args, bundle_id=bundle_id)
     fill, fill_binding = _bound_yaml(
         fill_path,
-        logical_identity=fill_path.relative_to(root).as_posix(),
+        logical_identity=rel(root, fill_path),
         trusted_root=root,
     )
     if not isinstance(fill, dict):
@@ -2450,7 +2451,7 @@ def _claims_corpus_violations(
                 continue
             try:
                 snapshot = source.artifact_snapshot(artifact)
-                relative = snapshot.path.relative_to(root.absolute()).as_posix()
+                relative = rel(root, snapshot.path)
             except ValueError:
                 violations.append(
                     f"claims[{claim_index}].evidence_refs[{ref_index}]: "
@@ -2816,7 +2817,7 @@ def run_analysis_phase(args, root: Path, record: dict, unit_root: Path, *, mode:
     try:
         fill, fill_binding = _bound_yaml(
             candidate_path,
-            logical_identity=candidate_path.relative_to(root).as_posix(),
+            logical_identity=rel(root, candidate_path),
             trusted_root=root,
         )
         if not isinstance(fill, Mapping):
@@ -3631,7 +3632,7 @@ def _dispatch(args, root: Path) -> int:
         try:
             fill, fill_binding = _bound_yaml(
                 fill_path,
-                logical_identity=fill_path.relative_to(root).as_posix(),
+                logical_identity=rel(root, fill_path),
                 trusted_root=root,
             )
             if not isinstance(fill, Mapping):
@@ -3817,6 +3818,7 @@ def main() -> int:
             f"idea-workbench:{args.command}",
             targets,
             preflight=lambda: _idea_transaction_preflight(args, root),
+            allow_operational_state=True,
         ):
             result = _dispatch(args, root)
         pending = _PENDING_CHECKPOINT.get()

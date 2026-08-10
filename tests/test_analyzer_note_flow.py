@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.machinery
 import importlib.util
 import sys
@@ -82,8 +84,8 @@ def test_shared_transaction_rolls_back_adapter_write(tmp_path: Path) -> None:
         ".agents/skills/unit-analyst/scripts/blog.py",
         "shared_flow_rollback_blog_adapter",
     )
-    ensure_workspace(tmp_path)
-    target = tmp_path / "kb" / "notes" / "analyzer-rollback.txt"
+    initialize_test_workspace(tmp_path)
+    target = tmp_path / "units" / "analyzer-rollback.txt"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("before\n", encoding="utf-8")
 
@@ -98,7 +100,7 @@ def test_shared_transaction_rolls_back_adapter_write(tmp_path: Path) -> None:
 
 
 def test_shared_fill_scope_rejects_symlink_escape(tmp_path: Path) -> None:
-    unit_root = tmp_path / "kb" / "units" / "blogs" / "b-test"
+    unit_root = tmp_path / "units" / "blogs" / "b-test"
     unit_root.mkdir(parents=True)
     outside = tmp_path / "outside-fill.yaml"
     outside.write_text("elements: []\n", encoding="utf-8")
@@ -127,7 +129,7 @@ def test_shared_deferred_post_actions_have_no_checkpoint_side_effect(
             trigger="milestone",
             message="must stay deferred",
             defer_post_actions=True,
-            target_paths=[tmp_path / "kb" / "record.yaml"],
+            target_paths=[tmp_path / "record.yaml"],
         )
     finally:
         blog.FLOW._checkpoint = original_checkpoint

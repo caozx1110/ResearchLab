@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -79,7 +81,7 @@ def _record(
 
 
 def test_search_records_filters_confirmation_status(tmp_path: Path) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, _record("p-pending-123456", "Pending Robot", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"))
     _write_record(tmp_path, _record("p-confirmed-123456", "Confirmed Robot", "confirmed", "2026-01-02T00:00:00+00:00"))
 
@@ -134,7 +136,7 @@ def test_user_facing_find_and_review_output_hides_raw_commands(
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(
         tmp_path,
         _record("p-query-123456", "Queryable", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"),
@@ -152,7 +154,7 @@ def test_user_facing_find_and_review_output_hides_raw_commands(
 
 def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     _write_record(tmp_path, _record("p-one-123456", "One", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"))
     _write_record(tmp_path, _record("p-two-123456", "Two", "pending_user_confirmation", "2026-01-02T00:00:00+00:00"))
@@ -176,7 +178,7 @@ def test_batch_confirm_applies_one_evidence_to_multiple_units(tmp_path: Path) ->
 
 def test_batch_confirm_without_evidence_rejects_before_write(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     pending = _record("p-no-evidence-123456", "No Evidence", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
     _write_record(tmp_path, pending)
@@ -193,14 +195,14 @@ def test_batch_confirm_without_evidence_rejects_before_write(tmp_path: Path) -> 
     record = load_yaml(record_path(tmp_path, "paper", "p-no-evidence-123456"), default={})
     assert record["confirmation_status"] == "pending_user_confirmation"
     assert "confirmation" not in record
-    assert not (tmp_path / "kb" / "index.yaml").exists()
+    assert not (tmp_path / "index.yaml").exists()
 
 
 def test_review_queue_confirm_without_evidence_rejects_before_write(tmp_path: Path, monkeypatch) -> None:
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     _write_record(
         tmp_path,
@@ -225,14 +227,14 @@ def test_review_queue_confirm_without_evidence_rejects_before_write(tmp_path: Pa
     record = load_yaml(record_path(tmp_path, "paper", "p-cli-no-evidence-123456"), default={})
     assert record["confirmation_status"] == "pending_user_confirmation"
     assert "confirmation" not in record
-    assert not (tmp_path / "kb" / "index.yaml").exists()
+    assert not (tmp_path / "index.yaml").exists()
 
 
 def test_confirm_command_blank_evidence_rejects_before_any_batch_write(tmp_path: Path, monkeypatch) -> None:
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     unit_ids = ["p-cli-empty-a-123456", "p-cli-empty-b-123456"]
     for index, unit_id in enumerate(unit_ids, start=1):
@@ -266,12 +268,12 @@ def test_confirm_command_blank_evidence_rejects_before_any_batch_write(tmp_path:
         record = load_yaml(record_path(tmp_path, "paper", unit_id), default={})
         assert record["confirmation_status"] == "pending_user_confirmation"
         assert "confirmation" not in record
-    assert not (tmp_path / "kb" / "index.yaml").exists()
+    assert not (tmp_path / "index.yaml").exists()
 
 
 def test_batch_confirm_rejects_judgement_without_canonical_verification(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     ai_typed = _record(
         "p-ai-typed-123456",
@@ -305,7 +307,7 @@ def test_batch_confirm_rejects_judgement_without_canonical_verification(tmp_path
 
 def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None:
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     pending = _record("p-pending-123456", "Pending", "pending_user_confirmation", "2026-01-01T00:00:00+00:00")
     rejected = _record("p-rejected-123456", "Rejected", "rejected", "2026-01-02T00:00:00+00:00", status="rejected")
@@ -329,7 +331,7 @@ def test_batch_confirm_skips_non_pending_records(tmp_path: Path, capsys) -> None
 
 def test_review_queue_all_reviewed_empty_is_clean_noop(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
 
     records = kb.review_queue_records(tmp_path, confirmation_status="pending_user_confirmation")
 
@@ -341,7 +343,7 @@ def test_review_queue_excludes_selected_idea_without_verified_content(tmp_path: 
     idea = _load_idea_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     record = _record(
         "i-select-review-123456",
         "Selectable Idea",
@@ -396,7 +398,7 @@ def test_confirm_all_reviewed_reports_remaining_when_explicit_limit_caps_batch(t
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     for index in range(3):
         _write_record(
@@ -434,7 +436,7 @@ def test_confirm_all_reviewed_reports_remaining_when_explicit_limit_caps_batch(t
 
 def test_review_queue_confirm_uses_listed_records(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(runtime_preferences_path(tmp_path), {"identity": {"default_confirmed_by": "czx-default"}})
     _write_record(tmp_path, _record("p-old-123456", "Old", "pending_user_confirmation", "2026-01-01T00:00:00+00:00"))
     _write_record(tmp_path, _record("p-new-123456", "New", "pending_user_confirmation", "2026-01-02T00:00:00+00:00"))
@@ -482,7 +484,7 @@ def _paper(unit_id: str, *, full_note_status: str) -> dict:
 def test_review_queue_excludes_hollow_judgements_but_keeps_ready_fact_metadata(tmp_path: Path) -> None:
     """Canonical workflow state excludes unverified judgement shells from review."""
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     shell = _paper("p-shell-12345678", full_note_status="awaiting_agent_fill")
     not_started = _paper("p-notstart-2345678", full_note_status="not_started")
     ready_fact = _paper("p-ready-fact-12345678", full_note_status="ready_for_review")
@@ -518,7 +520,7 @@ def test_review_queue_excludes_non_review_workflow_states_for_all_source_kinds(
     blocked_state: str,
 ) -> None:
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     prefix = {"paper": "p", "blog": "b", "repo": "r", "dataset": "d"}[kind]
     blocked = _paper(f"{prefix}-blocked-12345678", full_note_status="pending_user_confirmation")
     blocked["kind"] = kind
@@ -601,7 +603,7 @@ def _write_verified_judgement(root: Path, kind: str, *, suffix: str, hollow: boo
 
 def test_review_queue_uses_current_verified_judgement_readiness_for_all_source_kinds(tmp_path: Path) -> None:
     kb = _load_kb_module()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     ready_ids = {
         _write_verified_judgement(tmp_path, kind, suffix=f"ready-{kind}")
         for kind in ("paper", "blog", "repo", "dataset")
@@ -625,7 +627,7 @@ def test_stale_verified_judgement_returns_to_agent_verification(
     tmp_path: Path,
     kind: str,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = _write_verified_judgement(tmp_path, kind, suffix=f"stale-{kind}")
     evidence_path = record_path(tmp_path, kind, unit_id).parent / "raw" / "source.txt"
     evidence_path.write_text("changed source bytes\n", encoding="utf-8")
@@ -642,7 +644,7 @@ def test_stale_hollow_judgement_returns_to_agent_fill(
     tmp_path: Path,
     kind: str,
 ) -> None:
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     unit_id = _write_verified_judgement(tmp_path, kind, suffix=f"stale-hollow-{kind}", hollow=True)
     evidence_path = record_path(tmp_path, kind, unit_id).parent / "raw" / "source.txt"
     evidence_path.write_text("changed source bytes\n", encoding="utf-8")
@@ -682,14 +684,14 @@ def test_batch_confirmation_transmits_final_user_authorization_signature(monkeyp
         return record
 
     monkeypatch.setattr(kb, "confirm_unit", fake_confirm)
-    written_path = tmp_path / "kb" / "units" / "papers" / "p-auth-12345678" / "record.yaml"
+    written_path = tmp_path / "units" / "papers" / "p-auth-12345678" / "record.yaml"
     monkeypatch.setattr(
         kb,
         "write_record",
         lambda _root, _record, *, expected_record_snapshot: written_path,
     )
     record = _paper("p-auth-12345678", full_note_status="ready_for_review")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     _write_record(tmp_path, record)
 
     assert kb.apply_batch_confirmation(
@@ -710,7 +712,7 @@ def test_manual_checkpoint_resolves_literal_dirty_paths_and_clean_is_noop(monkey
     kb = _load_kb_module()
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(kb, "PROJECT_ROOT", tmp_path)
     calls: list[dict[str, object]] = []
 
@@ -725,7 +727,7 @@ def test_manual_checkpoint_resolves_literal_dirty_paths_and_clean_is_noop(monkey
     assert calls == []
     assert "no kb changes" in capsys.readouterr().out
 
-    dirty = [tmp_path / "kb" / "units" / "papers" / "p-one" / "record.yaml"]
+    dirty = [tmp_path / "units" / "papers" / "p-one" / "record.yaml"]
     monkeypatch.setattr(kb, "dirty_kb_paths", lambda _root: dirty)
     monkeypatch.setattr(
         kb,

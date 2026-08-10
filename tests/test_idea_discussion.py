@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import json
 import sys
@@ -32,7 +34,7 @@ def _load_idea_module():
 def _setup_records(tmp_path: Path, idea) -> tuple[str, str]:
     (tmp_path / ".agents").mkdir()
     (tmp_path / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
 
     idea_record = default_record("idea", title="Sparring Idea", maturity="lightweight", source={"original_uri": "discussion"})
     idea_record["id"] = "i-sparring-123456"

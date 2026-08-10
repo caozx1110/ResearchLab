@@ -266,4 +266,6 @@ def test_write_record_blocks_judgement_violation_before_creating_record(tmp_path
     with pytest.raises(SystemExit, match="validate_write contract violations"):
         write_record(tmp_path, record)
 
-    assert not record_path(tmp_path, "paper", "p-ai-write-123456").exists()
+    assert not (
+        tmp_path / "units" / "papers" / "p-ai-write-123456" / "record.yaml"
+    ).exists()

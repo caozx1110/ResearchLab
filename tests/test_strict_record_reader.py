@@ -32,12 +32,21 @@ from research.sources import detect_duplicate
 from research.surveys import select_current_confirmed_survey_records
 import research.records as records_module
 import research.judgements as judgements_module
+from research.workspace_layout import initialize_workspace_layout
 
 
 ROOT = REPO_ROOT
 
 
+def _activate(root: Path) -> Path:
+    root = root.absolute()
+    root.mkdir(parents=True, exist_ok=True)
+    initialize_workspace_layout(root, ROOT)
+    return root
+
+
 def _write_record(root: Path, kind: str, unit_id: str, *, title: str) -> Path:
+    root = _activate(root)
     record = default_record(kind, title=title, maturity="lightweight")
     record["id"] = unit_id
     path = record_path(root, kind, unit_id)
@@ -46,6 +55,7 @@ def _write_record(root: Path, kind: str, unit_id: str, *, title: str) -> Path:
 
 
 def _write_ready_unit(root: Path, kind: str, unit_id: str) -> Path:
+    root = _activate(root)
     record = default_record(
         kind,
         title="Strict reader review fixture",
@@ -154,7 +164,8 @@ def _tree_digest(root: Path) -> str:
 
 def test_project_file_snapshot_binds_bytes_inode_and_ancestor_chain(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    artifact = root / "kb" / "programs" / "program-a" / "workflow" / "decisions.yaml"
+    _activate(root)
+    artifact = root / "programs" / "program-a" / "workflow" / "decisions.yaml"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("schema: decisions/v1\nitems: []\n", encoding="utf-8")
 
@@ -173,8 +184,8 @@ def test_project_file_snapshot_binds_bytes_inode_and_ancestor_chain(tmp_path: Pa
 
     rebound = records_module.snapshot_project_file(root, snapshot.relative_path)
     assert rebound is not None and rebound.is_current()
-    programs = root / "kb" / "programs"
-    parked = root / "kb" / "programs-parked"
+    programs = root / "programs"
+    parked = root / "programs-parked"
     programs.rename(parked)
     programs.mkdir()
     (parked / "program-a").rename(programs / "program-a")
@@ -183,7 +194,8 @@ def test_project_file_snapshot_binds_bytes_inode_and_ancestor_chain(tmp_path: Pa
 
 def test_project_yaml_snapshot_is_strict_and_current(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    artifact = root / "kb" / "programs" / "program-a" / "workflow" / "decisions.yaml"
+    _activate(root)
+    artifact = root / "programs" / "program-a" / "workflow" / "decisions.yaml"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("schema: decisions/v1\nitems: []\n", encoding="utf-8")
 
@@ -202,7 +214,8 @@ def test_project_yaml_snapshot_is_strict_and_current(tmp_path: Path) -> None:
 
 def test_project_evidence_source_uses_one_base_capability(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    program = root / "kb" / "programs" / "program-a"
+    _activate(root)
+    program = root / "programs" / "program-a"
     first = program / "evidence" / "first.md"
     second = program / "workflow" / "second.yaml"
     first.parent.mkdir(parents=True)
@@ -224,7 +237,7 @@ def test_project_evidence_source_uses_one_base_capability(tmp_path: Path) -> Non
         "workflow/second.yaml",
     ]
     assert snapshot.is_current()
-    parked = root / "kb" / "program-a-parked"
+    parked = root / "program-a-parked"
     program.rename(parked)
     shutil.copytree(parked, program)
     assert not snapshot.is_current()
@@ -236,7 +249,8 @@ def test_project_snapshots_keep_capture_root_after_chdir(
 ) -> None:
     capture_parent = tmp_path / "capture-parent"
     root = capture_parent / "workspace"
-    program = root / "kb" / "programs" / "program-a"
+    _activate(root)
+    program = root / "programs" / "program-a"
     artifact = program / "evidence" / "first.md"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("stable evidence\n", encoding="utf-8")
@@ -287,7 +301,8 @@ def test_project_evidence_source_rejects_noncanonical_inputs(
     overrides: dict[str, object],
 ) -> None:
     root = tmp_path / "workspace"
-    artifact = root / "kb" / "programs" / "program-a" / "evidence" / "first.md"
+    _activate(root)
+    artifact = root / "programs" / "program-a" / "evidence" / "first.md"
     artifact.parent.mkdir(parents=True)
     artifact.write_text("stable evidence\n", encoding="utf-8")
     arguments: dict[str, object] = {
@@ -336,7 +351,8 @@ def test_trusted_program_evidence_captures_all_requested_artifacts_once(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "workspace"
-    program = root / "kb" / "programs" / "program-a"
+    _activate(root)
+    program = root / "programs" / "program-a"
     first = program / "evidence" / "first.md"
     second = program / "workflow" / "second.yaml"
     first.parent.mkdir(parents=True)
@@ -383,8 +399,9 @@ def test_trusted_program_evidence_rejects_cross_program_paths(
     artifact: str,
 ) -> None:
     root = tmp_path / "workspace"
-    first = root / "kb" / "programs" / "program-a" / "evidence" / "first.md"
-    secret = root / "kb" / "programs" / "program-b" / "evidence" / "secret.md"
+    _activate(root)
+    first = root / "programs" / "program-a" / "evidence" / "first.md"
+    secret = root / "programs" / "program-b" / "evidence" / "secret.md"
     first.parent.mkdir(parents=True)
     secret.parent.mkdir(parents=True)
     first.write_text("program A evidence\n", encoding="utf-8")
@@ -403,7 +420,8 @@ def test_trusted_program_evidence_directory_swap_cannot_mix_versions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
-    program = root / "kb" / "programs" / "program-a"
+    _activate(root)
+    program = root / "programs" / "program-a"
     evidence = program / "evidence"
     evidence.mkdir(parents=True)
     (evidence / "first.md").write_text("version A first\n", encoding="utf-8")
@@ -445,7 +463,8 @@ def test_project_file_snapshot_rejects_unsafe_special_and_oversize_inputs(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "workspace"
-    parent = root / "kb" / "programs" / "program-a"
+    _activate(root)
+    parent = root / "programs" / "program-a"
     parent.mkdir(parents=True)
     outside = tmp_path / "outside.yaml"
     outside.write_text("sentinel: outside\n", encoding="utf-8")
@@ -466,7 +485,8 @@ def test_project_file_snapshot_rejects_unsafe_special_and_oversize_inputs(
             "kb/programs/program-a/fifo.yaml",
         ) is None
     socket_root = Path(tempfile.mkdtemp(prefix="r23-socket-", dir="/tmp"))
-    socket_parent = socket_root / "kb" / "p"
+    _activate(socket_root)
+    socket_parent = socket_root / "programs" / "p"
     socket_parent.mkdir(parents=True)
     socket_path = socket_parent / "socket"
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -582,6 +602,7 @@ def test_canonical_unit_tree_snapshot_rejects_fifo_without_opening_it(tmp_path: 
 
 def test_iter_records_rejects_external_record_symlink(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
+    _activate(root)
     outside = tmp_path / "outside-record.yaml"
     outside_record = default_record("paper", title="Outside", maturity="lightweight")
     outside_record["id"] = "p-outside-123456"
@@ -631,6 +652,7 @@ def test_duplicate_record_mapping_key_is_excluded_from_review(tmp_path: Path) ->
 
 def test_iter_records_rejects_dangling_record_symlink(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
+    _activate(root)
     linked = record_path(root, "paper", "p-dangling-123456")
     linked.parent.mkdir(parents=True)
     linked.symlink_to(tmp_path / "missing-record.yaml")
@@ -695,7 +717,7 @@ def test_leaf_swap_after_open_is_excluded(
     assert outside.read_bytes()
 
 
-@pytest.mark.parametrize("ancestor", ["unit", "kind", "units", "kb", "root"])
+@pytest.mark.parametrize("ancestor", ["unit", "kind", "units", "root"])
 def test_ancestor_replacement_during_read_excludes_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -707,7 +729,6 @@ def test_ancestor_replacement_during_read_excludes_candidate(
         "unit": path.parent,
         "kind": path.parent.parent,
         "units": path.parent.parent.parent,
-        "kb": path.parent.parent.parent.parent,
         "root": root,
     }
     target = targets[ancestor]
@@ -793,6 +814,7 @@ def test_record_identity_must_match_lexical_directories(
     record_id: object,
 ) -> None:
     root = tmp_path / "workspace"
+    _activate(root)
     record = default_record(record_kind, title="Mismatch", maturity="lightweight")
     record["id"] = record_id
     write_yaml_if_changed(record_path(root, directory_kind, directory_id), record)
@@ -913,6 +935,7 @@ def test_legacy_snapshot_normalization_is_stable_across_runtime_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
+    _activate(root)
     path = record_path(root, "paper", "p-legacy-123456")
     write_yaml_if_changed(
         path,

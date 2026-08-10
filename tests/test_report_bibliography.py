@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -50,12 +52,12 @@ def _paper(root: Path, index: int, *, title: str | None = None) -> str:
             },
         }
     )
-    write_yaml_if_changed(root / "kb" / "units" / "papers" / unit_id / "record.yaml", record)
+    write_yaml_if_changed(root / "units" / "papers" / unit_id / "record.yaml", record)
     return unit_id
 
 
 def _program(root: Path, ids: list[str], *, program_id: str = "program-bib") -> str:
-    program_root = root / "kb" / "programs" / program_id
+    program_root = root / "programs" / program_id
     write_yaml_if_changed(
         program_root / "state.yaml",
         {"program_id": program_id, "active_unit_ids": list(ids)},
@@ -77,7 +79,7 @@ def test_program_bibliography_exports_five_unique_stable_keys_byte_identically(
     report = _report_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     ids = [_paper(root, index) for index in range(1, 6)]
     program_id = _program(root, ids)
 
@@ -89,7 +91,7 @@ def test_program_bibliography_exports_five_unique_stable_keys_byte_identically(
     }
     assert first.is_current()
 
-    state_path = root / "kb" / "programs" / program_id / "state.yaml"
+    state_path = root / "programs" / program_id / "state.yaml"
     write_yaml_if_changed(state_path, {"program_id": program_id, "active_unit_ids": list(reversed(ids))})
     assert not first.is_current()
     second = report.load_bibliography_inputs(root, program_id)
@@ -100,10 +102,10 @@ def test_same_title_without_strong_identity_is_not_hard_deduplicated(tmp_path: P
     report = _report_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     ids = [_paper(root, index, title="Same title") for index in (1, 2)]
     for unit_id in ids:
-        path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+        path = root / "units" / "papers" / unit_id / "record.yaml"
         record = report.load_yaml(path)
         record["payload"]["basic_info"].update({"source_url": "", "doi": ""})
         write_yaml_if_changed(path, record)
@@ -118,12 +120,12 @@ def test_bibliography_rejects_record_change_after_capture(tmp_path: Path) -> Non
     report = _report_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     unit_id = _paper(root, 1)
     program_id = _program(root, [unit_id])
     inputs = report.load_bibliography_inputs(root, program_id)
 
-    path = root / "kb" / "units" / "papers" / unit_id / "record.yaml"
+    path = root / "units" / "papers" / unit_id / "record.yaml"
     record = report.load_yaml(path)
     record["payload"]["basic_info"]["year"] = "1999"
     write_yaml_if_changed(path, record)
@@ -137,7 +139,7 @@ def test_bib_cli_writes_only_natural_language_status_and_no_internal_path(
     report = _report_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     ids = [_paper(root, index) for index in range(1, 6)]
     program_id = _program(root, ids)
     monkeypatch.setattr(report, "checkpoint_and_report", lambda *_args, **_kwargs: {})
@@ -152,7 +154,7 @@ def test_bib_cli_writes_only_natural_language_status_and_no_internal_path(
     assert "已导出 5 条去重引用" in output
     assert "references.bib" not in output
     assert str(root) not in output
-    artifact = root / "kb" / "output" / program_id / "references.bib"
+    artifact = root / "output" / program_id / "references.bib"
     assert artifact.read_text(encoding="utf-8").count("@misc{") == 5
 
 
@@ -160,9 +162,9 @@ def test_bibliography_rejects_unsafe_program_identity(tmp_path: Path) -> None:
     report = _report_module()
     root = tmp_path / "workspace"
     root.mkdir()
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     write_yaml_if_changed(
-        root / "kb" / "programs" / "program-bib" / "state.yaml",
+        root / "programs" / "program-bib" / "state.yaml",
         {"program_id": "different-program", "active_unit_ids": []},
     )
     with pytest.raises(BibliographyError, match="identity"):

@@ -17,6 +17,8 @@ All fixtures are synthetic + offline so verification is deterministic.
 """
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import importlib.util
 import subprocess
 import sys
@@ -159,7 +161,7 @@ def _run_blog_cli(blog, monkeypatch, root: Path, *argv: str) -> int:
 # --------------------------------------------------------------------------- #
 def test_f6_blog_verify_creates_git_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     blog = _load_blog()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     blog_id = "b-f6-000001"
     record = _blog_record(blog_id)
     write_record(tmp_path, record)
@@ -178,14 +180,14 @@ def test_f6_blog_verify_creates_git_checkpoint(tmp_path: Path, monkeypatch: pyte
     assert log.get("repo_exists") is True
     assert f"milestone: blog note {blog_id}" in log["text"], log["text"]
     committed = subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "show", "--format=", "--name-only", "HEAD"],
+        ["git", "-C", str(tmp_path), "show", "--format=", "--name-only", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.splitlines()
     assert f"units/blogs/{blog_id}/blog-fill.yaml" in committed
     assert "blog-fill.yaml" not in subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        ["git", "-C", str(tmp_path), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,
@@ -195,7 +197,7 @@ def test_f6_blog_verify_creates_git_checkpoint(tmp_path: Path, monkeypatch: pyte
 def test_f6_blog_verify_defer_does_not_checkpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """--defer-post-actions hands the checkpoint to an outer driver (paper/repo convention)."""
     blog = _load_blog()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     blog_id = "b-f6-000002"
     record = _blog_record(blog_id)
     write_record(tmp_path, record)
@@ -218,7 +220,7 @@ def test_f6_blog_verify_defer_does_not_checkpoint(tmp_path: Path, monkeypatch: p
 # --------------------------------------------------------------------------- #
 def test_f9_blog_cache_header_is_read_compatible_without_rewrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     blog = _load_blog()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     blog_id = "b-f9-000001"
     record = _blog_record(blog_id)
     write_record(tmp_path, record)
@@ -299,7 +301,7 @@ def test_f4_guard_blog_verify_still_rejects_fabricated_real_quote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     blog = _load_blog()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     blog_id = "b-reject-000001"
     record = _blog_record(blog_id)
     write_record(tmp_path, record)
@@ -388,7 +390,7 @@ def test_f4_guard_repo_verify_still_rejects_fabricated_real_quote(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = _load_repo()
-    ensure_workspace(tmp_path)
+    initialize_test_workspace(tmp_path)
     mini = _make_mini_repo(tmp_path)
     repo_id = "r-reject-000001"
     record = {

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import os
 import subprocess
 import sys
@@ -19,7 +21,7 @@ def _project_root() -> Path:
 
 def test_pdf_figure_extraction_mode_surfaces_in_runtime_preferences_and_config_guide(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    root.mkdir()
+    initialize_test_workspace(root)
     preferences = load_runtime_preferences(root)
 
     assert preferences["pdf"]["figure_extraction_mode"] == "caption-region"
@@ -43,13 +45,14 @@ def test_pdf_figure_extraction_mode_surfaces_in_runtime_preferences_and_config_g
 
 def test_new_workspace_is_explicit_personal_but_pre_profile_workspace_stays_strict(tmp_path: Path) -> None:
     new_root = tmp_path / "new"
-    ensure_workspace(new_root)
+    initialize_test_workspace(new_root)
     stored = load_yaml(runtime_preferences_path(new_root))
     assert stored["governance_profile"] == "personal"
     assert stored["autonomy"]["auto_execute_scope"] == ["ingest", "build-index", "refresh", "generate-note"]
     assert load_runtime_preferences(new_root)["governance_profile"] == "personal"
 
     legacy_root = tmp_path / "legacy"
+    initialize_test_workspace(legacy_root)
     path = runtime_preferences_path(legacy_root)
     write_yaml_if_changed(path, {"identity": {"default_confirmed_by": "Human"}})
     assert load_runtime_preferences(legacy_root)["governance_profile"] == "strict"
@@ -63,6 +66,7 @@ def test_new_workspace_is_explicit_personal_but_pre_profile_workspace_stays_stri
 
 def test_retired_screening_preferences_are_not_loaded_or_rewritten(tmp_path: Path) -> None:
     root = tmp_path / "legacy"
+    initialize_test_workspace(root)
     write_yaml_if_changed(
         runtime_preferences_path(root),
         {
@@ -96,6 +100,7 @@ def test_retired_screening_preferences_are_not_loaded_or_rewritten(tmp_path: Pat
 
 def test_effective_review_policy_preserves_strict_and_bounds_personal_configuration(tmp_path: Path) -> None:
     strict_root = tmp_path / "strict"
+    initialize_test_workspace(strict_root)
     write_yaml_if_changed(
         runtime_preferences_path(strict_root),
         {
@@ -112,6 +117,7 @@ def test_effective_review_policy_preserves_strict_and_bounds_personal_configurat
     }
 
     personal_root = tmp_path / "personal"
+    initialize_test_workspace(personal_root)
     write_yaml_if_changed(
         runtime_preferences_path(personal_root),
         {
@@ -130,7 +136,7 @@ def test_effective_review_policy_preserves_strict_and_bounds_personal_configurat
 
 def test_config_owner_sets_governance_profile_and_review_policy(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    root.mkdir()
+    initialize_test_workspace(root)
     script = _project_root() / "skills" / "research-config-manager" / "scripts" / "config.py"
     result = subprocess.run(
         [

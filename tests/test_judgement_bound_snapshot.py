@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from repo_paths import initialize_test_workspace
 
 import research.judgements as judgement_module
 from research.common import write_yaml_if_changed
@@ -13,9 +14,11 @@ from research.judgements import (
     load_bound_judgement_snapshot,
     pending_judgement_card,
 )
+from research.paths import rel
 
 
 def _side_case(root: Path, kind: str) -> tuple[Path, dict[str, object], dict[str, str]]:
+    initialize_test_workspace(root)
     if kind == "program_decision":
         record: dict[str, object] = {
             "id": "decision-bound",
@@ -23,7 +26,7 @@ def _side_case(root: Path, kind: str) -> tuple[Path, dict[str, object], dict[str
             "owner": "research-orchestrator",
             "program_id": "p-bound",
         }
-        path = root / "kb/programs/p-bound/workflow/decisions.yaml"
+        path = root / "programs/p-bound/workflow/decisions.yaml"
         subject = {"kind": kind, "id": "decision-bound", "owner": "research-orchestrator"}
     elif kind == "idea_discussion_conclusion":
         record = {
@@ -32,7 +35,7 @@ def _side_case(root: Path, kind: str) -> tuple[Path, dict[str, object], dict[str
             "owner": "idea-workbench",
             "idea_id": "i-bound",
         }
-        path = root / "kb/units/ideas/i-bound/discussion-judgements.yaml"
+        path = root / "units/ideas/i-bound/discussion-judgements.yaml"
         subject = {"kind": kind, "id": "discussion-bound", "owner": "idea-workbench"}
     elif kind == "method_selection":
         record = {
@@ -44,7 +47,7 @@ def _side_case(root: Path, kind: str) -> tuple[Path, dict[str, object], dict[str
             "proposed_repo_id": "r-bound",
             "payload": {"method_selection": {"proposed_repo_id": "r-bound"}},
         }
-        path = root / "kb/programs/p-bound/design/i-bound-repo-choice.yaml"
+        path = root / "programs/p-bound/design/i-bound-repo-choice.yaml"
         subject = {"kind": kind, "id": record["id"], "owner": "method-designer"}
     else:
         record = {
@@ -54,7 +57,7 @@ def _side_case(root: Path, kind: str) -> tuple[Path, dict[str, object], dict[str
             "slug": "bound",
             "mode": "survey",
         }
-        path = root / "kb/synthesis/bound/survey.yaml"
+        path = root / "synthesis/bound/survey.yaml"
         subject = {
             "kind": "survey_judgement",
             "id": "survey:survey:bound",
@@ -65,7 +68,7 @@ def _side_case(root: Path, kind: str) -> tuple[Path, dict[str, object], dict[str
         path,
         {"items": [record]} if kind in {"program_decision", "idea_discussion_conclusion"} else record,
     )
-    subject["path"] = path.relative_to(root).as_posix()
+    subject["path"] = rel(root, path)
     return path, record, subject
 
 
@@ -131,11 +134,12 @@ def test_side_judgement_batch_capture_is_linear(
     monkeypatch: pytest.MonkeyPatch,
     container_count: int,
 ) -> None:
+    initialize_test_workspace(tmp_path)
     subjects: list[dict[str, str]] = []
     for index in range(container_count):
         program_id = f"p-batch-{index}"
         decision_id = f"decision-batch-{index}"
-        path = tmp_path / f"kb/programs/{program_id}/workflow/decisions.yaml"
+        path = tmp_path / f"programs/{program_id}/workflow/decisions.yaml"
         path.parent.mkdir(parents=True)
         write_yaml_if_changed(
             path,
@@ -222,7 +226,7 @@ def test_bad_side_container_is_isolated_from_valid_sibling(
     fault: str,
 ) -> None:
     _path, _record, valid_subject = _side_case(tmp_path, "program_decision")
-    bad_path = tmp_path / "kb/synthesis/bad/survey.yaml"
+    bad_path = tmp_path / "synthesis/bad/survey.yaml"
     bad_path.parent.mkdir(parents=True)
     if fault == "malformed":
         bad_path.write_text("id: survey:survey:bad\nsections: [\n", encoding="utf-8")
@@ -264,7 +268,8 @@ def test_old_side_snapshot_cannot_emit_review_card_after_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    program_root = tmp_path / "kb/programs/p-bound-card"
+    initialize_test_workspace(tmp_path)
+    program_root = tmp_path / "programs/p-bound-card"
     workflow = program_root / "workflow"
     workflow.mkdir(parents=True)
     evidence = program_root / "evidence.md"
@@ -308,7 +313,7 @@ def test_old_side_snapshot_cannot_emit_review_card_after_replacement(
         "kind": "program_decision",
         "id": "decision-bound-card",
         "owner": "research-orchestrator",
-        "path": path.relative_to(tmp_path).as_posix(),
+        "path": rel(tmp_path, path),
     }
     bound = load_bound_judgement_snapshot(tmp_path, subject)
     assert pending_judgement_card(

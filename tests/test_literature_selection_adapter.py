@@ -11,8 +11,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pytest
+from repo_paths import initialize_test_workspace
 
 from research.common import load_yaml, write_yaml_if_changed
+from research.paths import rel, search_stage_path
 from research.records import default_record
 from research.sources import mark_search_candidate, stage_search_results
 from research.surveys import literature_candidate_identity_digest
@@ -30,6 +32,11 @@ FORBIDDEN_PUBLIC = (
     "\u202e",
     "fake success",
 )
+
+
+@pytest.fixture(autouse=True)
+def _activate_workspace_root(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
 
 
 def _candidate(candidate_id: str, url: str) -> dict[str, object]:
@@ -135,7 +142,7 @@ def _write_owner_record(
     status: str = "materialized",
     record_id: str = "p-adapter-materialized",
 ) -> None:
-    stage = load_yaml(root / "kb/synthesis/source-search" / f"{stage_id}.yaml")
+    stage = load_yaml(search_stage_path(root, stage_id))
     candidate = next(
         item for item in stage["candidates"] if item["candidate_id"] == candidate_id
     )
@@ -164,7 +171,7 @@ def _write_owner_record(
             "authorization_source": "user_message",
         },
     }
-    record_path = root / "kb/units/papers" / record_id / "record.yaml"
+    record_path = root / "units/papers" / record_id / "record.yaml"
     record_path.parent.mkdir(parents=True, exist_ok=True)
     write_yaml_if_changed(record_path, record)
     mark_search_candidate(
@@ -184,7 +191,7 @@ def _write_duplicate_record_only(root: Path, *, url: str, record_id: str) -> Non
         source={"original_uri": url},
     )
     record["id"] = record_id
-    unit_dir = root / "kb/units/papers" / record_id
+    unit_dir = root / "units/papers" / record_id
     archived = unit_dir / "source/original-document.md"
     archived.parent.mkdir(parents=True, exist_ok=True)
     archived.write_text("# Existing canonical source\n", encoding="utf-8")
@@ -192,7 +199,7 @@ def _write_duplicate_record_only(root: Path, *, url: str, record_id: str) -> Non
         {
             "file_hash": hashlib.sha256(archived.read_bytes()).hexdigest(),
             "backup_kind": "file",
-            "backup_paths": [archived.relative_to(root).as_posix()],
+            "backup_paths": [rel(root, archived)],
         }
     )
     path = unit_dir / "record.yaml"
@@ -265,7 +272,7 @@ def test_selected_candidate_materializes_with_sanitized_public_and_private_resul
     for forbidden in FORBIDDEN_PUBLIC:
         assert forbidden not in result["public_message"]
 
-    protocol_path = tmp_path / "kb/.runtime/literature-selection/selection.json"
+    protocol_path = tmp_path / ".runtime/literature-selection/selection.json"
     protocol_text = protocol_path.read_text(encoding="utf-8")
     protocol = json.loads(protocol_text)
     assert protocol["schema"] == "literature-selection-owner-adapter/v1"
@@ -291,7 +298,7 @@ def test_repeat_materialization_is_truthful_safe_and_does_not_rerun_owner(tmp_pa
         protocol_name="first.json",
         owner_runner=first_runner,
     )
-    before = _snapshot(tmp_path / "kb/units")
+    before = _snapshot(tmp_path / "units")
 
     def forbidden_runner(*_args, **_kwargs):
         raise AssertionError("idempotent repeat must not rerun source-intake")
@@ -306,7 +313,7 @@ def test_repeat_materialization_is_truthful_safe_and_does_not_rerun_owner(tmp_pa
     assert first["counts"]["newly_materialized"] == 1
     assert second["exit_code"] == 0
     assert second["counts"]["already_materialized"] == 1
-    assert _snapshot(tmp_path / "kb/units") == before
+    assert _snapshot(tmp_path / "units") == before
 
 
 def test_adapter_delegates_duplicate_to_real_source_intake_owner(tmp_path: Path) -> None:
@@ -360,7 +367,7 @@ def test_adapter_delegates_duplicate_to_real_source_intake_owner(tmp_path: Path)
     candidate = load_yaml(stage)["candidates"][0]
     assert candidate["status"] == "duplicate"
     assert candidate["record_id"] == "p-existing-canonical"
-    record = load_yaml(tmp_path / "kb/units/papers/p-existing-canonical/record.yaml")
+    record = load_yaml(tmp_path / "units/papers/p-existing-canonical/record.yaml")
     assert record["payload"]["source_search"]["selections"] == [
         {
             "stage_id": stage.stem,
@@ -400,7 +407,7 @@ def test_owner_nonzero_is_sanitized_and_adapter_never_rewrites_stage(tmp_path: P
     assert stage.read_bytes() == before
     for forbidden in FORBIDDEN_PUBLIC:
         assert forbidden not in result["public_message"]
-    protocol_text = (tmp_path / "kb/.runtime/literature-selection/failed.json").read_text(
+    protocol_text = (tmp_path / ".runtime/literature-selection/failed.json").read_text(
         encoding="utf-8"
     )
     for forbidden in FORBIDDEN_PUBLIC:
@@ -471,7 +478,7 @@ def test_unexpected_failure_closes_claim_fd_but_preserves_recovery_claim(
 
     with pytest.raises(OSError):
         os.fstat(claimed["descriptor"])
-    claim_path = tmp_path / f"kb/.runtime/literature-selection/recover-{failure_point}.json"
+    claim_path = tmp_path / f".runtime/literature-selection/recover-{failure_point}.json"
     claim = json.loads(claim_path.read_text(encoding="utf-8"))
     assert claim["status"] == "in_progress"
     assert len(claim["claim_token"]) == 64
@@ -481,7 +488,7 @@ def test_stage_change_between_adapter_binding_and_owner_use_fails_closed(tmp_pat
     module = _search_module()
     intake = module.INTAKE_SCRIPT
     stage = _terminal_stage(tmp_path)
-    before_units = _snapshot(tmp_path / "kb/units")
+    before_units = _snapshot(tmp_path / "units")
 
     def race(argv, *, env):
         del env
@@ -506,7 +513,7 @@ def test_stage_change_between_adapter_binding_and_owner_use_fails_closed(tmp_pat
 
     assert result["exit_code"] == 1
     assert result["counts"]["failed"] == 1
-    assert _snapshot(tmp_path / "kb/units") == before_units
+    assert _snapshot(tmp_path / "units") == before_units
 
 
 def test_display_binding_rejects_candidate_change_before_adapter_starts(
@@ -530,7 +537,7 @@ def test_display_binding_rejects_candidate_change_before_adapter_starts(
         )
 
     assert calls == []
-    assert not (tmp_path / "kb/.runtime/literature-selection/display-stale.json").exists()
+    assert not (tmp_path / ".runtime/literature-selection/display-stale.json").exists()
 
 
 def test_stale_mixed_retry_cannot_use_one_old_receipt_to_bypass_display_binding(
@@ -557,7 +564,7 @@ def test_stale_mixed_retry_cannot_use_one_old_receipt_to_bypass_display_binding(
         )
 
     assert calls == []
-    assert not (tmp_path / "kb/.runtime/literature-selection/mixed-stale.json").exists()
+    assert not (tmp_path / ".runtime/literature-selection/mixed-stale.json").exists()
 
 
 @pytest.mark.parametrize("returncode", [23, 124])
@@ -634,7 +641,7 @@ def test_old_append_only_selection_receipt_survives_later_display_update(
         record_id="p-shared-selection-history",
     )
     payload = _selection(stage)
-    record_path = tmp_path / "kb/units/papers/p-shared-selection-history/record.yaml"
+    record_path = tmp_path / "units/papers/p-shared-selection-history/record.yaml"
     record = load_yaml(record_path)
     record["payload"]["source_search"]["selections"].append(
         {
@@ -759,7 +766,7 @@ def test_invalid_selection_payload_fails_before_workspace_mutation(
         )
 
     assert _snapshot(tmp_path) == before
-    assert not (tmp_path / "kb/.runtime/literature-selection/must-not-exist.json").exists()
+    assert not (tmp_path / ".runtime/literature-selection/must-not-exist.json").exists()
 
 
 def test_selection_payload_loader_rejects_symlink_oversize_malformed_and_unknown_fields(
@@ -813,7 +820,7 @@ def test_adapter_rejects_duplicate_yaml_keys_before_owner_or_protocol(tmp_path: 
         )
 
     assert calls == []
-    assert not (tmp_path / "kb/.runtime/literature-selection/duplicate-yaml.json").exists()
+    assert not (tmp_path / ".runtime/literature-selection/duplicate-yaml.json").exists()
 
 
 @pytest.mark.parametrize("replacement", ["symlink", "fifo"])
@@ -1000,7 +1007,7 @@ def test_initial_whole_stage_race_fails_before_owner_use(
     assert result["exit_code"] == 1
     assert result["counts"]["failed"] == 1
     protocol = json.loads(
-        (tmp_path / "kb/.runtime/literature-selection/initial-race.json").read_text(
+        (tmp_path / ".runtime/literature-selection/initial-race.json").read_text(
             encoding="utf-8"
         )
     )
@@ -1055,11 +1062,11 @@ def test_owner_success_with_unrelated_stage_rewrite_preserves_success_and_stops(
         "already_materialized": 0,
         "failed": 1,
     }
-    assert (tmp_path / "kb/units/papers/p-paper-a-materialized/record.yaml").is_file()
+    assert (tmp_path / "units/papers/p-paper-a-materialized/record.yaml").is_file()
     protocol = json.loads(
         (
             tmp_path
-            / f"kb/.runtime/literature-selection/owner-rewrite-{external_mutation}.json"
+            / f".runtime/literature-selection/owner-rewrite-{external_mutation}.json"
         ).read_text(encoding="utf-8")
     )
     assert protocol["integrity_failure"] is True
@@ -1103,7 +1110,7 @@ def test_whole_stage_change_between_items_breaks_expected_snapshot_chain(
     assert result["counts"]["newly_materialized"] == 1
     assert result["counts"]["failed"] == 1
     protocol = json.loads(
-        (tmp_path / "kb/.runtime/literature-selection/between-items.json").read_text(
+        (tmp_path / ".runtime/literature-selection/between-items.json").read_text(
             encoding="utf-8"
         )
     )
@@ -1123,7 +1130,7 @@ def test_protocol_name_is_single_use_and_rejected_before_owner_rerun(tmp_path: P
         protocol_name="single-use.json",
         owner_runner=runner,
     )
-    before_units = _snapshot(tmp_path / "kb/units")
+    before_units = _snapshot(tmp_path / "units")
 
     def forbidden_owner(*_args, **_kwargs):
         raise AssertionError("used protocol name must fail before owner dispatch")
@@ -1136,14 +1143,14 @@ def test_protocol_name_is_single_use_and_rejected_before_owner_rerun(tmp_path: P
             owner_runner=forbidden_owner,
         )
 
-    assert _snapshot(tmp_path / "kb/units") == before_units
+    assert _snapshot(tmp_path / "units") == before_units
 
 
 def test_protocol_is_durably_claimed_before_owner_dispatch(tmp_path: Path) -> None:
     module = _search_module()
     stage = _terminal_stage(tmp_path)
     payload = _selection(stage)
-    protocol_path = tmp_path / "kb/.runtime/literature-selection/preclaimed.json"
+    protocol_path = tmp_path / ".runtime/literature-selection/preclaimed.json"
 
     def owner(argv, *, env):
         del env
@@ -1205,7 +1212,7 @@ def test_protocol_finalization_rejects_same_bytes_replacement_of_owned_claim(
     module = _search_module()
     stage = _terminal_stage(tmp_path)
     payload = _selection(stage)
-    protocol_path = tmp_path / "kb/.runtime/literature-selection/swapped-claim.json"
+    protocol_path = tmp_path / ".runtime/literature-selection/swapped-claim.json"
 
     def owner(argv, *, env):
         del env
@@ -1237,7 +1244,7 @@ def test_protocol_claim_race_never_overwrites_competing_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _search_module()
-    destination = tmp_path / "kb/.runtime/literature-selection/raced.json"
+    destination = tmp_path / ".runtime/literature-selection/raced.json"
     competing = '{"writer":"competing"}\n'
     original_open = module.os.open
     raced = False

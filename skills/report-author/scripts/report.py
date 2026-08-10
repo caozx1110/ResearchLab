@@ -35,7 +35,7 @@ import yaml
 from research.bibliography import BibliographyError, bibliography_from_records
 from research.common import add_project_root_argument, load_program_reporting_events, load_yaml, print_resolved_project_roots, utc_now_iso, write_text_if_changed, write_yaml_if_changed
 from research.confirm import apply_confirmation
-from research.core import command_mutation, ensure_workspace, checkpoint_and_report, project_root, user_root
+from research.core import command_mutation, ensure_workspace, checkpoint_and_report, kb_root, project_root, user_root
 from research.evidence import build_verification_receipt, read_claims, validate_claims
 from research.figures import FigureIndexError, load_current_figure_index
 from research.judgements import (
@@ -75,6 +75,7 @@ from research.paper_draft_runtime import (
     paper_draft_section_path,
 )
 from research.preference_selection import resolve_task_preferences, selection_binding
+from research.paths import rel
 from research.report_editorial import (
     EditorialError,
     build_editorial_fill_scaffold,
@@ -391,8 +392,8 @@ def _confirmed_judgement_event(
         return False, "confirmation_status=stale; missing: current ConfirmationReceipt"
     canonical_owner = JUDGEMENT_OWNER_BY_KIND.get(subject_kind)
     try:
-        canonical_path = artifact_path.relative_to(root.resolve()).as_posix()
-    except ValueError:
+        canonical_path = rel(root, artifact_path)
+    except (SystemExit, ValueError):
         return False, "confirmation_status=stale; missing: canonical judgement binding"
     if not canonical_owner:
         return False, "confirmation_status=stale; missing: canonical judgement owner"
@@ -701,7 +702,7 @@ def _collect_unit_ids(value: Any, *, key: str = "") -> set[str]:
 
 
 def program_unit_ids(root: Path, program_id: str, events: list[dict[str, Any]]) -> list[str]:
-    state = load_yaml(root / "kb" / "programs" / program_id / "state.yaml", default={})
+    state = load_yaml(kb_root(root) / "programs" / program_id / "state.yaml", default={})
     unit_ids = _collect_unit_ids(state)
     unit_ids.update(_collect_unit_ids(events))
     return sorted(unit_ids)
@@ -969,7 +970,7 @@ def load_confirmed_survey_claim_source(
     violations = validate_claims(canonical_claims)
     if violations:
         return None, "confirmation_status=stale; missing: structurally valid survey claims and evidence"
-    canonical_path = artifact_path.relative_to(root.resolve()).as_posix()
+    canonical_path = rel(root, artifact_path)
     expected_binding = confirmation_binding(
         record,
         owner="literature-synthesizer",
@@ -1064,7 +1065,7 @@ def load_decisions(
     current_container_validators: list[Callable[[], bool]] = []
     known_ids: set[str] = set()
     if snapshot_batch is not None:
-        target_path = root.resolve() / decisions_relative
+        target_path = kb_root(root).absolute().joinpath(*decisions_relative.parts[1:])
         matching_containers = [
             container
             for container in snapshot_batch.side_containers
@@ -1778,8 +1779,8 @@ def _strict_project_mapping(
     label: str,
 ) -> tuple[dict[str, Any], ProjectFileSnapshot]:
     try:
-        relative = path.absolute().relative_to(root.absolute()).as_posix()
-    except ValueError as exc:
+        relative = rel(root, path.absolute())
+    except (SystemExit, ValueError) as exc:
         raise PaperDraftRuntimeError(f"{label} escaped the workspace") from exc
     snapshot = snapshot_project_file(root, relative)
     if snapshot is None:
@@ -1818,7 +1819,7 @@ def prepare_paper_draft(root: Path, program_id: str) -> int:
     for fill_path in fill_paths:
         if not (fill_path.exists() or fill_path.is_symlink()):
             continue
-        relative = fill_path.absolute().relative_to(root.absolute()).as_posix()
+        relative = rel(root, fill_path.absolute())
         if snapshot_project_file(root, relative) is None:
             unsafe_fills.append(fill_path)
     if unsafe_fills:
@@ -1969,7 +1970,7 @@ def _paper_draft_review_context(
         record,
         expected_snapshot=dict(snapshot),
         owner="report-author",
-        path=path.relative_to(root.absolute()).as_posix(),
+        path=rel(root, path),
         root=root,
     )
     inputs = load_paper_draft_inputs(root, program_id)
@@ -2136,7 +2137,7 @@ def export_paper_draft(root: Path, program_id: str) -> int:
 
     if not publication_is_current():
         raise PaperDraftRuntimeError("发布需要七节全部唯一、当前且已确认。")
-    output_root = root / "kb" / "output" / program_id
+    output_root = kb_root(root) / "output" / program_id
     markdown_path = output_root / "paper-draft.md"
     latex_path = output_root / "paper-draft.tex"
     bibliography_path = output_root / "references.bib"
@@ -2209,7 +2210,7 @@ def _editorial_root(root: Path, program_id: str, output_kind: str) -> Path:
     clean = _safe_editorial_program_id(program_id)
     if output_kind not in {"weekly", "ppt-materials"}:
         raise EditorialError("unsupported editorial output kind")
-    return root / "kb" / "programs" / clean / "reports" / "editorial" / output_kind
+    return kb_root(root) / "programs" / clean / "reports" / "editorial" / output_kind
 
 
 def _editorial_paths(root: Path, program_id: str, output_kind: str) -> tuple[Path, Path, Path]:
@@ -2217,7 +2218,7 @@ def _editorial_paths(root: Path, program_id: str, output_kind: str) -> tuple[Pat
     manifest_path = control_root / "manifest.yaml"
     fill_path = control_root / "fill.yaml"
     output_path = (
-        root / "kb" / "programs" / _safe_editorial_program_id(program_id) / "reports" / "weekly.md"
+        kb_root(root) / "programs" / _safe_editorial_program_id(program_id) / "reports" / "weekly.md"
         if output_kind == "weekly"
         else user_root(root) / "report-materials" / f"{program_id}-ppt-materials.md"
     )
@@ -2609,7 +2610,7 @@ def prepare_editorial_report(
 ) -> int:
     manifest_path, fill_path, _output_path = _editorial_paths(root, program_id, output_kind)
     manifest: dict[str, Any] | None = None
-    prior_manifest_snapshot = snapshot_project_file(root, manifest_path.relative_to(root).as_posix())
+    prior_manifest_snapshot = snapshot_project_file(root, rel(root, manifest_path))
     if prior_manifest_snapshot is not None:
         try:
             prior_manifest = _editorial_snapshot_mapping(prior_manifest_snapshot, label="editorial manifest")
@@ -2659,13 +2660,13 @@ def prepare_editorial_report(
         require_current()
         if prior_manifest_snapshot is not None and not prior_manifest_snapshot.is_current():
             raise EditorialError("editorial manifest changed before prepare acquired the workspace lock")
-        existing_manifest_snapshot = snapshot_project_file(root, manifest_path.relative_to(root).as_posix())
+        existing_manifest_snapshot = snapshot_project_file(root, rel(root, manifest_path))
         if prior_manifest_snapshot is None and existing_manifest_snapshot is not None:
             raise EditorialError("editorial manifest appeared before prepare acquired the workspace lock")
         existing_manifest = None
         if existing_manifest_snapshot is not None:
             existing_manifest = _editorial_snapshot_mapping(existing_manifest_snapshot, label="editorial manifest")
-        existing_fill_snapshot = snapshot_project_file(root, fill_path.relative_to(root).as_posix())
+        existing_fill_snapshot = snapshot_project_file(root, rel(root, fill_path))
         if existing_manifest == manifest and existing_fill_snapshot is not None:
             existing_fill = _editorial_snapshot_mapping(existing_fill_snapshot, label="editorial fill")
             if not fill_matches_manifest(existing_fill, manifest):
@@ -2688,7 +2689,7 @@ def prepare_editorial_report(
 
 def verify_editorial_report(root: Path, program_id: str, output_kind: str) -> int:
     manifest_path, fill_path, output_path = _editorial_paths(root, program_id, output_kind)
-    manifest_snapshot = snapshot_project_file(root, manifest_path.relative_to(root).as_posix())
+    manifest_snapshot = snapshot_project_file(root, rel(root, manifest_path))
     manifest = _editorial_snapshot_mapping(manifest_snapshot, label="editorial manifest")
     violations = editorial_manifest_violations(manifest)
     if violations:
@@ -2696,7 +2697,7 @@ def verify_editorial_report(root: Path, program_id: str, output_kind: str) -> in
     if manifest.get("program_id") != program_id or manifest.get("output_kind") != output_kind:
         raise EditorialError("editorial manifest identity does not match this verification request")
     _current, inputs = _reload_current_editorial_manifest(root, manifest)
-    fill_snapshot = snapshot_project_file(root, fill_path.relative_to(root).as_posix())
+    fill_snapshot = snapshot_project_file(root, rel(root, fill_path))
     fill = _editorial_snapshot_mapping(fill_snapshot, label="editorial fill")
     fill_violations = validate_editorial_fill(fill, manifest)
     if fill_violations:
@@ -2787,7 +2788,7 @@ def main() -> int:
             bibliography = load_bibliography_inputs(root, args.program_id)
         except BibliographyError as exc:
             raise SystemExit(f"无法导出引用：{exc}") from exc
-        path = root / "kb" / "output" / args.program_id / "references.bib"
+        path = kb_root(root) / "output" / args.program_id / "references.bib"
 
         def require_bibliography_current_at_commit() -> None:
             if not bibliography.is_current():
@@ -2818,7 +2819,7 @@ def main() -> int:
             target_paths=[path],
         )
         return 0
-    reports_root = root / "kb" / "programs" / args.program_id / "reports"
+    reports_root = kb_root(root) / "programs" / args.program_id / "reports"
     inputs = load_report_inputs(
         root,
         args.program_id,
@@ -2871,7 +2872,7 @@ def main() -> int:
         write_text_if_changed(path, text)
         if publishes_formal_lane and not inputs.formal_inputs_are_current():
             raise RuntimeError("formal report inputs changed during publication")
-    print(path.relative_to(root))
+    print(rel(root, path))
     checkpoint_and_report(
         root,
         trigger="milestone",

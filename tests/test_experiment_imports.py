@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 
@@ -32,11 +32,12 @@ def _main(module, monkeypatch: pytest.MonkeyPatch, root: Path, *args: str) -> in
 
 
 def _plan(module, monkeypatch: pytest.MonkeyPatch, root: Path, title: str = "import target") -> tuple[str, Path]:
+    initialize_test_workspace(root)
     assert _main(module, monkeypatch, root, "plan", "--title", title, "--program-id", "program-import") == 0
-    record_path = next((root / "kb" / "units" / "experiments").glob("*/record.yaml"))
+    record_path = next((root / "units" / "experiments").glob("*/record.yaml"))
     experiment_id = str(load_yaml(record_path)["id"])
     write_yaml_if_changed(
-        root / "kb" / "programs" / "program-import" / "state.yaml",
+        root / "programs" / "program-import" / "state.yaml",
         {"program_id": "program-import", "stage": "experiment", "active_unit_ids": [experiment_id]},
     )
     return experiment_id, record_path
@@ -170,7 +171,7 @@ def test_imports_ten_runs_idempotently_and_conflicts_fail_closed(
     assert str(tmp_path) not in json.dumps(run_log, ensure_ascii=False)
     assert len(list((unit_root / "runs").glob("run-*.md"))) == 10
     assert len(list((unit_root / "imports").glob("*.json"))) == 1
-    events_path = tmp_path / "kb" / "programs" / "program-import" / "workflow" / "reporting-events.yaml"
+    events_path = tmp_path / "programs" / "program-import" / "workflow" / "reporting-events.yaml"
     events = [item for item in load_yaml(events_path)["items"] if item["event_type"] == "experiment-run-import"]
     assert len(events) == 1
     audit = audit_workspace(tmp_path)

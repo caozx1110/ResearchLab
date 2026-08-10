@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from repo_paths import initialize_test_workspace
+
 import copy
 import importlib.util
 import json
@@ -36,7 +38,7 @@ def _workspace(tmp_path: Path, idea) -> Path:
     root = tmp_path / "workspace"
     (root / ".agents").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
-    ensure_workspace(root)
+    initialize_test_workspace(root)
     write_yaml_if_changed(
         config_root(root) / "user-profile.yaml",
         {
@@ -164,7 +166,7 @@ def test_generate_is_agent_authored_two_phase_and_materializes_all_candidates_at
         "idea-bundle-agent-authored",
     )
     assert _run(idea, monkeypatch, root, *common, "--phase", "prepare") == 0
-    working = root / "kb/synthesis/idea-pools/idea-bundle-agent-authored"
+    working = root / "synthesis/idea-pools/idea-bundle-agent-authored"
     fill_path = working / "generation-fill.yaml"
     fill = load_yaml(fill_path, default={})
     assert fill["request_context"]["problem"] == "Original problem exactly"
@@ -219,7 +221,7 @@ def test_generate_is_agent_authored_two_phase_and_materializes_all_candidates_at
         == 0
     )
 
-    records = [load_yaml(path) for path in sorted((root / "kb/units/ideas").glob("*/record.yaml"))]
+    records = [load_yaml(path) for path in sorted((root / "units/ideas").glob("*/record.yaml"))]
     assert len(records) == 2
     assert {record["payload"]["candidate"]["strategy"] for record in records} == {
         "Learn a bounded memory gate",
@@ -249,7 +251,7 @@ def test_generate_invalid_slot_has_no_partial_candidate_or_bundle_write(
         "idea-bundle-atomic",
     )
     _run(idea, monkeypatch, root, *common, "--phase", "prepare")
-    working = root / "kb/synthesis/idea-pools/idea-bundle-atomic"
+    working = root / "synthesis/idea-pools/idea-bundle-atomic"
     fill_path = working / "generation-fill.yaml"
     prepared_index = working / "index.yaml"
     prepared_bytes = prepared_index.read_bytes()
@@ -272,7 +274,7 @@ def test_generate_invalid_slot_has_no_partial_candidate_or_bundle_write(
     prepared = load_yaml(prepared_index)
     assert prepared["status"] == "prepared"
     assert prepared["authoring_contract"]["schema"] == "idea-authoring-anchor/v1"
-    assert list((root / "kb/units/ideas").glob("*/record.yaml")) == []
+    assert list((root / "units/ideas").glob("*/record.yaml")) == []
 
     retry_fill = load_yaml(fill_path)
     retry_fill["candidates"][1].update(
@@ -287,7 +289,7 @@ def test_generate_invalid_slot_has_no_partial_candidate_or_bundle_write(
     write_yaml_if_changed(fill_path, retry_fill)
     assert _run(idea, monkeypatch, root, *common, "--phase", "verify") == 0
     assert load_yaml(prepared_index)["status"] == "active"
-    assert len(list((root / "kb/units/ideas").glob("*/record.yaml"))) == 2
+    assert len(list((root / "units/ideas").glob("*/record.yaml"))) == 2
 
 
 def test_generate_stale_preference_receipt_rejects_before_candidate_or_bundle_write(
@@ -306,7 +308,7 @@ def test_generate_stale_preference_receipt_rejects_before_candidate_or_bundle_wr
         "idea-bundle-stale",
     )
     _run(idea, monkeypatch, root, *common, "--phase", "prepare")
-    working = root / "kb/synthesis/idea-pools/idea-bundle-stale"
+    working = root / "synthesis/idea-pools/idea-bundle-stale"
     prepared_index = working / "index.yaml"
     prepared_bytes = prepared_index.read_bytes()
     fill_path = working / "generation-fill.yaml"
@@ -348,7 +350,7 @@ def test_generate_stale_preference_receipt_rejects_before_candidate_or_bundle_wr
     prepared = load_yaml(prepared_index)
     assert prepared["status"] == "prepared"
     assert prepared["authoring_contract"]["schema"] == "idea-authoring-anchor/v1"
-    assert list((root / "kb/units/ideas").glob("*/record.yaml")) == []
+    assert list((root / "units/ideas").glob("*/record.yaml")) == []
 
 
 @pytest.mark.parametrize("operation", ["analyze", "review", "discuss"])
