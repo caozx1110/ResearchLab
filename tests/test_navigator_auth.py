@@ -90,6 +90,7 @@ def test_data_requests_require_token(tmp_path: Path, method: str) -> None:
 
 
 def test_static_get_requires_token_and_healthz_is_exempt(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     static_file = tmp_path / "index.html"
     static_file.write_text("ready", encoding="utf-8")
 
