@@ -15,6 +15,20 @@ def test_all_skill_metadata_is_valid():
     assert validate_skills(SKILLS_ROOT) == []
 
 
+def test_meta_skill_metadata_exposes_complementary_routing_boundaries():
+    payload = yaml.safe_load((SKILLS_ROOT / "metadata.yaml").read_text(encoding="utf-8"))
+    catalog = payload["skills"]
+    discussion = catalog["discussion-archivist"]["interface"]
+    evolution = catalog["skill-evolution-advisor"]["interface"]
+    orchestrator = catalog["research-orchestrator"]["interface"]
+
+    assert "research-route" in discussion["default_prompt"]
+    assert "skill/workflow" in discussion["default_prompt"]
+    assert "skill/workflow" in evolution["default_prompt"]
+    assert "model, method, or experiment" in evolution["default_prompt"]
+    assert "ordered route decision" in orchestrator["default_prompt"]
+
+
 def _copied_skills_root(tmp_path: Path) -> Path:
     copied = tmp_path / "skills"
     shutil.copytree(SKILLS_ROOT, copied)
