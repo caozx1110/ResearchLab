@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, install_test_workspace_rules
 
 from research.git_ops import dirty_kb_paths, ensure_kb_git_repo, kb_repo_path
 from research.journal import mutation_transaction
@@ -24,6 +24,7 @@ from research.workspace_layout import (
 
 def _initialize(workspace: Path) -> None:
     workspace.mkdir()
+    install_test_workspace_rules(workspace)
     initialize_workspace_layout(workspace, REPO_ROOT)
     ensure_workspace(workspace)
 

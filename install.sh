@@ -303,7 +303,7 @@ done
 [ -d "$REPO_ROOT/runtime/lib" ] || die "安装包不完整：缺少 runtime/lib"
 [ -d "$REPO_ROOT/skills" ] || die "安装包不完整：缺少 skills"
 [ -f "$REPO_ROOT/runtime/AGENTS.md" ] || die "安装包不完整：缺少 runtime/AGENTS.md"
-[ -f "$REPO_ROOT/runtime/AGENT_GUIDE.md" ] || die "安装包不完整：缺少 runtime/AGENT_GUIDE.md"
+[ -f "$REPO_ROOT/runtime/WORKSPACE_RULES.md" ] || die "安装包不完整：缺少 runtime/WORKSPACE_RULES.md"
 [ -f "$REPO_ROOT/install-lib/ws_sync.py" ] || die "安装包不完整：缺少 install-lib/ws_sync.py"
 is_command python3 || die "需要 Python 3，请安装后重试"
 
@@ -2182,6 +2182,8 @@ uninstall_claude_project() {
 install_claude_system() {
   local skill name block_file block_digest
   ensure_dir "$HOME/.claude/skills"
+  ensure_dir "$HOME/.claude/.agents"
+  link_force "$REPO_ROOT/runtime/WORKSPACE_RULES.md" "$HOME/.claude/.agents/WORKSPACE_RULES.md"
   # System scope links each skill back to the source tree; entrypoints resolve
   # runtime/lib from their own physical source path.
   for skill in "$SKILLS_SRC"/*; do
@@ -2206,6 +2208,8 @@ uninstall_claude_system() {
     name=${skill##*/}
     remove_symlink_if_matches "$HOME/.claude/skills/$name" "$skill"
   done
+  remove_symlink_if_matches "$HOME/.claude/.agents/WORKSPACE_RULES.md" "$REPO_ROOT/runtime/WORKSPACE_RULES.md"
+  rmdir "$HOME/.claude/.agents" >/dev/null 2>&1 || true
   remove_managed_block "$HOME/.claude/CLAUDE.md"
 }
 
@@ -2240,7 +2244,7 @@ install_codex_system() {
   ensure_dir "$global_dir/.agents"
   link_force "$REPO_ROOT/skills" "$global_dir/.agents/skills"
   link_force "$REPO_ROOT/runtime/lib" "$global_dir/.agents/lib"
-  link_force "$REPO_ROOT/runtime/AGENTS.md" "$global_dir/.agents/AGENTS.md"
+  link_force "$REPO_ROOT/runtime/WORKSPACE_RULES.md" "$global_dir/.agents/WORKSPACE_RULES.md"
   link_force "$REPO_ROOT/runtime/AGENTS.md" "$global_dir/AGENTS.md"
   if [ -d "$HOME/.codex/skills" ]; then
     for skill in "$SKILLS_SRC"/*; do
@@ -2261,6 +2265,8 @@ uninstall_codex_system() {
   global_dir="$HOME/.codex/$INSTALL_NAME"
   remove_symlink_if_matches "$global_dir/.agents/skills" "$REPO_ROOT/skills" "$REPO_ROOT/.agents/skills"
   remove_symlink_if_matches "$global_dir/.agents/lib" "$REPO_ROOT/runtime/lib" "$REPO_ROOT/.agents/lib"
+  remove_symlink_if_matches "$global_dir/.agents/WORKSPACE_RULES.md" "$REPO_ROOT/runtime/WORKSPACE_RULES.md"
+  # Compatibility cleanup for system installs created before Wave 3.
   remove_symlink_if_matches "$global_dir/.agents/AGENTS.md" "$REPO_ROOT/runtime/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
   rmdir "$global_dir/.agents" >/dev/null 2>&1 || true
   # Compatibility cleanup for system installs created before the source split.

@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, install_test_workspace_rules
 
 from research.common import skill_script_for_command
 from research.core import project_root, skills_root
@@ -79,10 +79,13 @@ def test_write_command_root_and_env_override_symlinked_agents_target(tmp_path: P
     symlink_target.mkdir()
     sandbox_root.mkdir()
     (symlink_target / ".agents").mkdir()
-    (symlink_target / ".agents" / "skills").symlink_to(real_root / "skills", target_is_directory=True)
-    (symlink_target / ".agents" / "lib").symlink_to(real_root / "runtime" / "lib", target_is_directory=True)
     (symlink_target / "AGENTS.md").write_text("# target\n", encoding="utf-8")
-    (sandbox_root / ".agents").symlink_to(symlink_target / ".agents", target_is_directory=True)
+    (sandbox_root / ".agents").mkdir()
+    (sandbox_root / ".agents" / "skills").symlink_to(real_root / "skills", target_is_directory=True)
+    (sandbox_root / ".agents" / "lib").symlink_to(real_root / "runtime" / "lib", target_is_directory=True)
+    (sandbox_root / ".agents" / "WORKSPACE_RULES.md").write_bytes(
+        (real_root / "runtime" / "WORKSPACE_RULES.md").read_bytes()
+    )
     (sandbox_root / "AGENTS.md").write_text("# sandbox\n", encoding="utf-8")
     script = sandbox_root / ".agents" / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     env = {**os.environ, "PYTHONPATH": str(real_root / "runtime" / "lib")}
@@ -120,6 +123,7 @@ def test_kb_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, monke
     cwd = tmp_path / "elsewhere"
     root.mkdir()
     cwd.mkdir()
+    install_test_workspace_rules(root)
     monkeypatch.chdir(cwd)
     monkeypatch.setattr(sys, "argv", ["kb.py", "--root", str(root), "init"])
 
@@ -138,6 +142,7 @@ def test_config_init_warns_when_cwd_differs_from_explicit_root(tmp_path: Path, m
     cwd = tmp_path / "elsewhere"
     root.mkdir()
     cwd.mkdir()
+    install_test_workspace_rules(root)
     initialize_workspace_layout(root, _project_root())
     monkeypatch.chdir(cwd)
     monkeypatch.setattr(sys, "argv", ["config.py", "--root", str(root), "init"])
@@ -164,6 +169,7 @@ def test_owner_json_and_write_success_hide_resolved_paths(tmp_path: Path) -> Non
     )
     eval_root = tmp_path / "eval-workspace"
     eval_root.mkdir()
+    install_test_workspace_rules(eval_root)
     initialize_workspace_layout(eval_root, real_root)
     ensure_workspace(eval_root)
     dataset = eval_root / "eval" / "research-value" / "dataset" / "smoke.yaml"
@@ -190,6 +196,7 @@ def test_owner_json_and_write_success_hide_resolved_paths(tmp_path: Path) -> Non
     )
     project = tmp_path / "retrospective-workspace"
     project.mkdir()
+    install_test_workspace_rules(project)
     initialize_workspace_layout(project, real_root)
     ensure_workspace(project)
     retrospective = subprocess.run(
@@ -218,6 +225,7 @@ def test_kb_git_init_reports_state_without_repository_path(tmp_path: Path) -> No
     script = real_root / "skills" / "knowledge-base-manager" / "scripts" / "kb.py"
     root = tmp_path / "git-workspace"
     root.mkdir()
+    install_test_workspace_rules(root)
     initialized = subprocess.run(
         [sys.executable, str(script), "--root", str(root), "init"],
         cwd=root,

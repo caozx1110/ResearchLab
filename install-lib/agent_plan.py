@@ -176,20 +176,21 @@ def distributable_tree(source_root: Path) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     for relative in _git_tracked_paths(source_root):
         destination = release_destination(relative)
+        root_pointer = relative == "runtime/AGENTS.md"
         installer_input = (
             relative == "install.sh"
             or relative == "requirements.txt"
             or relative.startswith("install-lib/")
         )
-        if destination is None and not installer_input:
+        if destination is None and not installer_input and not root_pointer:
             continue
         source = source_root / relative
         mode = source.lstat().st_mode
         destinations: list[str] = []
         if destination is not None:
             destinations.append(destination)
-            if relative == "runtime/AGENTS.md":
-                destinations.append("AGENTS.md")
+        if root_pointer:
+            destinations.append("AGENTS.md")
         entry: dict[str, Any] = {
             "path": relative,
             "role": "installer-input" if installer_input else "managed-payload",

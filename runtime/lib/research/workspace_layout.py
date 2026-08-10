@@ -25,11 +25,13 @@ from .path_contract import (
 
 WORKSPACE_LAYOUT_SCHEMA = "research-workspace-layout/v1"
 WORKSPACE_LAYOUT_MARKER_RELATIVE = Path("config/workspace-layout.yaml")
+WORKSPACE_RULES_RELATIVE = Path(".agents/WORKSPACE_RULES.md")
 WORKSPACE_LAYOUT_MARKER_BYTES = (
     b"schema: research-workspace-layout/v1\n"
     b"layout: workspace-root\n"
 )
 _MAX_MARKER_BYTES = 4096
+_MAX_WORKSPACE_RULES_BYTES = 64 * 1024
 
 
 class WorkspaceLayoutError(PathContractError):
@@ -192,6 +194,85 @@ def require_current_workspace_layout(snapshot: WorkspaceLayoutSnapshot) -> None:
         raise WorkspaceLayoutError("workspace layout identity changed during the operation")
 
 
+def require_workspace_rules(workspace_root: str | Path) -> None:
+    """Require the installed minimal rule layer before any workspace write."""
+
+    workspace = _lexical_absolute(workspace_root)
+    _workspace_metadata(workspace)
+    agents = workspace / ".agents"
+    rules = workspace / WORKSPACE_RULES_RELATIVE
+    message = (
+        "Workspace rules are missing or unsafe; only read-only kb help or "
+        "kb doctor rescue is allowed until the installation is repaired."
+    )
+    try:
+        agents_metadata = agents.lstat()
+        rules_metadata = rules.lstat()
+    except FileNotFoundError as exc:
+        raise WorkspaceLayoutError(message) from exc
+    if _node_kind(agents_metadata) != "directory" or _node_kind(rules_metadata) != "file":
+        raise WorkspaceLayoutError(message)
+    if not 0 < rules_metadata.st_size <= _MAX_WORKSPACE_RULES_BYTES:
+        raise WorkspaceLayoutError(message)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        agents_descriptor = os.open(agents, directory_flags)
+    except OSError as exc:
+        raise WorkspaceLayoutError(message) from exc
+    try:
+        if _node_identity(os.fstat(agents_descriptor)) != _node_identity(agents_metadata):
+            raise WorkspaceLayoutError(message)
+        try:
+            anchored_metadata = os.stat(
+                "WORKSPACE_RULES.md",
+                dir_fd=agents_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise WorkspaceLayoutError(message) from exc
+        if _read_identity(anchored_metadata) != _read_identity(rules_metadata):
+            raise WorkspaceLayoutError(message)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open("WORKSPACE_RULES.md", flags, dir_fd=agents_descriptor)
+        except OSError as exc:
+            raise WorkspaceLayoutError(message) from exc
+        try:
+            opened = os.fstat(descriptor)
+            if _read_identity(opened) != _read_identity(anchored_metadata):
+                raise WorkspaceLayoutError(message)
+            chunks: list[bytes] = []
+            remaining = opened.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 64 * 1024))
+                if not chunk:
+                    raise WorkspaceLayoutError(message)
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise WorkspaceLayoutError(message)
+            if _read_identity(opened) != _read_identity(os.fstat(descriptor)):
+                raise WorkspaceLayoutError(message)
+            content = b"".join(chunks)
+        finally:
+            os.close(descriptor)
+        try:
+            current_agents_metadata = agents.lstat()
+        except OSError as exc:
+            raise WorkspaceLayoutError(message) from exc
+        if _node_identity(current_agents_metadata) != _node_identity(agents_metadata):
+            raise WorkspaceLayoutError(message)
+    finally:
+        os.close(agents_descriptor)
+    if not content.startswith(b"# WORKSPACE_RULES "):
+        raise WorkspaceLayoutError(message)
+
+
 def _preflight_initialization(workspace: Path) -> os.stat_result:
     root_metadata = _workspace_metadata(workspace)
     allowed_integration = set(RESERVED_WORKSPACE_TOP_LEVEL) - {".git"}
@@ -309,10 +390,12 @@ __all__ = [
     "WORKSPACE_LAYOUT_MARKER_BYTES",
     "WORKSPACE_LAYOUT_MARKER_RELATIVE",
     "WORKSPACE_LAYOUT_SCHEMA",
+    "WORKSPACE_RULES_RELATIVE",
     "WorkspaceLayoutError",
     "WorkspaceLayoutSnapshot",
     "initialize_workspace_layout",
     "layout_marker_path",
     "require_current_workspace_layout",
+    "require_workspace_rules",
     "resolve_workspace_roots",
 ]

@@ -82,6 +82,8 @@ Wave 2 在激活 root layout 前必须：
 
 Wave 3 必须让根 `AGENTS.md` 保持 user-owned，managed block 只含稳定 `.agents/WORKSPACE_RULES.md` 指针；删除或证明 `.agents/AGENTS.md` 重复副本的必要性。skill progressive disclosure 与最小 always-on rules 不得通过复制全文绕过。
 
+Issue #22 的 development candidate 实现该 Wave 3 obligation：根 managed block 只保留指针，`.agents/WORKSPACE_RULES.md` 是带机械身份门的最小规则层，旧 `.agents/AGENTS.md` / `.agents/AGENT_GUIDE.md` 仅按 manifest ownership 安全清理，多操作 owner 使用一跳 references。该事实随候选 PR 仍是 proposal，只有合入 default branch 后才成为本 ADR 的 accepted implementation state。
+
 Wave 4 只通过显式迁移文档/流程处理 legacy workspace。普通 install/update 不静默移动 canonical data；新 runtime 发现未迁移 legacy layout 时给出安全迁移指引并停止 root-layout 写入。
 
 ## Alternatives considered

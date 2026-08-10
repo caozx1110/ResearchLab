@@ -5,6 +5,8 @@ description: Capture skill/workflow friction, corrections, defects, improvement 
 
 # Skill Evolution Advisor
 
+> Protocol reference: `.agents/lib/research/SCHEMAS.md#memory-files` · `#confirmation-gate` · `#runtime`
+
 Preference contract: explicitly neutral with an empty eligible catalog. Governance and diagnostic privacy/detail constraints remain deterministic owner rules rather than soft research preferences.
 
 Use this skill when a real workflow exposes friction in the research system, when the user corrects the agent, or when lightweight memory should capture a confirmed habit, recurring issue, or skill defect.

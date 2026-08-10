@@ -22,18 +22,18 @@ Open Research Workspace Skills 是 knowledge-unit-first 的 research operating s
 
 ```text
 source checkout                    initialized workspace
-├── skills/                        ├── .agents/          # installed product
+├── skills/                        ├── .agents/          # product + WORKSPACE_RULES
 │   └── <15 product skills>/       ├── AGENTS.md         # user-owned + managed block
 ├── runtime/                       ├── config/
-│   ├── AGENTS.md                  │   └── workspace-layout.yaml
-│   ├── AGENT_GUIDE.md             ├── units/ programs/ synthesis/
+│   ├── AGENTS.md  # root pointer  │   └── workspace-layout.yaml
+│   ├── WORKSPACE_RULES.md          ├── units/ programs/ synthesis/
 │   └── lib/research/              ├── raw/ user/ output/ obsidian/
 ├── .agents/  # ignored local      ├── .journal/ .runtime/
 ├── AGENTS.md                      └── .git/             # optional KB history
 └── docs/
 ```
 
-仓库根 `AGENTS.md` 是开发这套 skill 系统的工作流；`runtime/AGENTS.md` 是安装后 Agent 使用 KB 的 runtime 规则源码，并映射为 `.agents/AGENTS.md`。根 `/.agents/` 只放 ignored 本地工具，绝不进入产品 inventory、release enumeration、digest 或安装 payload。三者不可混写。
+仓库根 `AGENTS.md` 是开发这套 skill 系统的工作流。`runtime/AGENTS.md` 只提供安装器写入根 managed block 的稳定加载指针；`runtime/WORKSPACE_RULES.md` 映射为安装态 `.agents/WORKSPACE_RULES.md`，是最小 always-on runtime 合同。安装态不再复制 `.agents/AGENTS.md`，也不分发 eager `AGENT_GUIDE.md`。根 `/.agents/` 只放 ignored 本地工具，绝不进入产品 inventory、release enumeration、digest 或安装 payload。开发规则、根指针、安装规则与本地工具四者不可混写。
 
 Release bundle 不包含任何私有 canonical workspace 数据。安装、更新、storage sync 和卸载只处理各自声明的 managed targets；`units/`、`programs/`、`raw/` 等数据面以及 legacy `kb/` 都不是发布内容，storage sync 不改 `.agents/**` 或根 `AGENTS.md`。
 
@@ -47,7 +47,9 @@ Persisted `kb/...` 是稳定 logical artifact namespace，不再等同于物理�
 
 Root layout 采用 reviewed canonical top-level allowlist；`.journal/`、`.runtime/` 单独分类为 operational state。`.agents/**`、`.git/**`、`.venv/**`、`.claude/**`、根 `AGENTS.md`、`CLAUDE.md` 与 `bin/**` 是 reserved integration targets，不能成为 business mutation、journal snapshot、strict-reader artifact 或普通 Git checkpoint pathspec。未知 top-level、traversal、absolute path、symlink ancestor/leaf 与 special node 全部 fail closed。根 `AGENTS.md` 仍可由用户选择进入 workspace Git history，但 installer 只可维护稳定 pointer block，业务 owner 不得写它。
 
-`path_contract.py` 提供 typed roots、logical/physical conversion、classification 与只读 no-follow precondition；`workspace_layout.py` 独占 marker activation、解析与 currentness。journal、Git、strict reader 与 shipping owner 统一消费 root-role resolver，并在 descriptor、lock 或 commit boundary 重验身份；journal key 保持 data-root-relative，持久 artifact identity 保持 `kb/...`。Wave 3 才收敛根 pointer 与最小 `WORKSPACE_RULES`；Wave 4 负责显式 legacy migration、拒绝条件和 rollback。
+`path_contract.py` 提供 typed roots、logical/physical conversion、classification 与只读 no-follow precondition；`workspace_layout.py` 独占 marker activation、解析、currentness 与最小规则身份门。journal、Git、strict reader 与 shipping owner 统一消费 root-role resolver，并在 descriptor、lock 或 commit boundary 重验身份；journal key 保持 data-root-relative，持久 artifact identity 保持 `kb/...`。Wave 3 已收敛根 pointer、最小 `WORKSPACE_RULES` 与 progressive disclosure；Wave 4 负责显式 legacy migration、拒绝条件和 rollback。
+
+根 pointer 不承载业务、诊断或恢复全文。若最小规则缺失、为空、被换成 symlink/special node 或读取期间身份漂移，公共 dispatcher 和所有 mutation transaction 都在 journal/business write 前拒绝；只保留零写的 `kb help` 与 `kb doctor` 救援面，直到重新安装修复。
 
 任何本地 scratch、worktree、提示词或工具记忆都不属于 Git 或 release bundle，也不属于开发合同。另一个 Agent 必须能只凭 fresh clone 与 GitHub 上的 tracked contracts、Issue、PR、remote commits 和 Actions 恢复任务；未 push 或仅本机可见的状态按不存在处理。
 
@@ -76,6 +78,8 @@ Root layout 采用 reviewed canonical top-level allowlist；`.journal/`、`.runt
 5. 泛化 wiki 意图由 `kb-cli` 薄路由；maintainer-only navigator 位于 `tools/`，不进入安装包或产品路由；
 6. 确定性的共同行为下沉到共享库，Agent 理解留在 runtime；
 7. 每个可发现 skill 的 metadata 由单一 manifest 确定性生成并在 CI 检查，无手工漂移副本。
+
+多操作 owner 的 `SKILL.md` 只保留 routing boundary、operation selector、核心不变量和启动澄清；schema、恢复、私有 command catalog 与 variant workflow 拆到入口直接链接的一跳 reference，并只在所选 operation 需要时加载。Validator 固定入口不超过 500 行与 64 KiB，校验 Markdown link/anchor、所有 reference 一跳可达、artifact consumer 的 shared protocol anchor，以及 200 行以上 reference 的目录和按需加载说明；语言密度不是硬失败条件。
 
 跨 program 规划也遵循这条边界：脚本枚举全部合法 action、依赖、治理门、阻塞事实和已到期订阅，runtime Agent 比较信息增益、成本风险与用户约束。Agent 选择必须保存 `PortfolioDecision`，绑定当前候选快照与 effective preference receipt；不存在或已 stale 时，`kb next` 只请求重新规划，绝不把 legacy 固定排序冒充智能选择。
 

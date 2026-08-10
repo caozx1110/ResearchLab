@@ -5,6 +5,8 @@ description: 维护研究订阅、机械到期事实与冻结运行回执；当�
 
 # Research Monitor
 
+> 协议参考：`.agents/lib/research/SCHEMAS.md#discovery-retrieval` · `#program-files` · `#runtime`
+
 把“以后继续关注”变成可恢复的订阅和 run receipt，而不是只留在聊天记录里。脚本只维护时间、状态、引用、CAS 和恢复；runtime Agent 决定搜什么、使用什么当前可用工具，以及新材料是否值得关注。
 
 ## 用户交互

@@ -60,8 +60,8 @@ def _minimal_source(root: Path) -> None:
     _write(root / "skills" / "metadata.yaml", "skills: {}\n")
     _write(root / "skills" / "kb-cli" / "SKILL.md", "---\nname: kb-cli\n---\n")
     _write(root / "skills" / "kb-cli" / "scripts" / "kb", "#!/usr/bin/env python3\n")
-    _write(root / "runtime" / "AGENTS.md", "# Installed rules\n")
-    _write(root / "runtime" / "AGENT_GUIDE.md", "# Installed guide\n")
+    _write(root / "runtime" / "AGENTS.md", "Load `.agents/WORKSPACE_RULES.md`.\n")
+    _write(root / "runtime" / "WORKSPACE_RULES.md", "# WORKSPACE_RULES — test\n")
     _write(root / "runtime" / "VERSION", "0.2.0-test\n")
     _write(root / "runtime" / "requirements.txt", "PyYAML\n")
     _write(root / "runtime" / "lib" / "research" / "__init__.py", "")
@@ -115,7 +115,8 @@ def test_release_mapping_is_explicit_and_excludes_developer_only_files() -> None
 
     assert ws_sync.release_destination("skills/kb-cli/scripts/kb") == ".agents/skills/kb-cli/scripts/kb"
     assert ws_sync.release_destination("runtime/lib/research/common.py") == ".agents/lib/research/common.py"
-    assert ws_sync.release_destination("runtime/AGENTS.md") == ".agents/AGENTS.md"
+    assert ws_sync.release_destination("runtime/AGENTS.md") is None
+    assert ws_sync.release_destination("runtime/WORKSPACE_RULES.md") == ".agents/WORKSPACE_RULES.md"
     assert ws_sync.release_destination("runtime/VERSION") == ".agents/VERSION"
     assert ws_sync.release_destination("LICENSE") == ".agents/LICENSE"
     assert ws_sync.release_destination("runtime/README.md") is None
@@ -153,8 +154,8 @@ def test_local_agent_churn_cannot_change_validator_or_rule_budget(tmp_path: Path
     shutil.copytree(REPO_ROOT / "skills", source / "skills")
     _write(source / "runtime" / "AGENTS.md", (REPO_ROOT / "runtime" / "AGENTS.md").read_text(encoding="utf-8"))
     _write(
-        source / "runtime" / "AGENT_GUIDE.md",
-        (REPO_ROOT / "runtime" / "AGENT_GUIDE.md").read_text(encoding="utf-8"),
+        source / "runtime" / "WORKSPACE_RULES.md",
+        (REPO_ROOT / "runtime" / "WORKSPACE_RULES.md").read_text(encoding="utf-8"),
     )
     before_errors = validate_skills(source / "skills")
     before_budget = checker.measure_rule_bundles(source)

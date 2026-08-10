@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from repo_paths import initialize_test_workspace
+from repo_paths import initialize_test_workspace, install_test_workspace_rules
 
 import importlib.util
 import sys
@@ -87,6 +87,7 @@ def test_core_init_checkpoints_every_created_product_file(tmp_path: Path, monkey
     root = tmp_path / "workspace"
     (root / ".agents").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
+    install_test_workspace_rules(root)
     _argv(monkeypatch, "kb.py", "--root", str(root), "init")
 
     assert module.main() == 0

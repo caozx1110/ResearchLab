@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, install_test_workspace_rules
 
 import pytest
 
@@ -424,6 +424,7 @@ def _workspace(tmp_path: Path) -> tuple[Path, str, str, str]:
     root = tmp_path / "workspace"
     (root / ".agents" / "lib").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
+    install_test_workspace_rules(root)
     initialize_workspace_layout(root, REPO_ROOT)
     program_id = "program-editorial"
     unit_id = "p-editorial-123456"

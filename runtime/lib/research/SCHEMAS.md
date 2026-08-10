@@ -2,6 +2,27 @@
 
 跨 skill 共享的 YAML / Markdown artifact 协议。每个 skill 写入或读取这些 artifact 时遵循此处定义，避免在多个 SKILL.md 里重复定义且漂移。
 
+本文件只按需加载：先从 owner `SKILL.md` 的协议参考定位精确 anchor，再读取该节及其直属小节；不要为单一操作预载整份 schema。
+
+## 目录
+
+- [运行时](#runtime)
+- [Workspace layout 与逻辑 artifact namespace](#workspace-layout)
+- [Runtime rule loading 与 progressive disclosure](#runtime-rule-loading)
+- [安装更新源选择](#update-source-choice)
+- [共享枚举](#enums)
+- [Unit record](#unit-record)
+- [Experiment 文件](#experiment-files)
+- [Program 文件](#program-files)
+- [Config 文件](#config-files)
+- [Memory 文件](#memory-files)
+- [Discovery 与 passage retrieval](#discovery-retrieval)
+- [Ownership 矩阵](#ownership)
+- [Confirmation gate](#confirmation-gate)
+- [Evidence / Claims](#evidence-claims)
+- [Evidence-first 产出](#evidence-first-outputs)
+- [SKILL.md 引用规范](#skill-protocol-reference)
+
 实现源：
 - 枚举与 record 模板：`.agents/lib/research/core.py`
 - YAML 读写与公共字段：`.agents/lib/research/common.py`
@@ -43,6 +64,14 @@ data-root-relative top-level ownership 分为：
 - unknown：其他 top-level，默认拒绝。
 
 journal key 保持 data-root-relative（例如 `units/papers/...`），持久 artifact identity 保持 logical `kb/...`。KB Git repository 位于 workspace root；initial/checkpoint/undo/restore 只能使用 literal canonical pathspec，layout marker 显式纳入，operational/private/reserved/unknown 路径不随祖先 scope 搭车，禁止无范围 workspace `git add -A`。根 `AGENTS.md` 只有已 tracked 或用户明确选择时才可由 Git owner 纳入，任何 business transaction 都不能写它。
+
+### Runtime rule loading 与 progressive disclosure <a id="runtime-rule-loading"></a>
+
+安装态根 `AGENTS.md` 的 managed block 只含稳定 `.agents/WORKSPACE_RULES.md` 加载指针；完整 runtime rules 不复制到根，也不再分发 `.agents/AGENTS.md` 或 `.agents/AGENT_GUIDE.md`。根 marker 外 bytes 始终 user-owned，install/update/reinstall/uninstall 必须逐字保持。
+
+`.agents/WORKSPACE_RULES.md` 必须是 real `.agents` directory 内非空、至多 64 KiB、身份稳定的普通文件，并以 canonical `# WORKSPACE_RULES ` header 开始。Public dispatcher 除 `kb help`/`kb doctor` 外的 route 与所有 `mutation_transaction` 都必须在任何 protocol、diagnostic、journal 或 business write 前重验该身份；缺失、symlink、special、oversize、short read 或并发替换全部 fail closed。Help/doctor rescue 必须零写。
+
+Discoverable `SKILL.md` 是 owner 入口：不超过 500 行与 64 KiB，直接声明 shared `SCHEMAS.md` anchor 或有理由的非 consumer exemption，并直接链接每个 required reference。Reference 不允许靠第二跳才可达；Markdown path/anchor 必须存在且保持 skill-contained。200 行以上 reference 在前 80 行内必须有 `## 目录` / `## Table of Contents` 和按需加载说明。语言密度不是 rejection signal。
 
 ---
 
@@ -1458,7 +1487,7 @@ Wave3（2026-07-17）把 survey / report / idea 三个产出侧子系统从"一�
 
 ---
 
-## 给 SKILL.md 的引用规范
+## 给 SKILL.md 的引用规范 <a id="skill-protocol-reference"></a>
 
 每个消费上述 artifact 的 SKILL.md，在 frontmatter 后面紧接一行：
 
@@ -1466,4 +1495,4 @@ Wave3（2026-07-17）把 survey / report / idea 三个产出侧子系统从"一�
 > 协议参考：`.agents/lib/research/SCHEMAS.md#<anchor>`
 ```
 
-可用 anchor：`enums`, `unit-record`, `unit-payload`, `experiment-files`, `program-files`, `config-files`, `discovery-retrieval`, `ownership`, `confirmation-gate`, `evidence-claims`, `evidence-first-outputs`。
+可用 anchor：`runtime`, `workspace-layout`, `update-source-choice`, `enums`, `unit-record`, `unit-payload`, `experiment-files`, `program-files`, `config-files`, `memory-files`, `discovery-retrieval`, `ownership`, `confirmation-gate`, `evidence-claims`, `evidence-first-outputs`, `skill-protocol-reference`。

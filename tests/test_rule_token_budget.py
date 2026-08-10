@@ -38,7 +38,9 @@ def test_checker_reads_complete_utf8_files(tmp_path: Path, monkeypatch) -> None:
     (root / "skills" / "demo").mkdir(parents=True)
     (root / "runtime").mkdir()
     (root / "runtime" / "AGENTS.md").write_text("全局规则\n", encoding="utf-8")
-    (root / "runtime" / "AGENT_GUIDE.md").write_text("机制指南\n", encoding="utf-8")
+    (root / "runtime" / "WORKSPACE_RULES.md").write_text(
+        "# WORKSPACE_RULES — test\n", encoding="utf-8"
+    )
     skill = root / "skills" / "demo" / "SKILL.md"
     skill.write_text("---\nname: demo\n---\n完整代码块 `--flag`。\n", encoding="utf-8")
 
@@ -53,7 +55,7 @@ def test_checker_reads_complete_utf8_files(tmp_path: Path, monkeypatch) -> None:
         len(path.read_text(encoding="utf-8").encode("utf-8"))
         for path in (
             root / "runtime" / "AGENTS.md",
-            root / "runtime" / "AGENT_GUIDE.md",
+            root / "runtime" / "WORKSPACE_RULES.md",
             skill,
         )
     )

@@ -5,6 +5,8 @@ description: 统一分析 paper、repo、dataset、blog 与技术笔记 unit；�
 
 # Unit Analyst
 
+> 协议参考：`.agents/lib/research/SCHEMAS.md#unit-record` · `#evidence-claims` · `#confirmation-gate`
+
 当用户要深读或分析一个 paper、repo、dataset、blog 或人工技术笔记 unit，而不只是把来源入库时，使用这个 facade。
 
 ## 共同契约

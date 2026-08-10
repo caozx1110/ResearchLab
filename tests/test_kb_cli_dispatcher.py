@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from repo_paths import initialize_test_workspace
+from repo_paths import initialize_test_workspace, install_test_workspace_rules
 
 import hashlib
 import importlib.machinery
@@ -22,6 +22,13 @@ from research.git_ops import dirty_kb_paths, ensure_kb_git_repo, git_checkpoint
 from research.journal import begin_op, commit_op
 from research.paths import config_root, resolve_local_reference, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
+
+
+@pytest.fixture(autouse=True)
+def _installed_minimal_rules(tmp_path: Path) -> None:
+    """Dispatcher unit fixtures model an installed workspace unless stated otherwise."""
+
+    install_test_workspace_rules(tmp_path)
 
 
 PUBLIC_GOVERNANCE_FORBIDDEN = (
