@@ -324,7 +324,7 @@ unit 页 frontmatter 是扁平 Obsidian Properties：`id/kind/title/aliases/stat
 
 ```yaml
 schema: research-kb-obsidian/v1
-renderer_revision: 11
+renderer_revision: 12
 generated_at: <UTC ISO-8601>
 input_digest: <sha256 of canonical records + programs + taxonomy>
 record_count: 0
@@ -334,7 +334,7 @@ files:
   units/<unit-id>.md: <sha256>
 ```
 
-`files` 的 key 只能是 `managed/` 内相对路径且不得包含 absolute/`.`/`..`，manifest 不拥有自身。普通 managed Markdown 只在 digest 仍匹配上一 manifest 时覆盖，过期清理也只删除上一 manifest 明确拥有且 bytes 未漂移的普通 Markdown；内容漂移必须保留并报告。manifest-owned 普通 `.base` 则是 renderer 完整拥有的可重建派生视图：无论当前内容是否仍是合法 YAML，更新都直接恢复 renderer 默认 bytes，且不保存手工排序、filter、query、注释或其他 Base 内容。`.base` symlink、特殊类型、未登记文件与不安全路径仍拒绝并保留。renderer 11 的三份 `.base` 继续使用 Obsidian 1.12.7 保存后的 block-sequence 缩进和 view 键序。整个 managed 更新走既有 operation journal；manifest 最后写，意外中断后可重跑或通过通用恢复合同撤销。
+`files` 的 key 只能是 `managed/` 内相对路径且不得包含 absolute/`.`/`..`，manifest 不拥有自身。普通 managed Markdown 只在 digest 仍匹配上一 manifest 时覆盖，过期清理也只删除上一 manifest 明确拥有且 bytes 未漂移的普通 Markdown；内容漂移必须保留并报告。manifest-owned 普通 `.base` 则是 renderer 完整拥有的可重建派生视图：无论当前内容是否仍是合法 YAML，更新都直接恢复 renderer 默认 bytes，且不保存手工排序、filter、query、注释或其他 Base 内容。`.base` symlink、特殊类型、未登记文件与不安全路径仍拒绝并保留。renderer 12 为 paper unit page 增加存在性校验后的 canonical 深读笔记入口；三份 `.base` 继续使用 Obsidian 1.12.7 保存后的 block-sequence 缩进和 view 键序。整个 managed 更新走既有 operation journal；manifest 最后写，意外中断后可重跑或通过通用恢复合同撤销。
 
 ### per-kind payload <a id="unit-payload"></a>
 
@@ -427,6 +427,8 @@ Agent 只填写所选分支，未选分支必须保持空白。verify 同时验�
 | `survey` | `scope`, `taxonomy`, `trends`, `gaps`, `insight` | scope→`core_content.motivation`; taxonomy→`core_content.method`; trends / gaps→`core_content.changes_and_effects`; insight→`core_content.why_it_might_work` |
 
 旧 paper 的 `quick_screen.paper_type` 与旧扁平 `elements` fill 只读兼容：已有类型继续选择原要素契约，兼容路径不得把类型写回 `quick_screen`，也不得让新 unit 绕过 deep-read 类型证据。三种集合都至少写入一个 `core_content` 字段，不改变 confirmation substance gate。
+
+新 verify 生成的 `note.md` 只重组派生 Markdown，不改变上述 claim 或 receipt。固定顺序为 `Paper Type`（当前统一 fill 有该 claim）→ 所选五要素正文 → `Evidence Index`。正文中的稳定 `#^paper-note-evidence-<element>` 入口指向文末同 element 的默认折叠 callout；每条输入 ref 只渲染一次完整 `source_unit_id/artifact/locator/quote/summary`，不截断 quote。共享只读 resolver 仅在 `source.markdown_path` 为安全当前的 canonical Markdown、可选 `markdown_hash` 当前、source map 为有界严格 YAML、locator 唯一匹配且 block ID 实际存在于 document 时返回精确 target；否则依次降级为 Markdown 全文或无链接，并始终保留 artifact 与原始 locator。所有 canonical 动态文本按 Markdown literal 转义。普通 projection refresh 不拥有或改写 canonical `note.md`，旧笔记不批量重渲染。
 
 ---
 

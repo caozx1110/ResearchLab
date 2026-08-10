@@ -108,6 +108,8 @@ Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完�
 
 论文 PDF、网页 HTML、已有 Markdown 与纯文本会在各自知识单元中获得 `source/document.md`。这是人和 AI 默认先读的完整版本，不受轻量 parse cache 的长度上限影响。HTML 还会生成安全的 `source/archive.html` 离线阅读页；`document.md` 顶部可打开离线页或未经改写的原始响应。arXiv/ar5iv 页面若存在 fatal、空壳或严重结构异常会自动换用 PDF，不能再以“能返回 HTML”为由伪装成功；你指定的 arXiv 版本号会原样保留。网页与 PDF 中成功提取的图片会保存到同一 source bundle 的本地 assets 并用相对链接引用，因此离线阅读和 Obsidian 引用不会依赖远程热链。已有 Markdown 的 front matter、跨行/块代码、标题和本地/Obsidian 图片引用会按语法上下文保留或本地化；其中非代码 raw HTML 会被转成被动内容，复杂 HTML 表格不会被强行压成失真的 pipe table，纯文本中的 Markdown 符号按字面显示。整套派生文件通过完整性检查后才发布；转换不完整时仍可回退到离线页、PDF、原始 HTML 或其他原格式。代码仓保持原始源码结构，不把每个代码文件改造成 Markdown。
 
+新生成的论文深读 `note.md` 会先连续展示论文类型与五个分析小节，再把逐字引文集中放到文末默认收起的证据区。每个小节都可跳到自己的完整证据；若 source map 能唯一定位，`page=N` 或 `section:<anchor>` 会直接打开 `source/document.md` 对应 block。映射缺失、过期或有歧义时只打开全文并保留原始 locator；Markdown 全文不可安全读取时不制造链接。证据不会因此省略，旧笔记也不会在普通刷新中被批量改写。
+
 当资料仍在等待 Agent 填写、等待验证，或处于可重试失败时，它不会进入你的确认收件箱。只有实质内容和 evidence 已过门的判断才会由 `kb review` 提请你决定。
 
 当知识库里已有至少三个完成确认的材料时，你可以直接说“从这些材料提炼核心概念”。Agent 会先生成待填概念骨架，再写入带逐字出处的定义、scope 与逐项关联说明；机械校验通过后才把概念交给你确认。确认后的概念与论文、仓库等 unit 一样可被 `kb find` 检索，也会生成包含定义和关联清单的 Obsidian 页面。任一上游材料、证据或确认状态变化后，旧概念确认自动失效。
@@ -140,9 +142,9 @@ Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完�
 
 ### 在 Obsidian 中查看
 
-把工作区的 `kb` 目录作为 Obsidian Vault 打开即可，无需社区插件。首次查看或 canonical 内容变化后使用 `kb obsidian update`；需要检查是否过期、断链或被人工改动时使用 `kb obsidian status`。
+把已经激活的工作区根目录作为 Obsidian Vault 打开即可，无需社区插件。首次查看或 canonical 内容变化后使用 `kb obsidian update`；需要检查是否过期、断链或被人工改动时使用 `kb obsidian status`。
 
-系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper、文章和本地文档页还提供完整 Markdown 原文入口；已有 page/section locator 的 evidence 会尽量直接跳到该 Markdown 页或小节。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录和 Bases 都是只读可重建视图，不要直接编辑：下次刷新会直接丢弃 Base 中的手工排序或其他内容并恢复 renderer 默认值；managed Markdown 的人工改动则会被保留并阻止刷新。你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。需要批量审核时，Agent 会在 annotations 生成一份只允许修改 checkbox 的待确认表。系统不会生成或修改 `.obsidian/` 配置。
+系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper 页优先提供已经存在的 canonical 深读笔记入口，并继续提供完整 Markdown 原文；已有 page/section locator 的 evidence 只有在目标 block 真实存在且唯一时才精确跳转，否则诚实降级到全文。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录和 Bases 都是只读可重建视图，不要直接编辑：下次刷新会直接丢弃 Base 中的手工排序或其他内容并恢复 renderer 默认值；managed Markdown 的人工改动则会被保留并阻止刷新。你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。需要批量审核时，Agent 会在 annotations 生成一份只允许修改 checkbox 的待确认表。系统不会生成或修改 `.obsidian/` 配置。
 
 若想把自己的笔记整理进知识库，请在当前消息里明确点名 `inbox` 或 `annotations` 中的一份 Markdown 文件。Agent 只读取这一份单层普通文件，把 exact bytes 冻结成独立 provenance 的 blog 来源，再从冻结副本填写有逐字证据的结构化理解；原笔记逐字不改，review sheet 也绝不会被当成资料。即使笔记是你写的，结构化判断仍保持待确认，“我”或笔记作者身份都不会自动成为确认签名。
 
