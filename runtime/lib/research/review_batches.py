@@ -643,7 +643,8 @@ def create_obsidian_review_batch(
     item_limit: int | None = None,
 ) -> dict[str, Any]:
     """Create one human-editable sheet bound to an existing public review snapshot."""
-    source = _load_source_snapshot(project_root, source_snapshot_token)
+    root = kb_root(project_root)
+    source = _load_source_snapshot(root, source_snapshot_token)
     source_limit_raw = source.get("item_limit")
     source_profile = str(source.get("governance_profile") or "strict")
     if source_profile not in {"personal", "strict"}:
@@ -689,7 +690,6 @@ def create_obsidian_review_batch(
     payload["batch_ref"] = batch_ref
     sheet_text = _render_sheet(batch_ref, str(payload["expires_at"]), slots, normalized_displays)
     sheet_name = f"Pending Review {batch_ref[:12]}.md"
-    root = kb_root(project_root)
     registry_path = root / _RUNTIME_BATCHES_DIR / f"{batch_ref}.json"
     sheet_path = root / _ANNOTATIONS_DIR / sheet_name
     try:

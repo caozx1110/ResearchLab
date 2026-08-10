@@ -36,6 +36,7 @@ from research.common import (
 )
 from research.confirm import write_record
 from research.journal import (
+    RECOVERABLE_TARGET_CLASSES,
     abort_op,
     begin_op,
     commit_op,
@@ -50,13 +51,22 @@ from research.journal import (
     operation_lock_path,
     workspace_transaction_lock_path,
 )
+from research.workspace_layout import initialize_workspace_layout
 from research.records import default_record
 from research.prefs import ensure_workspace
+from research.paths import resolve_local_reference
 from research.yaml_io import load_yaml, write_yaml_if_changed
 
 
 def _project_root() -> Path:
     return REPO_ROOT
+
+
+@pytest.fixture(autouse=True)
+def _activate_workspace_root(tmp_path: Path) -> None:
+    """Give every runtime test the explicit layout capability required by #28."""
+
+    initialize_workspace_layout(tmp_path, REPO_ROOT)
 
 
 def _load_intake_module():
@@ -81,8 +91,8 @@ def _load_config_module():
 
 def _configure_kb_git(root: Path) -> None:
     ensure_kb_git_repo(root, create_initial_commit=False)
-    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.name", "R1 Tests"], check=True)
-    subprocess.run(["git", "-C", str(root / "kb"), "config", "user.email", "r1@example.com"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "R1 Tests"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "r1@example.com"], check=True)
     git_checkpoint(
         root,
         "initial kb state",
@@ -94,7 +104,7 @@ def _configure_kb_git(root: Path) -> None:
 def test_checkpoint_rejects_missing_empty_and_broad_scopes(tmp_path: Path) -> None:
     ensure_kb_git_repo(tmp_path, create_initial_commit=False)
 
-    for targets in (None, [], [""], [tmp_path / "kb"]):
+    for targets in (None, [], [""], [tmp_path]):
         with pytest.raises(SystemExit, match="Checkpoint"):
             git_checkpoint(tmp_path, "must be scoped", auto_init=False, target_paths=targets)
 
@@ -105,7 +115,7 @@ def test_checkpoint_rejects_missing_empty_and_broad_scopes(tmp_path: Path) -> No
 def test_scoped_checkpoint_leaves_unrelated_tracked_and_untracked_drafts_dirty(tmp_path: Path) -> None:
     _configure_kb_git(tmp_path)
     target = tmp_path / "units" / "papers" / "p-target" / "record.yaml"
-    tracked_draft = tmp_path / "notes" / "tracked.md"
+    tracked_draft = tmp_path / "units" / "test-fixtures" / "notes" / "tracked.md"
     target.parent.mkdir(parents=True)
     tracked_draft.parent.mkdir(parents=True)
     target.write_text("target: original\n", encoding="utf-8")
@@ -119,7 +129,7 @@ def test_scoped_checkpoint_leaves_unrelated_tracked_and_untracked_drafts_dirty(t
 
     target.write_text("target: changed\n", encoding="utf-8")
     tracked_draft.write_text("tracked: user draft\n", encoding="utf-8")
-    untracked_draft = tmp_path / "notes" / "untracked.md"
+    untracked_draft = tmp_path / "units" / "test-fixtures" / "notes" / "untracked.md"
     untracked_draft.write_text("untracked draft\n", encoding="utf-8")
 
     result = git_checkpoint(
@@ -131,20 +141,20 @@ def test_scoped_checkpoint_leaves_unrelated_tracked_and_untracked_drafts_dirty(t
 
     assert result["files"] == ["units/papers/p-target/record.yaml"]
     status = subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        ["git", "-C", str(tmp_path), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout
-    assert " M notes/tracked.md" in status
-    assert "?? notes/untracked.md" in status
+    assert " M units/test-fixtures/notes/tracked.md" in status
+    assert "?? units/test-fixtures/notes/untracked.md" in status
     assert "p-target/record.yaml" not in status
 
 
 def test_journaled_exception_restores_all_before_bytes_modes_and_removes_new_file(tmp_path: Path) -> None:
-    first = tmp_path / "notes" / "first.md"
-    second = tmp_path / "notes" / "second.md"
-    created = tmp_path / "notes" / "created.md"
+    first = tmp_path / "units" / "test-fixtures" / "notes" / "first.md"
+    second = tmp_path / "units" / "test-fixtures" / "notes" / "second.md"
+    created = tmp_path / "units" / "test-fixtures" / "notes" / "created.md"
     first.parent.mkdir(parents=True)
     first.write_bytes(b"first before\n")
     second.write_bytes(b"second before\n")
@@ -168,12 +178,15 @@ def test_journaled_exception_restores_all_before_bytes_modes_and_removes_new_fil
     entries = sorted((tmp_path / ".journal").glob("*.yaml"))
     entry = load_op(tmp_path, entries[-1].stem)
     assert entry["state"] == "abort"
-    assert entry["before_snapshots"]["notes/created.md"]["kind"] == "absent"
+    assert entry["before_snapshots"]["units/test-fixtures/notes/created.md"]["kind"] == "absent"
 
 
 def test_fresh_workspace_mutation_bootstrap_never_writes_gitignore_outside_targets(tmp_path: Path) -> None:
-    bare_root = tmp_path / "bare"
-    operation_lock_path(bare_root, bare_root / "notes" / "probe.md")
+    bare_root = tmp_path.parent / f"{tmp_path.name}-bare"
+    bare_root.mkdir()
+    initialize_workspace_layout(bare_root, REPO_ROOT)
+    probe = bare_root / "units" / "test-fixtures" / "notes" / "probe.md"
+    operation_lock_path(bare_root, probe)
     assert (bare_root / ".journal").is_dir()
     assert not (bare_root / ".gitignore").exists()
 
@@ -181,7 +194,7 @@ def test_fresh_workspace_mutation_bootstrap_never_writes_gitignore_outside_targe
     gitignore = tmp_path / ".gitignore"
     before = gitignore.read_bytes()
     assert b".journal/" in before
-    target = tmp_path / "notes" / "bootstrap-abort.md"
+    target = tmp_path / "units" / "test-fixtures" / "notes" / "bootstrap-abort.md"
 
     with pytest.raises(RuntimeError, match="abort fresh mutation"):
         with mutation_transaction(tmp_path, "fresh-workspace-mutation", [target]):
@@ -197,7 +210,7 @@ def test_fresh_workspace_mutation_bootstrap_never_writes_gitignore_outside_targe
         if load_yaml(path).get("op_type") == "fresh-workspace-mutation"
     ]
     assert len(entries) == 1
-    assert entries[0]["target_paths"] == ["notes/bootstrap-abort.md"]
+    assert entries[0]["target_paths"] == ["units/test-fixtures/notes/bootstrap-abort.md"]
     assert entries[0]["state"] == "abort"
 
 
@@ -236,7 +249,7 @@ def test_failed_snapshot_restore_is_reported_and_never_marked_as_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    target = tmp_path / "notes" / "restore-failure.md"
+    target = tmp_path / "units" / "test-fixtures" / "notes" / "restore-failure.md"
     target.parent.mkdir(parents=True)
     target.write_text("before\n", encoding="utf-8")
     op_id = begin_op(tmp_path, "restore-failure", [target])
@@ -327,8 +340,8 @@ def test_independent_descendant_waits_for_ancestor_abort_then_commits_without_cl
 
 
 def test_independent_disjoint_and_same_path_transactions_are_serialized_safely(tmp_path: Path) -> None:
-    left = tmp_path / "notes" / "left.md"
-    right = tmp_path / "notes" / "right.md"
+    left = tmp_path / "units" / "test-fixtures" / "notes" / "left.md"
+    right = tmp_path / "units" / "test-fixtures" / "notes" / "right.md"
 
     def write(path: Path, content: str) -> None:
         with mutation_transaction(tmp_path, f"write-{path.stem}", [path]):
@@ -340,7 +353,7 @@ def test_independent_disjoint_and_same_path_transactions_are_serialized_safely(t
     assert left.read_bytes() == b"left\n"
     assert right.read_bytes() == b"right\n"
 
-    counter = tmp_path / "notes" / "counter.txt"
+    counter = tmp_path / "units" / "test-fixtures" / "notes" / "counter.txt"
     counter.write_text("0\n", encoding="utf-8")
 
     def increment(index: int) -> None:
@@ -374,7 +387,7 @@ def test_nested_target_outside_root_coverage_fails_closed(tmp_path: Path) -> Non
     record_path = unit_dir / "record.yaml"
     record_path.parent.mkdir(parents=True)
     record_path.write_text("covered: true\n", encoding="utf-8")
-    outside = tmp_path / "notes" / "outside.md"
+    outside = tmp_path / "units" / "test-fixtures" / "notes" / "outside.md"
     with pytest.raises(SystemExit, match="must be covered"):
         with mutation_transaction(tmp_path, "coverage-abort-root", [unit_dir]):
             record_path.write_text("partial\n", encoding="utf-8")
@@ -387,7 +400,7 @@ def test_nested_target_outside_root_coverage_fails_closed(tmp_path: Path) -> Non
 def test_subprocess_nested_covered_target_inherits_without_deadlock_and_escape_fails(tmp_path: Path) -> None:
     unit_dir = tmp_path / "units" / "blogs" / "b-subprocess"
     record_path = unit_dir / "record.yaml"
-    outside = tmp_path / "notes" / "subprocess-escape.md"
+    outside = tmp_path / "units" / "test-fixtures" / "notes" / "subprocess-escape.md"
     lib_root = _project_root() / "runtime" / "lib"
     child_code = """
 import sys
@@ -510,7 +523,7 @@ with mutation_transaction(
 
 def test_auto_checkpoint_bookkeeping_never_hides_latest_user_transaction(tmp_path: Path) -> None:
     _configure_kb_git(tmp_path)
-    path = tmp_path / "notes" / "undoable.md"
+    path = tmp_path / "units" / "test-fixtures" / "notes" / "undoable.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("before\n", encoding="utf-8")
     git_checkpoint(tmp_path, "seed undo target", auto_init=False, target_paths=[path])
@@ -614,7 +627,7 @@ def test_nested_crash_resume_restores_only_root_before_image_and_aborts_descenda
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_kb_git(tmp_path)
-    path = tmp_path / "notes" / "nested-crash.md"
+    path = tmp_path / "units" / "test-fixtures" / "notes" / "nested-crash.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("outer before\n", encoding="utf-8")
     git_checkpoint(tmp_path, "seed nested crash target", auto_init=False, target_paths=[path])
@@ -651,7 +664,12 @@ def test_nested_crash_resume_restores_only_root_before_image_and_aborts_descenda
 
 def test_legacy_root_business_entry_is_undoable_but_legacy_internal_entries_are_not(tmp_path: Path) -> None:
     def make_legacy(op_type: str, path: Path, content: str) -> str:
-        op_id = begin_op(tmp_path, op_type, [path])
+        op_id = begin_op(
+            tmp_path,
+            op_type,
+            [path],
+            allowed_target_classes=RECOVERABLE_TARGET_CLASSES,
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         commit_op(tmp_path, op_id)
@@ -661,13 +679,21 @@ def test_legacy_root_business_entry_is_undoable_but_legacy_internal_entries_are_
         write_yaml_if_changed(journal_entry_path(tmp_path, op_id), entry)
         return op_id
 
-    business_op_id = make_legacy("legacy-edit", tmp_path / "notes" / "legacy.md", "business\n")
+    business_op_id = make_legacy(
+        "legacy-edit",
+        tmp_path / "units" / "test-fixtures" / "notes" / "legacy.md",
+        "business\n",
+    )
     make_legacy(
         "write_versioning_state",
         tmp_path / ".runtime" / "versioning-state.yaml",
         "last_commit: legacy\n",
     )
-    make_legacy("undo:legacy-edit", tmp_path / "notes" / "legacy-recovery.md", "recovery\n")
+    make_legacy(
+        "undo:legacy-edit",
+        tmp_path / "units" / "test-fixtures" / "notes" / "legacy-recovery.md",
+        "recovery\n",
+    )
 
     assert latest_committed_op(tmp_path)["op_id"] == business_op_id
 
@@ -677,7 +703,7 @@ def test_recovery_journal_commit_failure_never_advances_git_or_marks_business_un
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_kb_git(tmp_path)
-    path = tmp_path / "notes" / "recovery-fault.md"
+    path = tmp_path / "units" / "test-fixtures" / "notes" / "recovery-fault.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("before\n", encoding="utf-8")
     git_checkpoint(tmp_path, "seed recovery fault", auto_init=False, target_paths=[path])
@@ -685,7 +711,7 @@ def test_recovery_journal_commit_failure_never_advances_git_or_marks_business_un
         path.write_text("after\n", encoding="utf-8")
     git_checkpoint(tmp_path, "business change", auto_init=False, target_paths=[path])
     head_before = subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "rev-parse", "HEAD"],
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -702,7 +728,7 @@ def test_recovery_journal_commit_failure_never_advances_git_or_marks_business_un
         undo_last_operation(tmp_path)
 
     head_after = subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "rev-parse", "HEAD"],
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -794,14 +820,15 @@ def test_failed_url_leaves_no_workspace_staging_then_same_url_succeeds(
     record = load_yaml(records[0])
     assert all(".runtime/intake-staging" not in item for item in record["source"]["backup_paths"])
     assert ".runtime/intake-staging" not in record["source"]["markdown_path"]
-    assert (tmp_path / record["source"]["markdown_path"]).is_file()
+    markdown_path = resolve_local_reference(tmp_path, record["source"]["markdown_path"])
+    assert markdown_path is not None and markdown_path.is_file()
     materialization = record["source"]["materialization"]
     assert ".runtime/intake-staging" not in materialization["source_map_path"]
     assert ".runtime/intake-staging" not in materialization["conversion_path"]
     assert ".runtime/intake-staging" not in materialization["archive_path"]
-    assert (tmp_path / materialization["source_map_path"]).is_file()
-    assert (tmp_path / materialization["conversion_path"]).is_file()
-    assert (tmp_path / materialization["archive_path"]).is_file()
+    for key in ("source_map_path", "conversion_path", "archive_path"):
+        resolved = resolve_local_reference(tmp_path, materialization[key])
+        assert resolved is not None and resolved.is_file()
     cache = load_yaml(records[0].parent / "parse-cache.yaml")
     assert cache["unit_id"] == record["id"]
     assert cache["chunks"]
@@ -1056,7 +1083,7 @@ def test_owner_intake_rejects_symlinks_before_identity_or_journal_snapshot(
     assert list((tmp_path / ".journal" / "snapshots").glob("*")) == []
     copied = [
         path
-        for path in (tmp_path / "kb").rglob("*")
+        for path in (tmp_path / "units").rglob("*")
         if path.is_file() and not path.is_symlink() and secret in path.read_bytes()
     ]
     assert copied == []
@@ -1110,7 +1137,8 @@ def test_repo_backup_excludes_vcs_metadata_before_canonical_materialization(tmp_
         unit_dir=unit_dir,
     )
 
-    archived_repo = tmp_path / payload["backup_paths"][0]
+    archived_repo = resolve_local_reference(tmp_path, payload["backup_paths"][0])
+    assert archived_repo is not None
     assert (archived_repo / "README.md").read_bytes() == b"# Repository\n"
     assert not (archived_repo / ".git").exists()
 
@@ -1149,7 +1177,7 @@ def test_storage_sync_never_rewrites_agent_rules_or_immutable_source_bytes(tmp_p
         path.write_text("Keep raw/example and output/example byte-identical.\n", encoding="utf-8")
     before = {path: path.read_bytes() for path in (root_rules, agent_rules, skill_rules)}
 
-    mutable_note = tmp_path / "notes" / "migration.md"
+    mutable_note = tmp_path / "units" / "test-fixtures" / "notes" / "migration.md"
     immutable_source = tmp_path / "units" / "blogs" / "b-demo" / "source" / "source.md"
     immutable_cache = immutable_source.parents[1] / "parse-cache.yaml"
     for path in (mutable_note, immutable_source, immutable_cache):
@@ -1179,33 +1207,30 @@ def test_storage_sync_never_rewrites_agent_rules_or_immutable_source_bytes(tmp_p
     assert journal.file_digest(canonical_repo_source) == canonical_repo_digest
     assert nested_git_config.exists()
     assert "kb/raw/example" in mutable_note.read_text(encoding="utf-8")
-    assert "kb/notes/migration.md" in result["rewritten_files"]
+    assert "kb/units/test-fixtures/notes/migration.md" in result["rewritten_files"]
     assert all(item.startswith("kb/") for item in result["rewritten_files"])
     assert legacy_raw.read_bytes() == legacy_before[legacy_raw]
     assert legacy_output.read_bytes() == legacy_before[legacy_output]
     assert (tmp_path / "raw" / "legacy.bin").read_bytes() == legacy_before[legacy_raw]
     assert (tmp_path / "output" / "legacy-report.md").read_bytes() == legacy_before[legacy_output]
-    assert set(result["preserved_legacy_roots"]) == {
-        (tmp_path / "raw").as_posix(),
-        (tmp_path / "output").as_posix(),
-    }
+    assert result["preserved_legacy_roots"] == []
 
     undone = undo_last_operation(tmp_path)
 
     assert undone["op_id"]
     assert mutable_note.read_text(encoding="utf-8") == "Reference raw/example and output/example.\n"
-    assert not (tmp_path / "raw" / "legacy.bin").exists()
-    assert not (tmp_path / "output" / "legacy-report.md").exists()
-    assert legacy_raw.read_bytes() == legacy_before[legacy_raw]
-    assert legacy_output.read_bytes() == legacy_before[legacy_output]
+    assert (tmp_path / "raw" / "legacy.bin").read_bytes() == legacy_before[legacy_raw]
+    assert (tmp_path / "output" / "legacy-report.md").read_bytes() == legacy_before[legacy_output]
     assert journal.file_digest(canonical_repo_source) == canonical_repo_digest
 
 
-def test_storage_sync_preserves_legacy_uri_when_destination_bytes_conflict(tmp_path: Path) -> None:
+def test_storage_sync_treats_active_root_storage_as_canonical_without_self_conflict(
+    tmp_path: Path,
+) -> None:
     legacy = tmp_path / "raw" / "collision.txt"
     destination = tmp_path / "raw" / "collision.txt"
     legacy.parent.mkdir(parents=True)
-    destination.parent.mkdir(parents=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_bytes(b"legacy truth\n")
     destination.write_bytes(b"different canonical bytes\n")
     record = default_record("blog", title="Storage collision", maturity="lightweight")
@@ -1220,16 +1245,11 @@ def test_storage_sync_preserves_legacy_uri_when_destination_bytes_conflict(tmp_p
 
     result = sources.sync_storage_layout(tmp_path)
 
-    assert legacy.read_bytes() == b"legacy truth\n"
+    assert legacy.read_bytes() == b"different canonical bytes\n"
     assert destination.read_bytes() == b"different canonical bytes\n"
     assert load_yaml(record_path)["source"]["original_uri"] == legacy.as_posix()
-    assert result["conflicts"]
-    assert any(
-        item["source"] == legacy.as_posix()
-        and item["destination"] == destination.as_posix()
-        and item["source_digest"] != item["destination_digest"]
-        for item in result["conflicts"]
-    )
+    assert result["conflicts"] == []
+    assert result["preserved_legacy_roots"] == []
 
 
 def test_runtime_capabilities_recognize_default_pymupdf_stack() -> None:

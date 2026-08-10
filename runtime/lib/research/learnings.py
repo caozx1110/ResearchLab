@@ -32,7 +32,11 @@ def learnings_path(project_root: Path) -> Path:
 
 
 def load_learnings(project_root: Path) -> list[dict[str, Any]]:
-    payload = load_yaml(learnings_path(project_root), default=[])
+    try:
+        path = learnings_path(project_root)
+    except SystemExit:
+        return []
+    payload = load_yaml(path, default=[])
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict)]

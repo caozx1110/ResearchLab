@@ -18,7 +18,7 @@ from functools import partial
 from http.cookies import SimpleCookie
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -48,6 +48,7 @@ from kb_browser_lib import (
     load_build_status,
     path_is_relative_to,
     project_root_from_script,
+    research_root,
     safe_rebuild,
     server_log_path,
     version_url,
@@ -58,6 +59,14 @@ from kb_browser_terminal import TerminalManager, open_system_terminal, system_te
 from research.bootstrap import ensure_managed_runtime  # type: ignore
 from research.core import maybe_auto_checkpoint  # type: ignore
 from research.journal import mutation_transaction  # type: ignore
+from research.common import workspace_root_roles  # type: ignore
+from research.path_contract import (  # type: ignore
+    PathContractError,
+    TargetClass,
+    assert_no_follow_target,
+    logical_ref_to_physical_path,
+    physical_path_to_logical_ref,
+)
 
 WATCHED_SUFFIXES = {".yaml", ".yml", ".md", ".markdown", ".txt", ".log", ".json"}
 READABLE_TEXT_SUFFIXES = {".md", ".markdown", ".yaml", ".yml", ".txt", ".log", ".json", ".py", ".sh", ".toml"}
@@ -65,8 +74,8 @@ WRITABLE_TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 BLOCKED_WRITE_ROOTS = {
     ".git",
     "node_modules",
-    "kb/user/kb",
-    "kb/user/navigator",
+    "user/kb",
+    "user/navigator",
 }
 MAX_TEXT_FILE_BYTES = 1_500_000
 
@@ -79,8 +88,8 @@ def relevant_change(project_root: Path, raw_path: str) -> bool:
         resolved = path.resolve()
     except FileNotFoundError:
         resolved = path.absolute()
-    research_root = project_root / "kb"
-    if not path_is_relative_to(resolved, research_root):
+    data_root = research_root(project_root)
+    if not path_is_relative_to(resolved, data_root):
         return False
     if path_is_relative_to(resolved, kb_root(project_root)):
         return False
@@ -91,18 +100,18 @@ def relevant_change(project_root: Path, raw_path: str) -> bool:
     if resolved.suffix.lower() not in WATCHED_SUFFIXES:
         return False
     watched_roots = [
-        research_root / "units",
-        research_root / "programs",
-        research_root / "synthesis",
-        research_root / "user",
-        research_root / "config",
-        research_root / "intake",
+        data_root / "units",
+        data_root / "programs",
+        data_root / "synthesis",
+        data_root / "user",
+        data_root / "config",
+        data_root / "intake",
     ]
     if any(path_is_relative_to(resolved, root) for root in watched_roots):
         return True
     return resolved in {
-        research_root / "index.md",
-        research_root / "index.yaml",
+        data_root / "index.md",
+        data_root / "index.yaml",
     }
 
 
@@ -123,10 +132,24 @@ def _resolve_project_path(project_root: Path, raw_path: str) -> Path:
     rel_path = _clean_rel_path(raw_path)
     if not rel_path:
         raise ValueError("path 不能为空")
-    resolved = (project_root / rel_path).resolve()
-    if not path_is_relative_to(resolved, project_root):
-        raise ValueError("禁止访问工作区之外的路径")
-    return resolved
+    lexical = PurePosixPath(rel_path)
+    if "\\" in rel_path or any(part in {"", ".", ".."} for part in lexical.parts):
+        raise ValueError("禁止使用含糊或穿越路径")
+    roots = workspace_root_roles(project_root).roots
+    try:
+        candidate = (
+            logical_ref_to_physical_path(roots, rel_path)
+            if rel_path.startswith("kb/")
+            else roots.workspace_root / rel_path
+        )
+        assessment = assert_no_follow_target(
+            roots,
+            candidate,
+            allowed_classes=(TargetClass.CANONICAL_ARTIFACT,),
+        )
+    except PathContractError as exc:
+        raise ValueError("禁止访问知识库之外或不安全的路径") from exc
+    return assessment.physical_path.resolve(strict=False)
 
 
 def _read_text_file(path: Path) -> str:
@@ -147,7 +170,7 @@ def _file_kind(path: Path) -> str:
 
 
 def _is_immutable_unit_evidence(project_root: Path, path: Path) -> bool:
-    units_root = (project_root / "kb/units").resolve()
+    units_root = (research_root(project_root) / "units").resolve()
     try:
         unit_relative = path.resolve().relative_to(units_root)
     except ValueError:
@@ -166,15 +189,23 @@ def _is_immutable_unit_evidence(project_root: Path, path: Path) -> bool:
 
 
 def _is_writable_text(project_root: Path, path: Path) -> bool:
-    if not path_is_relative_to(path.resolve(), (project_root / "kb").resolve()):
+    roots = workspace_root_roles(project_root).roots
+    try:
+        assessment = assert_no_follow_target(
+            roots,
+            path,
+            allowed_classes=(TargetClass.CANONICAL_ARTIFACT,),
+        )
+    except PathContractError:
         return False
-    if _is_immutable_unit_evidence(project_root, path):
+    physical = assessment.physical_path
+    if _is_immutable_unit_evidence(project_root, physical):
         return False
-    if path.suffix.lower() not in WRITABLE_TEXT_SUFFIXES:
+    if physical.suffix.lower() not in WRITABLE_TEXT_SUFFIXES:
         return False
     for blocked in BLOCKED_WRITE_ROOTS:
-        blocked_root = (project_root / blocked).resolve()
-        if path_is_relative_to(path, blocked_root):
+        blocked_root = (roots.data_root / blocked).resolve()
+        if path_is_relative_to(physical, blocked_root):
             return False
     return True
 
@@ -184,11 +215,15 @@ def _file_payload(project_root: Path, path: Path) -> dict[str, Any]:
     if kind == "binary":
         raise ValueError("当前工作台只支持打开文本文件")
     content = _read_text_file(path)
-    rel = path.resolve().relative_to(project_root.resolve()).as_posix()
+    physical_rel = path.resolve().relative_to(project_root.resolve()).as_posix()
+    logical_ref = physical_path_to_logical_ref(
+        workspace_root_roles(project_root).roots,
+        path.resolve(),
+    )
     return {
         "ok": True,
-        "path": rel,
-        "href": web_path(rel),
+        "path": logical_ref,
+        "href": web_path(physical_rel),
         "kind": kind,
         "writable": _is_writable_text(project_root, path),
         "updated_at": _mtime_iso(path),

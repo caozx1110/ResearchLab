@@ -428,8 +428,18 @@ def _judgement_confirmation_matches(
     record_snapshot: CanonicalRecordSnapshot | None = None,
     bound_snapshot: BoundJudgementSnapshot | None = None,
 ) -> bool:
-    root = root.absolute()
-    artifact_path = artifact_path.absolute()
+    lexical_root = Path(root).absolute()
+    canonical_root = _canonical_project_root(lexical_root)
+    artifact_path = Path(artifact_path).absolute()
+    try:
+        artifact_relative = artifact_path.relative_to(lexical_root)
+    except ValueError:
+        pass
+    else:
+        # Canonicalize only the workspace-root alias. Do not resolve artifact
+        # components here: downstream strict readers must still reject symlinks.
+        artifact_path = canonical_root / artifact_relative
+    root = canonical_root
     valid = True
     if bound_snapshot is not None:
         if bound_snapshot.record != record or bound_snapshot.path != artifact_path:
@@ -1243,23 +1253,23 @@ def load_bound_judgement_container_snapshot(
     relative = Path(relative_path)
     if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise ValueError("side judgement container path is not canonical")
-    target_snapshot = snapshot_project_file(project_root, relative)
-    if target_snapshot is None:
-        raise ValueError("side judgement container path is not canonical")
-    target_path = target_snapshot.path
+    target_relative = relative.as_posix()
+    discovery = _capture_side_judgement_discovery(project_root)
     matching_specs = [
         spec
         for spec in _side_container_specs(project_root)
-        if spec[0].absolute() == target_path.absolute() and spec[1] == owner
+        if rel(project_root, spec[0].absolute()) == target_relative and spec[1] == owner
     ]
     if len(matching_specs) != 1 or SIDE_OWNER_BY_KIND.get(expected_kind) != owner:
         raise ValueError("side judgement container is not canonical for its owner")
-    discovery = _capture_side_judgement_discovery(project_root)
     target_containers = [
-        container for container in discovery.containers if container.path == target_path.absolute()
+        container
+        for container in discovery.containers
+        if container.file.relative_path == target_relative
     ]
     if len(target_containers) != 1:
         raise ValueError("side judgement container is not a strict YAML mapping")
+    target_path = target_containers[0].path
     valid_candidates = [
         candidate
         for candidate in discovery.candidates

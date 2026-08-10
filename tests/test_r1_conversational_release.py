@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT, source_path
+from repo_paths import REPO_ROOT, initialize_test_workspace, source_path
 
 import pytest
 import yaml
@@ -294,9 +294,10 @@ def test_read_only_help_creates_no_kb_or_agent_protocol(tmp_path: Path) -> None:
 
 def test_kb_status_is_byte_identical_for_every_workspace_file(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
+    initialize_test_workspace(workspace)
     user = workspace / "user"
     reading = user / "reading-lists"
-    reading.mkdir(parents=True)
+    reading.mkdir(parents=True, exist_ok=True)
     (user / "current-state.md").write_text("stale current state\n", encoding="utf-8")
     (user / "navigation.md").write_text("existing navigation\n", encoding="utf-8")
     (reading / "current-reading.md").write_text("existing reading list\n", encoding="utf-8")
@@ -569,6 +570,15 @@ def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path
         check=False,
     )
     assert install.returncode == 0, install.stdout + install.stderr
+    initialized = subprocess.run(
+        [sys.executable, "-B", str(_kb_script(workspace)), "init"],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert initialized.returncode == 0, initialized.stdout + initialized.stderr
     before = _tree_snapshot(workspace)
 
     next_result = subprocess.run(

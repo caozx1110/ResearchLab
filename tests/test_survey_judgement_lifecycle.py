@@ -9,7 +9,7 @@ import os
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 import yaml
@@ -18,7 +18,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation
 import research.judgements as judgements_module
 from research.judgements import discover_pending_judgements, judgement_confirmation_is_current
-from research.paths import config_root, runtime_preferences_path
+from research.paths import config_root, rel, resolve_local_reference, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.prefs import default_runtime_preferences
 import research.surveys as surveys_module
@@ -43,6 +43,17 @@ ROOT = REPO_ROOT
 SCRIPT = ROOT / "skills" / "literature-synthesizer" / "scripts" / "synthesize.py"
 INTAKE_SCRIPT = ROOT / "skills" / "source-intake" / "scripts" / "intake.py"
 QUOTE = "Alpha uses a hierarchical controller for long-horizon tasks."
+
+
+@pytest.fixture(autouse=True)
+def _activated_workspace(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
+
+
+def _physical_ref(root: Path, value: str) -> Path:
+    path = resolve_local_reference(root, value)
+    assert path is not None
+    return path
 
 
 def load_synthesizer():
@@ -353,7 +364,7 @@ def test_prepare_zero_current_inputs_returns_structured_gap_without_scaffold(tmp
     assert handoff["status"] == "evidence_gap"
     assert handoff["composite_handoff"]["ordered_stages"] == list(COMPOSITE_SURVEY_STAGES)
     binding = handoff["composite_handoff"]["state_binding"]
-    state_path = tmp_path / binding["state_path"]
+    state_path = _physical_ref(tmp_path, binding["state_path"])
     state = load_yaml(state_path)
     assert state["status"] == "blocked"
     assert state["current_stage"] == "search"
@@ -507,7 +518,7 @@ def test_systematic_prepare_with_matching_unit_still_starts_frozen_search_compos
     handoff = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert handoff["reason"] == "external_discovery_required"
     binding = handoff["composite_handoff"]["state_binding"]
-    state = load_yaml(tmp_path / binding["state_path"])
+    state = load_yaml(_physical_ref(tmp_path, binding["state_path"]))
     assert state["current_stage"] == "search"
     assert state["stages"][0]["blocker"] == {"code": "external_discovery_required"}
     assert state["selection_filters"]["discovery_mode"] == "systematic"
@@ -714,7 +725,7 @@ def test_synthesis_prepare_persists_the_exact_validated_preference_binding(
     )
 
     assert module.main() == 0
-    fill_path = tmp_path / capsys.readouterr().out.strip().splitlines()[-1]
+    fill_path = _physical_ref(tmp_path, capsys.readouterr().out.strip().splitlines()[-1])
     scaffold = load_yaml(fill_path)
     assert scaffold["preference_context"]["selection_binding"]["selection_id"] == selection_id
     assert scaffold["kb_anchor"]["units"] == bindings
@@ -862,7 +873,7 @@ def test_composite_cli_updates_with_revision_cas_and_is_resumable(
 
     with pytest.raises(SystemExit, match="changed after"):
         module.main()
-    assert load_yaml(tmp_path / binding["state_path"])["revision"] == updated["revision"]
+    assert load_yaml(_physical_ref(tmp_path, binding["state_path"]))["revision"] == updated["revision"]
 
 
 def test_composite_all_seven_stages_bind_current_canonical_artifacts(
@@ -1153,7 +1164,7 @@ def test_composite_fake_ref_and_stale_cas_fail_before_business_write(
     assert module.main() == 2
     handoff = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     binding = handoff["composite_handoff"]["state_binding"]
-    state_path = tmp_path / binding["state_path"]
+    state_path = _physical_ref(tmp_path, binding["state_path"])
     before = state_path.read_bytes()
     update_path = tmp_path / "fake-complete.json"
     update_path.write_text(
@@ -1500,7 +1511,7 @@ def test_confirmed_program_survey_emits_a_current_reportable_event(tmp_path: Pat
     event = load_yaml(events_path)["items"][0]
 
     assert event["event_type"] == "survey-confirmed"
-    assert event["confirmation_binding"]["subject"]["path"] == survey_path.relative_to(tmp_path).as_posix()
+    assert event["confirmation_binding"]["subject"]["path"] == rel(tmp_path, survey_path)
     assert event["confirmation_status"] == "confirmed"
     composite_binding = build_composite_stage_binding(
         tmp_path,

@@ -3471,6 +3471,13 @@ def main() -> int:
     semantic_read = args.command in SEMANTIC_READ_COMMANDS or (
         args.command == "auto" and not args.execute
     )
+    if semantic_read and not root.exists():
+        if args.command == "dashboard":
+            print(format_portfolio_dashboard({"candidates": []}))
+            return 0
+        if args.command == "next" and not args.json:
+            print(format_portfolio_next({"candidates": []}, None, has_records=False))
+            return 0
     if not semantic_read:
         ensure_workspace(root)
 

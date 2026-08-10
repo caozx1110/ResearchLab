@@ -213,6 +213,7 @@ def test_repo_source_has_no_capability_heuristic_symbols() -> None:
 # 2. Legit filled content + verbatim file:line evidence -> validates, persists.
 # --------------------------------------------------------------------------- #
 def test_capability_fill_legit_evidence_validates_and_clears_substance_gate(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     repo = _load_repo_module()
     mini = _make_mini_repo(tmp_path)
 

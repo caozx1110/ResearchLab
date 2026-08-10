@@ -90,6 +90,7 @@ def _with_verified_judgement(
     *,
     claim_type: str = "evaluation",
 ) -> dict:
+    initialize_test_workspace(project_root)
     evidence_root = record_path(project_root, "paper", record["id"]).parent
     evidence_root.mkdir(parents=True, exist_ok=True)
     (evidence_root / "parse-cache.yaml").write_text("grounded analysis evidence", encoding="utf-8")

@@ -1273,10 +1273,11 @@ def load_list_document(path: Path, doc_id: str, generated_by: str) -> dict[str, 
 
 
 def _kb_project_root_for_path(path: Path) -> Path | None:
-    resolved = path.resolve(strict=False)
-    for candidate in [resolved.parent, *resolved.parents]:
-        if candidate.name == "kb":
-            return candidate.parent
+    lexical = Path(os.path.abspath(os.fspath(path)))
+    for candidate in [lexical.parent, *lexical.parents]:
+        marker = candidate / "config" / "workspace-layout.yaml"
+        if marker.exists() or marker.is_symlink():
+            return candidate
     return None
 
 

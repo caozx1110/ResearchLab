@@ -25,7 +25,7 @@ if __name__ == "__main__":
     ensure_managed_runtime(PROJECT_ROOT)
 
 from research.common import add_project_root_argument, append_program_reporting_event, ensure_dir, print_resolved_project_roots, program_reporting_events_path, simple_slug, write_text_if_changed
-from research.core import checkpoint_and_report, kb_root, project_root
+from research.core import checkpoint_and_report, kb_root, project_root, rel
 from research.journal import mutation_transaction
 
 
@@ -102,7 +102,7 @@ def main() -> int:
                 "title": args.title,
                 "summary": args.summary,
                 "stage": "discussion",
-                "artifacts": [path.relative_to(root).as_posix()],
+                "artifacts": [rel(root, path)],
                 "tags": ["discussion", "pending", "needs-agent-repair"],
                 "epistemic_type": "judgement",
                 "information_types": ["inference", "evaluation", "unverified"],

@@ -18,7 +18,11 @@ from .common import (
     write_text_if_changed,
     workspace_root_roles,
 )
-from .path_contract import logical_ref_to_physical_path, physical_path_to_logical_ref
+from .path_contract import (
+    PathContractError,
+    logical_ref_to_physical_path,
+    physical_path_to_logical_ref,
+)
 
 UNIT_KIND_DIRS = {
     "paper": "papers",
@@ -156,10 +160,24 @@ def skills_root(start: Path | None = None, *, explicit_home: str | Path | None =
 
 
 def rel(project_root: Path, path: Path) -> str:
-    return physical_path_to_logical_ref(
-        workspace_root_roles(project_root).roots,
-        path,
-    )
+    roots = workspace_root_roles(project_root).roots
+    try:
+        return physical_path_to_logical_ref(roots, path)
+    except PathContractError as original:
+        # macOS exposes /var as an ancestor alias of /private/var. A strict
+        # reader may canonicalize the workspace capability while its caller
+        # retains the alias (or vice versa). Rebase only that root identity;
+        # never resolve artifact components or broaden containment.
+        try:
+            canonical_data_root = roots.data_root.resolve(strict=True)
+            candidate = Path(path).absolute()
+            relative = candidate.relative_to(canonical_data_root)
+        except (OSError, ValueError):
+            raise original
+        return physical_path_to_logical_ref(
+            roots,
+            roots.data_root / relative,
+        )
 
 
 def ensure_kb_gitignore(project_root: Path) -> Path:
@@ -206,6 +224,8 @@ def _legacy_storage_map(project_root: Path, value: str) -> tuple[Path | None, Pa
         except RuntimeError:
             resolved = path
         for name, legacy_root in legacy_roots.items():
+            if legacy_root == new_roots[name]:
+                continue
             try:
                 relative = resolved.relative_to(legacy_root)
             except ValueError:

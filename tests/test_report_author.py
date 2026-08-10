@@ -5,7 +5,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 
@@ -15,6 +15,7 @@ from research.common import load_yaml, write_yaml_if_changed
 from research.confirm import apply_confirmation, write_record
 from research.evidence import build_verification_receipt
 from research.judgements import confirmation_binding
+from research.paths import rel
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.records import canonical_record_snapshot_for_record, normalize_record_snapshot
 
@@ -46,6 +47,7 @@ def _write_confirmed_record(root: Path, unit_id: str, claims: list[dict]) -> Non
 
 
 def _write_confirmed_repo_record(root: Path, unit_id: str) -> Path:
+    initialize_test_workspace(root)
     repo_root = root / "repo-fixtures" / unit_id
     repo_root.mkdir(parents=True)
     evidence_path = repo_root / "README.md"
@@ -196,6 +198,7 @@ SURVEY_QUOTE = "Alpha uses a hierarchical controller for long-horizon tasks."
 
 
 def _write_confirmed_program_survey(root: Path, *, program_id: str = "program-survey") -> tuple[Path, Path]:
+    initialize_test_workspace(root)
     synth = _load_synthesizer_module()
     program_root = root / "programs" / program_id
     (program_root / "workflow").mkdir(parents=True, exist_ok=True)
@@ -278,6 +281,7 @@ def _write_confirmed_program_survey(root: Path, *, program_id: str = "program-su
 def test_stale_survey_event_isolated_by_pure_read_consumer(tmp_path: Path, monkeypatch) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     survey_path = root / "synthesis" / "robot-learning" / "survey.yaml"
     write_yaml_if_changed(survey_path, {"slug": "robot-learning", "consumer_binding": {}})
     before = survey_path.read_bytes()
@@ -310,6 +314,7 @@ def test_stale_survey_event_isolated_by_pure_read_consumer(tmp_path: Path, monke
 def test_survey_consumer_rejects_symlinked_artifact(tmp_path: Path, monkeypatch) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     outside = tmp_path / "outside-survey.yaml"
     write_yaml_if_changed(outside, {"consumer_binding": {}})
     survey_path = root / "synthesis" / "unsafe" / "survey.yaml"
@@ -497,7 +502,7 @@ def test_confirmed_event_prose_is_neutral_and_exact_binding_mutation_is_pending(
         "confirmation_binding": confirmation_binding(
             record,
             owner="research-orchestrator",
-            path=path.relative_to(root).as_posix(),
+            path=rel(root, path),
         ),
     }
 
@@ -719,6 +724,7 @@ def test_mutated_survey_confirmation_binding_moves_event_to_pending(
 
 def _make_workspace(tmp_path: Path, *, with_claim: bool = True) -> tuple[Path, str, str]:
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     (root / ".agents" / "lib").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
     program_id = "grounded-report"
@@ -788,6 +794,7 @@ def test_literal_factual_and_operational_event_types_enter_ordinary_lane(
     event_type: str,
 ) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     event = {
         "event_type": event_type,
         "title": f"Explicit {event_type} event",
@@ -944,7 +951,7 @@ def test_load_decisions_captures_container_once_and_isolates_bad_sibling(
 
     def count_target_capture(project_root, relative_path, **kwargs):
         nonlocal target_captures
-        if Path(relative_path).as_posix() == path.relative_to(root).as_posix():
+        if Path(relative_path).as_posix() == rel(root, path):
             target_captures += 1
         return original_snapshot(project_root, relative_path, **kwargs)
 
@@ -1029,6 +1036,7 @@ def test_load_decisions_invalid_same_id_sibling_still_suppresses_legacy_duplicat
 ) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     program_id = "compat-known-ids"
     workflow = root / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
@@ -1052,6 +1060,7 @@ def test_legacy_decision_log_replacement_is_not_rendered(
 ) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     program_id = "legacy-snapshot"
     workflow = root / "programs" / program_id / "workflow"
     workflow.mkdir(parents=True)
@@ -1589,6 +1598,7 @@ def test_aggregate_gate_rejects_external_repo_evidence_replaced_after_source_loa
 ) -> None:
     report = _load_report_module()
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     program_id = "external-evidence-report"
     unit_id = "r-external-evidence-123456"
     workflow = root / "programs" / program_id / "workflow"
@@ -1687,6 +1697,7 @@ def test_report_side_event_batch_capture_and_resolution_are_linear(
     event_count: int,
 ) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     report_program_id = "aggregate-events"
     report_workflow = tmp_path / "programs" / report_program_id / "workflow"
     report_workflow.mkdir(parents=True)
@@ -1751,7 +1762,7 @@ def test_report_side_event_batch_capture_and_resolution_are_linear(
                 "confirmation_binding": confirmation_binding(
                     decision,
                     owner="research-orchestrator",
-                    path=decisions_path.relative_to(tmp_path).as_posix(),
+                    path=rel(tmp_path, decisions_path),
                 ),
             }
         )
@@ -2029,6 +2040,7 @@ def test_unit_claim_source_snapshot_enumeration_is_linear(
     unit_count: int,
 ) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     unit_ids = [f"p-linear-{index:02d}" for index in range(unit_count)]
     for unit_id in unit_ids:
         write_yaml_if_changed(
@@ -2055,6 +2067,7 @@ def test_unit_claim_source_snapshot_enumeration_is_linear(
 
 def test_unit_claim_source_requested_ids_are_deduplicated(tmp_path: Path) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     unit_id = "p-requested-twice"
     write_yaml_if_changed(
         tmp_path / "units" / "papers" / unit_id / "record.yaml",
@@ -2069,6 +2082,7 @@ def test_unit_claim_source_requested_ids_are_deduplicated(tmp_path: Path) -> Non
 
 def test_unit_claim_source_duplicate_identity_fails_closed(tmp_path: Path) -> None:
     report = _load_report_module()
+    initialize_test_workspace(tmp_path)
     unit_id = "duplicate-unit"
     record = {"id": unit_id, "title": "Ambiguous", "payload": {"claims": []}}
     write_yaml_if_changed(

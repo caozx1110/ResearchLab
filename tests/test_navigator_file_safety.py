@@ -11,6 +11,7 @@ import serve_kb_browser
 import status_kb_browser
 import stop_kb_browser
 from kb_browser_lib import project_root_from_script
+from repo_paths import initialize_test_workspace
 from serve_kb_browser import _is_writable_text, _resolve_project_path
 
 
@@ -72,18 +73,20 @@ def test_build_kb_browser_root_overrides_discovery(tmp_path: Path, monkeypatch: 
     discovered_root = tmp_path / "discovered"
     explicit_root = tmp_path / "explicit"
     for root in (discovered_root, explicit_root):
-        (root / ".agents").mkdir(parents=True)
+        initialize_test_workspace(root)
+        (root / ".agents").mkdir(parents=True, exist_ok=True)
         (root / "AGENTS.md").write_text("# test\n", encoding="utf-8")
 
     monkeypatch.chdir(discovered_root)
     monkeypatch.setattr(sys, "argv", ["build_kb_browser.py", "--root", str(explicit_root)])
 
     assert build_kb_browser.main() == 0
-    assert (explicit_root / "user" / "index.html").exists()
-    assert not (discovered_root / "user" / "index.html").exists()
+    assert (explicit_root / "user" / "kb" / "index.html").exists()
+    assert not (discovered_root / "user" / "kb" / "index.html").exists()
 
 
 def test_resolve_project_path_accepts_workspace_relative_path(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     target = _resolve_project_path(tmp_path, "kb/user/navigation.md")
 
     assert target == (tmp_path / "user/navigation.md").resolve()
@@ -96,6 +99,7 @@ def test_resolve_project_path_rejects_escape_paths(tmp_path: Path, raw_path: str
 
 
 def test_is_writable_text_allows_plain_markdown(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     path = tmp_path / "units/papers/p-test-123456/note.md"
 
     assert _is_writable_text(tmp_path, path)
@@ -104,24 +108,26 @@ def test_is_writable_text_allows_plain_markdown(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "relative_path",
     [
-        "kb/units/papers/p-test-123456/raw/source.md",
-        "kb/units/blogs/b-test-123456/raw/snapshot.txt",
-        "kb/units/papers/p-test-123456/source/snapshot.md",
-        "kb/units/papers/p-test-123456/parse-cache.yaml",
+        "units/papers/p-test-123456/raw/source.md",
+        "units/blogs/b-test-123456/raw/snapshot.txt",
+        "units/papers/p-test-123456/source/snapshot.md",
+        "units/papers/p-test-123456/parse-cache.yaml",
     ],
 )
 def test_is_writable_text_blocks_immutable_unit_evidence(tmp_path: Path, relative_path: str) -> None:
+    initialize_test_workspace(tmp_path)
     assert not _is_writable_text(tmp_path, tmp_path / relative_path)
 
 
 @pytest.mark.parametrize(
     "relative_path",
     [
-        "kb/units/papers/p-test-123456/record.yaml",
-        "kb/user/kb/index.md",
-        "kb/user/navigator/state.md",
+        "units/papers/p-test-123456/record.yaml",
+        "user/kb/index.md",
+        "user/navigator/state.md",
         ".git/COMMIT_EDITMSG",
     ],
 )
 def test_is_writable_text_blocks_non_md_and_blocked_roots(tmp_path: Path, relative_path: str) -> None:
+    initialize_test_workspace(tmp_path)
     assert not _is_writable_text(tmp_path, tmp_path / relative_path)

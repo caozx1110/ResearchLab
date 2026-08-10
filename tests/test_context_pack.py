@@ -313,7 +313,7 @@ def test_context_pack_bounds_are_deterministic_and_never_cut_a_claim(tmp_path: P
 def test_context_pack_is_read_only_for_canonical_workspace(tmp_path: Path) -> None:
     unit_id = "p-context-readonly-123456"
     _write_judgement(tmp_path, unit_id, confirmed=True)
-    canonical_root = tmp_path / "kb"
+    canonical_root = tmp_path
 
     def snapshot() -> dict[str, tuple[bytes, int]]:
         return {

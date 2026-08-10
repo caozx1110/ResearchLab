@@ -18,6 +18,12 @@ from research.records import normalize_record_schema, trusted_claim_source_roots
 from research.core import default_record, locate_record, write_record
 from research.common import load_yaml, write_yaml_if_changed
 from research.judgements import discover_pending_judgements
+from research.workspace_layout import initialize_workspace_layout
+
+
+@pytest.fixture(autouse=True)
+def _activate_workspace_root(tmp_path: Path) -> None:
+    initialize_workspace_layout(tmp_path, REPO_ROOT)
 
 
 def _load_skill_script(skill: str, script_name: str):
@@ -232,7 +238,7 @@ def test_r1_orchestrator_status_is_byte_identical_read(tmp_path: Path, monkeypat
         "- Confirmation: `confirmed`\n",
         encoding="utf-8",
     )
-    before = _tree_bytes(tmp_path / "kb")
+    before = _tree_bytes(tmp_path)
     monkeypatch.setattr(orchestrate, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(
         sys,
@@ -241,13 +247,12 @@ def test_r1_orchestrator_status_is_byte_identical_read(tmp_path: Path, monkeypat
     )
 
     assert orchestrate.main() == 0
-    assert _tree_bytes(tmp_path / "kb") == before
+    assert _tree_bytes(tmp_path) == before
     assert "'decisions': 1" in capsys.readouterr().out
 
 
 def test_r1_program_mutation_abort_journals_extra_target(tmp_path: Path) -> None:
     orchestrate = _load_skill_script("research-orchestrator", "orchestrate.py")
-    (tmp_path / "kb").mkdir()
     program_id = "fault-scope"
     query_path = orchestrate.program_root(tmp_path, program_id) / "queries" / "fault.md"
 
@@ -261,8 +266,8 @@ def test_r1_program_mutation_abort_journals_extra_target(tmp_path: Path) -> None
     entries = [load_yaml(path) for path in (tmp_path / ".journal").glob("*.yaml")]
     aborted = [entry for entry in entries if entry.get("op_type") == "research-orchestrator:fault-test"]
     assert len(aborted) == 1 and aborted[0]["state"] == "abort"
-    assert query_path.relative_to(tmp_path / "kb").as_posix() in aborted[0]["target_paths"]
-    assert orchestrate.decisions_path(tmp_path, program_id).relative_to(tmp_path / "kb").as_posix() in aborted[0]["target_paths"]
+    assert query_path.relative_to(tmp_path).as_posix() in aborted[0]["target_paths"]
+    assert orchestrate.decisions_path(tmp_path, program_id).relative_to(tmp_path).as_posix() in aborted[0]["target_paths"]
     assert not query_path.exists()
     assert not orchestrate.decisions_path(tmp_path, program_id).exists()
 

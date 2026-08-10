@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from repo_paths import initialize_test_workspace
+
 from research.learnings import (
     learnings_path,
     load_learnings,
@@ -19,6 +21,7 @@ from research.core import load_runtime_preferences, write_runtime_preferences
 
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
+    initialize_test_workspace(root)
     (root / ".agents" / "lib").mkdir(parents=True)
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
     return root
@@ -55,7 +58,7 @@ def test_learning_log_creates_and_bumps_near_duplicate(tmp_path: Path) -> None:
     assert bumped["status"] == "pending"
     assert bumped["last_seen_at"] == "2026-07-05T01:00:00+00:00"
     assert len(entries) == 1
-    assert learnings_path(root).relative_to(root).as_posix() == "kb/memory/learnings.yaml"
+    assert learnings_path(root).relative_to(root).as_posix() == "memory/learnings.yaml"
 
 
 def test_recall_prints_confirmed_habits_gotchas_and_pending_defects(tmp_path: Path) -> None:

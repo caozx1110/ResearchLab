@@ -15,7 +15,7 @@ from typing import Any
 from .common import load_yaml, utc_now_iso
 from .confirm import has_complete_confirmation_receipt
 from .evidence import record_external_source_contract
-from .paths import kb_root
+from .paths import kb_root, rel
 from .records import (
     CanonicalUnitSnapshot,
     iter_records,
@@ -356,7 +356,7 @@ def pending_composite_survey_states(root: Path) -> list[dict[str, Any]]:
             pending.append(
                 {
                     "slug": survey_root.name,
-                    "path": path.relative_to(root).as_posix(),
+                    "path": rel(root, path),
                     "state": projected,
                     "state_digest": _canonical_digest(state),
                 }
@@ -582,7 +582,7 @@ def _trusted_artifact(
     )
     return {
         "role": role,
-        "path": canonical.relative_to(root.resolve()).as_posix(),
+        "path": rel(root, canonical),
         "artifact_kind": artifact_kind,
         "artifact_id": artifact_id,
         "content_sha256": _exact_digest(content),
@@ -749,7 +749,7 @@ def _bound_survey_for_ref(root: Path, ref: dict[str, Any]):
                 "kind": "survey_judgement",
                 "id": f"survey:{mode}:{slug}",
                 "owner": "literature-synthesizer",
-                "path": expected_path.relative_to(root).as_posix(),
+                "path": rel(root, expected_path),
             },
         )
     except (OSError, ValueError) as exc:
@@ -983,7 +983,11 @@ def build_composite_stage_binding(root: Path, stage_id: str, *, refs: object) ->
             bound_snapshot=formal_bound,
         ):
             raise ValueError("report consumption references a stale survey confirmation")
-        expected_confirmation = confirmation_binding(survey, owner="literature-synthesizer", path=survey_path.relative_to(root).as_posix())
+        expected_confirmation = confirmation_binding(
+            survey,
+            owner="literature-synthesizer",
+            path=rel(root, survey_path),
+        )
         survey_program_ids = survey.get("program_ids")
         survey_program_ids = survey_program_ids if isinstance(survey_program_ids, list) else []
         if ref["kind"] == "not-applicable-report-consumption":

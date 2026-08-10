@@ -90,12 +90,12 @@ def test_core_init_checkpoints_every_created_product_file(tmp_path: Path, monkey
     _argv(monkeypatch, "kb.py", "--root", str(root), "init")
 
     assert module.main() == 0
-    assert (root / "kb/.git").is_dir()
+    assert (root / ".git").is_dir()
     assert dirty_kb_paths(root) == []
-    assert (root / "kb/config/research-settings.md").is_file()
-    assert (root / "kb/user/current-state.md").is_file()
-    assert (root / "kb/user/navigation.md").is_file()
-    navigation = (root / "kb/user/navigation.md").read_text(encoding="utf-8")
+    assert (root / "config/research-settings.md").is_file()
+    assert (root / "user/current-state.md").is_file()
+    assert (root / "user/navigation.md").is_file()
+    navigation = (root / "user/navigation.md").read_text(encoding="utf-8")
     assert "research-navigator" not in navigation
     assert "Agent 可在需要时生成研究入口" in navigation
 
@@ -110,8 +110,8 @@ def test_archive_fault_restores_note_and_reporting_event(tmp_path: Path, monkeyp
     with pytest.raises(RuntimeError, match="injected"):
         module.main()
 
-    assert not (root / "kb/programs/p-a/discussions/route.md").exists()
-    assert not (root / "kb/programs/p-a/workflow/reporting-events.yaml").exists()
+    assert not (root / "programs/p-a/discussions/route.md").exists()
+    assert not (root / "programs/p-a/workflow/reporting-events.yaml").exists()
 
 
 def test_archive_success_checkpoints_note_and_event(tmp_path: Path, monkeypatch) -> None:
@@ -129,8 +129,8 @@ def test_archive_success_checkpoints_note_and_event(tmp_path: Path, monkeypatch)
             "trigger": "milestone",
             "message": "milestone: archive discussion for p-a",
             "target_paths": [
-                root / "kb/programs/p-a/discussions/route.md",
-                root / "kb/programs/p-a/workflow/reporting-events.yaml",
+                root / "programs/p-a/discussions/route.md",
+                root / "programs/p-a/workflow/reporting-events.yaml",
             ],
         }
     ]
@@ -151,7 +151,7 @@ def test_synthesizer_fault_restores_single_prepare_output(tmp_path: Path, monkey
     monkeypatch.setattr(module, "write_yaml_if_changed", fail)
     with pytest.raises(RuntimeError, match="injected"):
         module.main()
-    assert not (root / "kb/synthesis/robot-learning/survey-fill.yaml").exists()
+    assert not (root / "synthesis/robot-learning/survey-fill.yaml").exists()
 
 
 def _selected_idea(root: Path) -> str:
@@ -183,11 +183,11 @@ def test_method_fault_restores_all_command_outputs(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(module, "write_yaml_if_changed", fail)
     with pytest.raises(RuntimeError, match="injected"):
         module.main()
-    design = root / "kb/programs/p-method/design"
+    design = root / "programs/p-method/design"
     assert not (design / f"{idea_id}-method.md").exists()
     assert not (design / f"{idea_id}-repo-choice.yaml").exists()
-    assert not (root / "kb/programs/p-method/state.yaml").exists()
-    assert not (root / "kb/programs/p-method/workflow/reporting-events.yaml").exists()
+    assert not (root / "programs/p-method/state.yaml").exists()
+    assert not (root / "programs/p-method/workflow/reporting-events.yaml").exists()
 
 
 def test_wiki_fault_restores_query_note(tmp_path: Path, monkeypatch) -> None:
@@ -198,7 +198,7 @@ def test_wiki_fault_restores_query_note(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "write_text_if_changed", _raise_after_text)
     with pytest.raises(RuntimeError, match="injected"):
         module.main()
-    assert not (root / "kb/synthesis/wiki/what-is-recovery.md").exists()
+    assert not (root / "synthesis/wiki/what-is-recovery.md").exists()
 
 
 def test_wiki_lint_is_byte_identical_on_fresh_root(tmp_path: Path, monkeypatch) -> None:
@@ -215,7 +215,7 @@ def test_retrospective_fault_restores_note(tmp_path: Path, monkeypatch) -> None:
     module = _load(".agents/skills/skill-evolution-advisor/scripts/create_retrospective.py", "r1_retro_fault")
     root = tmp_path / "workspace"
     _workspace(root)
-    note_root = root / "kb/memory/skill-evolution"
+    note_root = root / "memory/skill-evolution"
     _argv(monkeypatch, "create_retrospective.py", "--slug", "routing-gap", "--task-summary", "test", "--root", str(note_root))
     monkeypatch.setattr(module, "write_text_if_changed", _raise_after_text)
     with pytest.raises(RuntimeError, match="injected"):
@@ -227,7 +227,7 @@ def test_retrospective_collision_aborts_instead_of_committing_noop(tmp_path: Pat
     module = _load(".agents/skills/skill-evolution-advisor/scripts/create_retrospective.py", "r1_retro_collision")
     root = tmp_path / "workspace"
     _workspace(root)
-    note_root = root / "kb/memory/skill-evolution"
+    note_root = root / "memory/skill-evolution"
 
     class FixedDateTime:
         @classmethod
@@ -243,7 +243,7 @@ def test_retrospective_collision_aborts_instead_of_committing_noop(tmp_path: Pat
 
     entries = [
         load_yaml(path, default={})
-        for path in (root / "kb/.journal").glob("*.yaml")
+        for path in (root / ".journal").glob("*.yaml")
     ]
     states = sorted(
         entry.get("state")
@@ -265,7 +265,7 @@ def test_evaluator_fault_restores_report(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(module, "write_text_if_changed", _raise_after_text)
     with pytest.raises(RuntimeError, match="injected"):
         module.main()
-    assert not list((root / "kb/eval/research-value/reports").glob("*.md"))
+    assert not list((root / "eval/research-value/reports").glob("*.md"))
 
 
 def test_evaluator_no_write_is_byte_identical_on_fresh_root(tmp_path: Path, monkeypatch) -> None:
@@ -308,7 +308,7 @@ def test_evaluator_same_timestamp_preserves_both_reports_and_undoes_only_last(tm
     _argv(monkeypatch, "eval.py", "--root", str(root), "--program", "beta")
     assert module.main() == 0
 
-    report_dir = root / "kb/eval/research-value/reports"
+    report_dir = root / "eval/research-value/reports"
     first = report_dir / "20260719T120000Z-tier1.md"
     second = report_dir / "20260719T120000Z-tier1-2.md"
     assert first.read_text(encoding="utf-8") == "report for alpha\n"
@@ -327,7 +327,7 @@ def test_single_file_prepare_is_undoable(tmp_path: Path, monkeypatch) -> None:
     _confirmed_survey_source(root)
     _argv(monkeypatch, "synthesize.py", "--root", str(root), "survey", "prepare", "--query", "robot learning", "--as-of", "2026-07-19")
     assert module.main() == 0
-    output = root / "kb/synthesis/robot-learning/survey-fill.yaml"
+    output = root / "synthesis/robot-learning/survey-fill.yaml"
     assert output.exists()
     undo_last_operation(root)
     assert not output.exists()
@@ -340,11 +340,11 @@ def test_multi_file_method_design_is_undoable(tmp_path: Path, monkeypatch) -> No
     idea_id = _selected_idea(root)
     _argv(monkeypatch, "method.py", "--root", str(root), "design", "--idea-id", idea_id, "--program-id", "p-method")
     assert module.main() == 0
-    design = root / "kb/programs/p-method/design"
+    design = root / "programs/p-method/design"
     assert len(list(design.iterdir())) == 4
     undo_last_operation(root)
     # The first method proposal owns the newly-created design directory as one
     # recovery target, so undo restores the exact pre-operation state: absent.
     assert not design.exists()
-    assert not (root / "kb/programs/p-method/state.yaml").exists()
-    assert not (root / "kb/programs/p-method/workflow/reporting-events.yaml").exists()
+    assert not (root / "programs/p-method/state.yaml").exists()
+    assert not (root / "programs/p-method/workflow/reporting-events.yaml").exists()

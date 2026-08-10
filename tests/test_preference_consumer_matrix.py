@@ -15,7 +15,7 @@ from repo_paths import REPO_ROOT
 import pytest
 
 from research.common import load_yaml, write_yaml_if_changed
-from research.paths import config_root, runtime_preferences_path
+from research.paths import config_root, resolve_local_reference, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 from research.core import default_record, record_path
 from research.prefs import default_runtime_preferences, ensure_workspace
@@ -358,7 +358,10 @@ def test_literature_synthesis_persists_selected_binding_and_hard_fallback(
         as_of="2026-07-24",
         preference_context=preference_context,
     )
-    state = load_yaml(root / str(binding["state_path"]))
+    assert str(binding["state_path"]).startswith("kb/synthesis/")
+    state_path = resolve_local_reference(root, str(binding["state_path"]))
+    assert state_path is not None
+    state = load_yaml(state_path)
     assert state["stages"][0]["inputs"][0]["context"] == preference_context
 
     with pytest.raises(SystemExit, match="another task"):

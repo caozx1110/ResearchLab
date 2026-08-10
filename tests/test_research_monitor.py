@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 import yaml
@@ -41,7 +41,7 @@ from research.monitoring import (
     unresolved_monitor_outcomes,
     value_digest,
 )
-from research.paths import config_root
+from research.paths import config_root, rel, resolve_local_reference
 from research.preference_selection import (
     OPERATION_CANONICAL_INPUTS,
     eligible_preferences,
@@ -53,6 +53,7 @@ from research.skill_validator import validate_skill
 
 @pytest.fixture(autouse=True)
 def _existing_monitor_program(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     (tmp_path / "programs" / "program-vla").mkdir(parents=True, exist_ok=True)
 
 
@@ -141,7 +142,7 @@ def _survey_subscription(tmp_path: Path, *, subscription_id: str = "monitor-surv
         "subscription_id": subscription_id,
         "kind": "survey-freshness",
         "target": {
-            "survey_path": survey.relative_to(tmp_path).as_posix(),
+            "survey_path": rel(tmp_path, survey),
             "survey_sha256": file_sha256(survey),
         },
         "scope": {},
@@ -1267,7 +1268,7 @@ def test_artifact_reference_requires_digest_and_verbatim_quote(tmp_path: Path) -
             },
             {
                 "kind": "artifact",
-                "path": artifact.relative_to(tmp_path).as_posix(),
+                "path": rel(tmp_path, artifact),
                 "byte_sha256": file_sha256(artifact),
                 "locator": "sentence 1",
                 "quote": "not present",
@@ -1307,7 +1308,8 @@ def test_survey_binding_is_byte_bound_and_required_for_survey_run(tmp_path: Path
         now=_time(31),
     )
     run = load_run(tmp_path, run["id"])
-    survey = tmp_path / payload["target"]["survey_path"]
+    survey = resolve_local_reference(tmp_path, payload["target"]["survey_path"])
+    assert survey is not None
     survey.write_text("slug: changed\n", encoding="utf-8")
 
     with pytest.raises(SystemExit, match="digest is stale"):
@@ -1321,7 +1323,7 @@ def test_survey_binding_is_byte_bound_and_required_for_survey_run(tmp_path: Path
             outputs={
                 "survey_bindings": [
                     {
-                        "path": survey.relative_to(tmp_path).as_posix(),
+                        "path": rel(tmp_path, survey),
                         "byte_sha256": payload["target"]["survey_sha256"],
                     }
                 ]
@@ -1374,7 +1376,7 @@ def test_completed_outputs_are_bound_to_frozen_monitor_target_and_bytes(tmp_path
 
 def test_terminal_run_receipt_and_unit_coverage_fail_closed(tmp_path: Path) -> None:
     unit_id = "p-monitor-unit-000001"
-    unit = tmp_path / f"kb/units/papers/{unit_id}/record.yaml"
+    unit = tmp_path / f"units/papers/{unit_id}/record.yaml"
     unit.parent.mkdir(parents=True)
     unit.write_text(yaml.safe_dump({"id": unit_id, "kind": "paper"}), encoding="utf-8")
     create_subscription(
@@ -1454,8 +1456,10 @@ def test_symlinked_subscription_and_reference_paths_are_rejected(tmp_path: Path)
 
     safe_root = tmp_path / "safe"
     safe_root.mkdir()
+    initialize_test_workspace(safe_root)
     survey_payload = _survey_subscription(safe_root)
-    survey = safe_root / survey_payload["target"]["survey_path"]
+    survey = resolve_local_reference(safe_root, survey_payload["target"]["survey_path"])
+    assert survey is not None
     create_subscription(safe_root, survey_payload, now=_time(1))
     real = safe_root / "outside-survey.yaml"
     real.write_text(survey.read_text(encoding="utf-8"), encoding="utf-8")
@@ -1488,7 +1492,7 @@ def test_symlinked_subscription_and_reference_paths_are_rejected(tmp_path: Path)
             outputs={
                 "survey_bindings": [
                     {
-                        "path": survey.relative_to(safe_root).as_posix(),
+                        "path": rel(safe_root, survey),
                         "byte_sha256": file_sha256(real),
                     }
                 ]

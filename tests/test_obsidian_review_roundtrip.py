@@ -20,7 +20,9 @@ import pytest
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, default_runtime_preferences, ensure_workspace, record_path
 from research.evidence import build_verification_receipt
+from research.git_ops import dirty_kb_paths, ensure_kb_git_repo, git_checkpoint
 from research.paths import runtime_preferences_path
+from research.paths import resolve_local_reference
 from research.obsidian import update_obsidian_projection
 import research.review_batches as review_batches_module
 from research.review_batches import (
@@ -29,6 +31,17 @@ from research.review_batches import (
     preflight_obsidian_review_batch,
     preview_obsidian_review_batch,
 )
+
+
+@pytest.fixture(autouse=True)
+def _activate_workspace_root(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
+
+
+def _physical_ref(root: Path, logical_ref: str) -> Path:
+    path = resolve_local_reference(root, logical_ref)
+    assert path is not None
+    return path
 
 
 def _load_kb_cli():
@@ -105,7 +118,8 @@ def _source_snapshot(
     item_limit: int | None = None,
     governance_profile: str | None = None,
 ) -> str:
-    path = root / f"kb/.runtime/review-snapshots/{token}.json"
+    initialize_test_workspace(root)
+    path = root / f".runtime/review-snapshots/{token}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema": "kb-review-snapshot/v2",
@@ -158,7 +172,7 @@ def test_sheet_preview_is_checkbox_only_pure_read_and_preflights_all_items(tmp_p
     annotation.parent.mkdir(parents=True)
     annotation.write_text("keep this human note\n", encoding="utf-8")
     created, items = _create_batch(tmp_path)
-    sheet = tmp_path / created["sheet_relative_path"]
+    sheet = _physical_ref(tmp_path, created["sheet_relative_path"])
     text = sheet.read_text(encoding="utf-8")
     assert not text.startswith("---")
     assert "schema:" not in text
@@ -176,7 +190,7 @@ def test_sheet_preview_is_checkbox_only_pure_read_and_preflights_all_items(tmp_p
     text = text[:second] + text[second:].replace("- [ ] 拒绝", "- [x] 拒绝", 1)
     sheet.write_text(text, encoding="utf-8")
 
-    before = _tree_digest(tmp_path / "kb")
+    before = _tree_digest(tmp_path)
     preview = preview_obsidian_review_batch(tmp_path, created["batch_ref"])
     assert [item["decision"] for item in preview.decisions] == ["confirm", "reject"]
     assert len(preview.decision_digest) == 64
@@ -193,7 +207,7 @@ def test_sheet_preview_is_checkbox_only_pure_read_and_preflights_all_items(tmp_p
     )
     assert preflight.requires_owner_atomic_apply is True
     assert calls == ["p-sheet-01", "p-sheet-02"]
-    assert _tree_digest(tmp_path / "kb") == before
+    assert _tree_digest(tmp_path) == before
     assert annotation.read_text(encoding="utf-8") == "keep this human note\n"
     sheet_before = sheet.read_bytes()
     update_obsidian_projection(tmp_path)
@@ -215,7 +229,7 @@ def test_personal_batch_binds_a_limit_above_three_and_rejects_limit_mismatch(tmp
     assert created["item_count"] == 10
     assert created["item_limit"] == 10
     registry = json.loads(
-        (tmp_path / f"kb/.runtime/review-batches/{created['batch_ref']}.json").read_text(encoding="utf-8")
+        (tmp_path / f".runtime/review-batches/{created['batch_ref']}.json").read_text(encoding="utf-8")
     )
     assert registry["item_limit"] == 10
     assert registry["governance_profile"] == "personal"
@@ -252,7 +266,7 @@ def test_strict_obsidian_source_cannot_raise_the_three_item_limit(tmp_path: Path
 def test_legacy_batch_without_bound_limit_remains_readable_at_three_item_cap(tmp_path: Path) -> None:
     created, _items = _create_batch(tmp_path, count=1)
     old_ref = created["batch_ref"]
-    old_registry = tmp_path / f"kb/.runtime/review-batches/{old_ref}.json"
+    old_registry = tmp_path / f".runtime/review-batches/{old_ref}.json"
     payload = json.loads(old_registry.read_text(encoding="utf-8"))
     payload.pop("item_limit")
     payload.pop("governance_profile")
@@ -263,7 +277,7 @@ def test_legacy_batch_without_bound_limit_remains_readable_at_three_item_cap(tmp
     legacy_registry.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     old_registry.unlink()
 
-    old_sheet = tmp_path / created["sheet_relative_path"]
+    old_sheet = _physical_ref(tmp_path, created["sheet_relative_path"])
     legacy_sheet = old_sheet.with_name(f"Pending Review {legacy_ref[:12]}.md")
     text = old_sheet.read_text(encoding="utf-8").replace(old_ref, legacy_ref)
     text = text.replace("- [ ] 暂缓", "- [x] 暂缓", 1)
@@ -294,7 +308,7 @@ def test_legacy_batch_without_bound_limit_remains_readable_at_three_item_cap(tmp
 )
 def test_sheet_rejects_missing_conflicting_and_non_checkbox_edits(tmp_path: Path, edit, code: str) -> None:
     created, _items = _create_batch(tmp_path, count=1)
-    sheet = tmp_path / created["sheet_relative_path"]
+    sheet = _physical_ref(tmp_path, created["sheet_relative_path"])
     sheet.write_text(edit(sheet.read_text(encoding="utf-8")), encoding="utf-8")
     with pytest.raises(ReviewBatchError) as exc:
         preview_obsidian_review_batch(tmp_path, created["batch_ref"])
@@ -303,13 +317,13 @@ def test_sheet_rejects_missing_conflicting_and_non_checkbox_edits(tmp_path: Path
 
 def test_batch_expiry_replay_and_stale_binding_are_pure_failures(tmp_path: Path) -> None:
     created, items = _create_batch(tmp_path, count=1)
-    sheet = tmp_path / created["sheet_relative_path"]
+    sheet = _physical_ref(tmp_path, created["sheet_relative_path"])
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 暂缓", "- [x] 暂缓", 1), encoding="utf-8")
-    before = _tree_digest(tmp_path / "kb")
+    before = _tree_digest(tmp_path)
     with pytest.raises(ReviewBatchError) as expired:
         preview_obsidian_review_batch(tmp_path, created["batch_ref"], now=4_200_000_000.0)
     assert expired.value.code == "expired"
-    assert _tree_digest(tmp_path / "kb") == before
+    assert _tree_digest(tmp_path) == before
 
     with pytest.raises(ReviewBatchError) as stale:
         preflight_obsidian_review_batch(
@@ -321,9 +335,9 @@ def test_batch_expiry_replay_and_stale_binding_are_pure_failures(tmp_path: Path)
             },
         )
     assert stale.value.code == "stale_content"
-    assert _tree_digest(tmp_path / "kb") == before
+    assert _tree_digest(tmp_path) == before
 
-    registry = tmp_path / f"kb/.runtime/review-batches/{created['batch_ref']}.json"
+    registry = tmp_path / f".runtime/review-batches/{created['batch_ref']}.json"
     payload = json.loads(registry.read_text(encoding="utf-8"))
     payload["status"] = "consumed"
     registry.write_text(json.dumps(payload), encoding="utf-8")
@@ -334,9 +348,9 @@ def test_batch_expiry_replay_and_stale_binding_are_pure_failures(tmp_path: Path)
 
 def test_immutable_registry_and_source_snapshot_tampering_fail_closed(tmp_path: Path) -> None:
     created, _items = _create_batch(tmp_path, count=1)
-    sheet = tmp_path / created["sheet_relative_path"]
+    sheet = _physical_ref(tmp_path, created["sheet_relative_path"])
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 暂缓", "- [x] 暂缓", 1), encoding="utf-8")
-    registry = tmp_path / f"kb/.runtime/review-batches/{created['batch_ref']}.json"
+    registry = tmp_path / f".runtime/review-batches/{created['batch_ref']}.json"
     payload = json.loads(registry.read_text(encoding="utf-8"))
     source_token = payload["source_snapshot_token"]
     payload["review_items"][0]["display"]["title"] = "forged title"
@@ -347,11 +361,11 @@ def test_immutable_registry_and_source_snapshot_tampering_fail_closed(tmp_path: 
 
     created, _items = _create_batch(tmp_path / "source", count=1)
     source_root = tmp_path / "source"
-    sheet = source_root / created["sheet_relative_path"]
+    sheet = _physical_ref(source_root, created["sheet_relative_path"])
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 暂缓", "- [x] 暂缓", 1), encoding="utf-8")
-    registry = source_root / f"kb/.runtime/review-batches/{created['batch_ref']}.json"
+    registry = source_root / f".runtime/review-batches/{created['batch_ref']}.json"
     payload = json.loads(registry.read_text(encoding="utf-8"))
-    source_snapshot = source_root / f"kb/.runtime/review-snapshots/{payload['source_snapshot_token']}.json"
+    source_snapshot = source_root / f".runtime/review-snapshots/{payload['source_snapshot_token']}.json"
     source_payload = json.loads(source_snapshot.read_text(encoding="utf-8"))
     source_payload["review_items"][0]["display"]["title"] = "forged source title"
     source_snapshot.write_text(json.dumps(source_payload), encoding="utf-8")
@@ -381,7 +395,7 @@ def test_export_rejects_reserved_or_hidden_display_injection(tmp_path: Path, uns
 
 def test_sheet_and_registry_symlinks_fail_closed_without_touching_external_files(tmp_path: Path) -> None:
     created, _items = _create_batch(tmp_path, count=1)
-    sheet = tmp_path / created["sheet_relative_path"]
+    sheet = _physical_ref(tmp_path, created["sheet_relative_path"])
     external = tmp_path / "external.md"
     external.write_text("external sentinel\n", encoding="utf-8")
     sheet.unlink()
@@ -393,7 +407,7 @@ def test_sheet_and_registry_symlinks_fail_closed_without_touching_external_files
 
     sheet.unlink()
     sheet.write_text("irrelevant\n", encoding="utf-8")
-    registry = tmp_path / f"kb/.runtime/review-batches/{created['batch_ref']}.json"
+    registry = tmp_path / f".runtime/review-batches/{created['batch_ref']}.json"
     external_registry = tmp_path / "external.json"
     external_registry.write_text(registry.read_text(encoding="utf-8"), encoding="utf-8")
     registry.unlink()
@@ -409,7 +423,7 @@ def test_intermediate_directory_swap_cannot_redirect_review_preview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     created, _items = _create_batch(tmp_path, count=1)
-    sheet = tmp_path / created["sheet_relative_path"]
+    sheet = _physical_ref(tmp_path, created["sheet_relative_path"])
     sheet.write_text(
         sheet.read_text(encoding="utf-8").replace("- [ ] 暂缓", "- [x] 暂缓", 1),
         encoding="utf-8",
@@ -699,12 +713,17 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
 ) -> None:
     kb = _load_kb_cli()
     record = _write_ready_unit(tmp_path)
-    repo = tmp_path / "kb"
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    repo = tmp_path
+    ensure_kb_git_repo(tmp_path, create_initial_commit=False)
     subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
     subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    baseline = git_checkpoint(
+        tmp_path,
+        "baseline",
+        auto_init=False,
+        target_paths=dirty_kb_paths(tmp_path),
+    )
+    assert baseline["committed"] is True
     assert kb.main(
         [
             "--root",
@@ -721,7 +740,7 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
     protocol = json.loads((tmp_path / ".runtime/obsidian-export.json").read_text(encoding="utf-8"))
     sheet_action = next(item for item in protocol["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = sheet_action["batch_ref"]
-    sheet = tmp_path / sheet_action["sheet_path"]
+    sheet = _physical_ref(tmp_path, sheet_action["sheet_path"])
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认", 1), encoding="utf-8")
     canonical_before = record.read_bytes()
 
@@ -771,11 +790,11 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
     assert confirmed["confirmation_status"] == "confirmed"
     assert confirmed["confirmation"]["method"] == "kb review"
     batch_registry = json.loads(
-        (tmp_path / f"kb/.runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8")
+        (tmp_path / f".runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8")
     )
     source_token = batch_registry["source_snapshot_token"]
     source_registry = json.loads(
-        (tmp_path / f"kb/.runtime/review-snapshots/{source_token}.json").read_text(encoding="utf-8")
+        (tmp_path / f".runtime/review-snapshots/{source_token}.json").read_text(encoding="utf-8")
     )
     assert batch_registry["status"] == "consumed"
     assert source_registry["status"] == "consumed"
@@ -784,11 +803,11 @@ def test_kb_cli_exports_previews_and_atomically_applies_once(
     assert "作为一个整体应用" in applied_sheet
     assert "- [x] 确认" in applied_sheet
     assert subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "status", "--short"],
+        ["git", "-C", str(tmp_path), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,
-    ).stdout == ""
+    ).stdout == "?? AGENTS.md\n"
     applied = record.read_bytes()
     assert kb.main(
         [
@@ -818,7 +837,7 @@ def test_kb_cli_owner_failure_rolls_back_every_canonical_write_and_keeps_batch_u
     protocol = json.loads((tmp_path / ".runtime/rollback-export.json").read_text(encoding="utf-8"))
     action = next(item for item in protocol["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = action["batch_ref"]
-    sheet = tmp_path / action["sheet_path"]
+    sheet = _physical_ref(tmp_path, action["sheet_path"])
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认"), encoding="utf-8")
     sheet_before = sheet.read_bytes()
     expected_preview_digest = _preview_digest(tmp_path, batch_ref)
@@ -848,9 +867,9 @@ def test_kb_cli_owner_failure_rolls_back_every_canonical_write_and_keeps_batch_u
     assert calls == 2
     assert first.read_bytes() == before[first]
     assert second.read_bytes() == before[second]
-    batch_registry = json.loads((tmp_path / f"kb/.runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
+    batch_registry = json.loads((tmp_path / f".runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
     source_registry = json.loads(
-        (tmp_path / f"kb/.runtime/review-snapshots/{batch_registry['source_snapshot_token']}.json").read_text(encoding="utf-8")
+        (tmp_path / f".runtime/review-snapshots/{batch_registry['source_snapshot_token']}.json").read_text(encoding="utf-8")
     )
     assert batch_registry["status"] == "unused"
     assert source_registry["status"] == "unused"
@@ -873,7 +892,7 @@ def test_checkpoint_failure_is_private_and_protocol_reports_post_apply_error(
     exported = json.loads((tmp_path / ".runtime/checkpoint-export.json").read_text(encoding="utf-8"))
     action = next(item for item in exported["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = action["batch_ref"]
-    sheet = tmp_path / action["sheet_path"]
+    sheet = _physical_ref(tmp_path, action["sheet_path"])
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认", 1), encoding="utf-8")
     preview_digest = _preview_digest(tmp_path, batch_ref)
 
@@ -893,7 +912,7 @@ def test_checkpoint_failure_is_private_and_protocol_reports_post_apply_error(
     public = capsys.readouterr()
     assert "checkpoint" not in public.out + public.err
     assert load_yaml(record, default={})["confirmation_status"] == "confirmed"
-    registry = json.loads((tmp_path / f"kb/.runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
+    registry = json.loads((tmp_path / f".runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
     assert registry["status"] == "consumed"
     protocol = json.loads((tmp_path / ".runtime/checkpoint-apply.json").read_text(encoding="utf-8"))
     assert protocol["status"] == "error"
@@ -915,7 +934,7 @@ def test_apply_is_bound_to_previewed_choices_and_current_user_authorization(
     protocol = json.loads((tmp_path / ".runtime/auth-export.json").read_text(encoding="utf-8"))
     action = next(item for item in protocol["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = action["batch_ref"]
-    sheet = tmp_path / action["sheet_path"]
+    sheet = _physical_ref(tmp_path, action["sheet_path"])
     original = sheet.read_text(encoding="utf-8")
     sheet.write_text(original.replace("- [ ] 确认", "- [x] 确认", 1), encoding="utf-8")
     previewed_confirm = _preview_digest(tmp_path, batch_ref)
@@ -944,7 +963,7 @@ def test_apply_is_bound_to_previewed_choices_and_current_user_authorization(
     ]) == 2
     capsys.readouterr()
     assert record.read_bytes() == canonical_before
-    registry = json.loads((tmp_path / f"kb/.runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
+    registry = json.loads((tmp_path / f".runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
     assert registry["status"] == "unused"
 
 
@@ -962,7 +981,7 @@ def test_concurrent_replay_has_exactly_one_winner(
     protocol = json.loads((tmp_path / ".runtime/concurrent-export.json").read_text(encoding="utf-8"))
     action = next(item for item in protocol["next_actions"] if item["action"] == "open_obsidian_review_sheet")
     batch_ref = action["batch_ref"]
-    sheet = tmp_path / action["sheet_path"]
+    sheet = _physical_ref(tmp_path, action["sheet_path"])
     sheet.write_text(sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认", 1), encoding="utf-8")
     expected_preview_digest = _preview_digest(tmp_path, batch_ref)
     monkeypatch.setattr(kb, "checkpoint_and_report", lambda *args, **kwargs: {"committed": False})
@@ -978,8 +997,8 @@ def test_concurrent_replay_has_exactly_one_winner(
     capsys.readouterr()
     assert sorted(results) == [0, 2]
     assert load_yaml(record, default={})["confirmation_status"] == "confirmed"
-    registry = json.loads((tmp_path / f"kb/.runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
+    registry = json.loads((tmp_path / f".runtime/review-batches/{batch_ref}.json").read_text(encoding="utf-8"))
     source = json.loads(
-        (tmp_path / f"kb/.runtime/review-snapshots/{registry['source_snapshot_token']}.json").read_text(encoding="utf-8")
+        (tmp_path / f".runtime/review-snapshots/{registry['source_snapshot_token']}.json").read_text(encoding="utf-8")
     )
     assert registry["status"] == source["status"] == "consumed"

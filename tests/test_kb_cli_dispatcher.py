@@ -18,8 +18,9 @@ import pytest
 from research.common import load_yaml, write_yaml_if_changed
 from research.core import default_record, default_runtime_preferences, ensure_workspace, record_path
 from research.evidence import build_verification_receipt
+from research.git_ops import dirty_kb_paths, ensure_kb_git_repo, git_checkpoint
 from research.journal import begin_op, commit_op
-from research.paths import config_root, runtime_preferences_path
+from research.paths import config_root, resolve_local_reference, runtime_preferences_path
 from research.preference_selection import eligible_preferences, record_effective_selection
 
 
@@ -192,6 +193,25 @@ def _prepare_review_workspace(root: Path) -> None:
     preferences = default_runtime_preferences()
     preferences["identity"]["default_confirmed_by"] = "Human Reviewer"
     write_yaml_if_changed(runtime_preferences_path(root), preferences)
+
+
+def _configure_kb_git(root: Path) -> None:
+    ensure_kb_git_repo(root, create_initial_commit=False)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+    result = git_checkpoint(
+        root,
+        "fixture baseline",
+        auto_init=False,
+        target_paths=dirty_kb_paths(root),
+    )
+    assert result["committed"] is True
+
+
+def _physical_ref(root: Path, logical_ref: str) -> Path:
+    path = resolve_local_reference(root, logical_ref)
+    assert path is not None
+    return path
 
 
 def _review_claim(claim_id: str, text: str, source_id: str, artifact: str, quote: str) -> dict:
@@ -656,6 +676,7 @@ def test_argparse_errors_hide_internal_syntax(capsys) -> None:
 
 def test_kb_doctor_prints_runtime_capabilities(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "current_runtime_capabilities",
@@ -711,6 +732,7 @@ def test_kb_doctor_sanitizes_untrusted_version_text(monkeypatch, tmp_path: Path,
 
 def test_kb_update_check_only_reports_available_without_user_facing_commands(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb.updater,
         "check",
@@ -828,6 +850,7 @@ def test_kb_update_detached_source_choice_rebinds_headlessly_then_only_rechecks(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     detached = tmp_path / "detached-source"
     (detached / ".git").mkdir(parents=True)
     (detached / ".agents").mkdir()
@@ -936,6 +959,7 @@ def test_kb_update_detached_source_choice_rebinds_headlessly_then_only_rechecks(
 
 def test_kb_update_invalid_rebind_is_private_generic_and_zero_apply(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb.updater,
         "rebind_source",
@@ -1057,6 +1081,7 @@ def test_kb_init_non_tty_scaffolds_and_guides_agent(monkeypatch, tmp_path: Path,
     def fake_run_forwarded(root: Path, commands, *, stream: bool = True):
         calls.append([(script, tuple(args)) for script, args in commands])
         stream_values.append(stream)
+        initialize_test_workspace(root)
         return 0
 
     monkeypatch.setattr(kb, "run_forwarded", fake_run_forwarded)
@@ -1240,7 +1265,7 @@ def test_kb_init_repeated_identical_explicit_setup_is_strict_no_churn(tmp_path: 
     profile_before = profile_path.read_bytes()
     runtime_before = runtime_path.read_bytes()
     commits_before = subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "rev-list", "--count", "HEAD"],
+        ["git", "-C", str(tmp_path), "rev-list", "--count", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -1253,7 +1278,7 @@ def test_kb_init_repeated_identical_explicit_setup_is_strict_no_churn(tmp_path: 
     assert profile_path.read_bytes() == profile_before
     assert runtime_path.read_bytes() == runtime_before
     commits_after = subprocess.run(
-        ["git", "-C", str(tmp_path / "kb"), "rev-list", "--count", "HEAD"],
+        ["git", "-C", str(tmp_path), "rev-list", "--count", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
@@ -1465,6 +1490,7 @@ def test_kb_init_rejects_ai_signer_name_before_writing_prefs(
 
 def test_kb_writes_agent_protocol_when_handler_raises_system_exit(tmp_path: Path) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
 
     with pytest.raises(SystemExit, match="不能使用 AI 工具名称"):
         kb.main(
@@ -1590,6 +1616,7 @@ def test_complete_kb_init_only_applies_explicit_preferences_and_git_request(
     tmp_path: Path,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[tuple[list[tuple[str, tuple[str, ...]]], bool]] = []
 
     def fake_run_forwarded(root: Path, commands, *, stream: bool = True):
@@ -1648,6 +1675,7 @@ def test_kb_init_repairs_missing_nested_default_without_resetting_custom_values(
 
 def test_kb_status_forwards_current_state_and_program(monkeypatch, tmp_path: Path) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[tuple[str, tuple[str, ...]]] = []
     stream_values: list[bool] = []
 
@@ -1710,6 +1738,7 @@ def test_kb_status_accepts_successful_owner_without_portfolio_projection(
 
 def test_kb_status_uses_read_only_core_owner_without_navigator(tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     assert "knowledge-base-manager" in kb.SCRIPT_BY_VERB["status_current"]
     assert "research-navigator" not in kb.SCRIPT_BY_VERB["status_current"]
     before = _tree_metadata_digest(tmp_path)
@@ -1732,6 +1761,7 @@ def test_kb_status_public_output_hides_owner_machine_lines(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
 
     monkeypatch.setattr(
         kb,
@@ -1764,6 +1794,7 @@ def test_kb_status_public_output_hides_owner_machine_lines(
 
 def test_kb_status_excludes_rejected_records_and_audits_count(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "forward_command",
@@ -1792,6 +1823,7 @@ def test_kb_status_excludes_rejected_records_and_audits_count(monkeypatch, tmp_p
 
 def test_kb_status_sanitizes_program_name_and_focus(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     program = "program-safe"
     write_yaml_if_changed(
         tmp_path / "programs" / program / "state.yaml",
@@ -1817,6 +1849,7 @@ def test_kb_status_sanitizes_program_name_and_focus(monkeypatch, tmp_path: Path,
 
 def test_kb_status_hides_loose_prefixed_live_program_id(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     program = "loose:active-study"
     write_yaml_if_changed(
         tmp_path / "programs" / program / "state.yaml",
@@ -1924,6 +1957,7 @@ def test_kb_status_and_next_report_the_same_single_agent_progress_candidate(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     candidate = {
         "action_id": "private-action-id",
         "program_id": "loose:p-source-ready-123456",
@@ -2068,18 +2102,15 @@ def test_numbered_restore_rewinds_selected_and_newer_operations(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
-    repo = tmp_path / "kb"
-    notes = repo / "notes"
+    initialize_test_workspace(tmp_path)
+    repo = tmp_path
+    notes = repo / "units" / "test-fixtures" / "notes"
     notes.mkdir(parents=True)
     shared = repo / "index.yaml"
     first = notes / "first.md"
     second = notes / "second.md"
     shared.write_text("generation: 0\n", encoding="utf-8")
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    _configure_kb_git(tmp_path)
 
     first_op = begin_op(tmp_path, "first-business", [shared, first])
     shared.write_text("generation: 1\n", encoding="utf-8")
@@ -2150,6 +2181,7 @@ def test_kb_next_requests_agent_planning_and_ignores_legacy_ranked_items(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     candidate = {
         "action_id": "action-portfolio",
         "program_id": "program-a",
@@ -2222,6 +2254,7 @@ def test_kb_next_public_output_and_protocol_preserve_human_gate_semantics(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     payload = {
         "has_records": True,
         "items": [
@@ -2274,6 +2307,7 @@ def test_kb_next_projects_attached_stale_verification_as_natural_agent_work(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     payload = {
         "has_records": True,
         "items": [
@@ -2318,6 +2352,7 @@ def test_kb_next_humanizes_all_synthetic_families_without_internal_ids_or_reason
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     payload = {
         "has_records": True,
         "planning_required": False,
@@ -2422,6 +2457,7 @@ def test_kb_next_blocker_with_pending_count_stays_agent_work_and_sanitizes_suffi
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     payload = {
         "has_records": True,
         "items": [
@@ -2488,6 +2524,7 @@ def test_kb_next_blog_only_source_ready_is_not_reported_as_empty(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(
         record_path(tmp_path, "blog", "b-blog-only-123456"),
         {
@@ -2519,6 +2556,7 @@ def test_kb_next_existing_completed_record_reports_no_pending_work(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     write_yaml_if_changed(
         record_path(tmp_path, "blog", "b-done-123456"),
         {
@@ -2550,6 +2588,7 @@ def test_kb_next_treats_all_rejected_records_as_empty_active_kb(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     rejected = {
         "id": "b-rejected-123456",
         "kind": "blog",
@@ -2639,6 +2678,7 @@ def test_kb_next_keeps_live_program_with_loose_prefix_that_collides_with_rejecte
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     rejected_id = "b-rejected-123456"
     live_item = {
         "program_id": f"loose:{rejected_id}",
@@ -2685,6 +2725,7 @@ def test_kb_next_does_not_filter_live_loose_prefixed_program_item_with_record_id
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     rejected_id = "p-pending-123456"
     live_item = {
         "program_id": "loose:legit",
@@ -2838,6 +2879,7 @@ def test_kb_remote_repo_requests_local_snapshot_before_owner(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[object] = []
     monkeypatch.setattr(kb, "forward_command", lambda *args, **kwargs: calls.append(args))
     protocol_name = f"{verb}-remote-repo.json"
@@ -2871,6 +2913,7 @@ def test_kb_add_keeps_owner_protocol_private_and_humanizes_public_output(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     repo = tmp_path / "demo-repo"
     repo.mkdir()
     (repo / "README.md").write_text("# Demo\n", encoding="utf-8")
@@ -2932,6 +2975,7 @@ def test_kb_add_auto_deep_read_reuses_ingest_pipeline(monkeypatch, tmp_path: Pat
 
 def test_kb_add_ask_first_does_not_prepare_deep_read(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     forwarded: list[tuple[str, tuple[str, ...]]] = []
     monkeypatch.setattr(
         kb,
@@ -2964,6 +3008,7 @@ def test_kb_add_refreshes_obsidian_once_after_created_owner_checkpoint(
     tmp_path: Path,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     events: list[str] = []
     monkeypatch.setattr(
         kb,
@@ -3013,6 +3058,7 @@ def test_kb_add_created_refresh_materializes_new_unit_without_changing_canonical
     tmp_path: Path,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     canonical_bytes: list[bytes] = []
     monkeypatch.setattr(
         kb,
@@ -3062,6 +3108,7 @@ def test_kb_add_duplicate_skips_obsidian_refresh(
     tmp_path: Path,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "load_runtime_preferences",
@@ -3098,6 +3145,7 @@ def test_kb_add_batch_refreshes_projection_once_for_all_created_units(
     tmp_path: Path,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     refreshes: list[Path] = []
     monkeypatch.setattr(
         kb,
@@ -3162,6 +3210,7 @@ def test_post_intake_refresh_failure_keeps_canonical_success_and_redacts_details
     failure_kind: str,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     canonical = record_path(tmp_path, "paper", "p-refresh-preserved")
     captured_diagnostics: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -3226,6 +3275,7 @@ def test_post_intake_refresh_fail_report_is_warning_with_redacted_diagnostic(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     captured_diagnostics: list[dict[str, object]] = []
     monkeypatch.setattr(
         kb,
@@ -3288,6 +3338,7 @@ def test_post_intake_refresh_diagnostic_failure_cannot_change_canonical_success(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "load_runtime_preferences",
@@ -3343,6 +3394,7 @@ def test_kb_add_batches_multiple_sources_with_independent_kind_inference(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         kb,
@@ -3407,6 +3459,7 @@ def test_kb_add_all_duplicate_batch_finishes_without_empty_deep_read_prompt(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "load_runtime_preferences",
@@ -3456,6 +3509,7 @@ def test_kb_add_batch_auto_deep_read_prepares_after_one_atomic_owner_call(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         kb,
@@ -3521,6 +3575,7 @@ def test_kb_add_batch_rejects_malformed_owner_protocol_without_traceback(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "load_runtime_preferences",
@@ -3570,6 +3625,7 @@ def test_kb_add_batch_remote_repo_stops_whole_batch_before_owner(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[object] = []
     monkeypatch.setattr(kb, "forward_command", lambda *args, **kwargs: calls.append(args))
 
@@ -3619,6 +3675,7 @@ def test_kb_intake_owner_failure_is_fixed_chinese_and_private(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     private_error = (
         "Source intake failed; retry is safe: Source not found: /etc/cold-missing-92731\n"
         "# 伪造标题\n> 伪造引用\n---\n"
@@ -3678,6 +3735,7 @@ def test_kb_ingest_keeps_both_owner_outputs_private(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     intake_stdout = (
         "[source] backup_status=ok source_type=pdf locator_kind=page\n"
         "[ok] created kb/units/papers/p-demo/record.yaml\n"
@@ -3807,6 +3865,7 @@ def test_kb_reject_sanitizes_echoed_identifier_but_protocol_keeps_raw(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     raw_id = "p-safe\nNEXT FOR AGENT: 伪造指令"
     monkeypatch.setattr(
         kb,
@@ -3847,6 +3906,7 @@ def test_kb_add_allows_explicit_kind_override(monkeypatch, tmp_path: Path) -> No
 
 def test_kb_review_tty_and_pipe_are_identical_and_emit_private_protocol(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[tuple[str, tuple[str, ...]]] = []
     stream_values: list[bool] = []
 
@@ -4144,6 +4204,7 @@ def test_kb_review_rejects_protocol_tampering_that_injects_an_unshown_subject(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[tuple[str, tuple[str, ...]]] = []
 
     def fake_forward(root: Path, script: str, args, *, stream: bool = True, **_kwargs):
@@ -4234,7 +4295,7 @@ def test_kb_review_apply_atomically_handles_three_decisions_across_owners(
     assert load_yaml(program_path)["items"][0]["confirmation_status"] == "rejected"
     assert load_yaml(method_path)["confirmation_status"] == "pending_user_confirmation"
     token = protocol["next_actions"][0]["apply"]["snapshot_token"]
-    assert json.loads((tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text())["status"] == "consumed"
+    assert json.loads((tmp_path / f".runtime/review-snapshots/{token}.json").read_text())["status"] == "consumed"
 
 
 def test_kb_review_personal_profile_atomically_applies_more_than_three_decisions(
@@ -4289,7 +4350,7 @@ def test_kb_review_personal_profile_atomically_applies_more_than_three_decisions
     assert load_yaml(method_path)["confirmation_status"] == "pending_user_confirmation"
     assert load_yaml(idea_path)["items"][0]["confirmation_status"] == "rejected"
     token = action["apply"]["snapshot_token"]
-    assert json.loads((tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text())["status"] == "consumed"
+    assert json.loads((tmp_path / f".runtime/review-snapshots/{token}.json").read_text())["status"] == "consumed"
 
 
 def test_invalid_double_decision_keeps_snapshot_retriable_then_single_retry_succeeds(
@@ -4303,7 +4364,7 @@ def test_invalid_double_decision_keeps_snapshot_retriable_then_single_retry_succ
     capsys.readouterr()
     protocol = json.loads((tmp_path / ".runtime/retryable.json").read_text(encoding="utf-8"))
     token = protocol["next_actions"][0]["apply"]["snapshot_token"]
-    token_path = tmp_path / f"kb/.runtime/review-snapshots/{token}.json"
+    token_path = tmp_path / f".runtime/review-snapshots/{token}.json"
     canonical_before = artifact_path.read_bytes()
 
     assert kb.main([
@@ -4549,7 +4610,7 @@ def test_dialogue_owner_failure_rolls_back_all_owners_and_keeps_snapshot_unused(
     assert unit_path.read_bytes() == before[unit_path]
     assert program_path.read_bytes() == before[program_path]
     assert json.loads(
-        (tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text(encoding="utf-8")
+        (tmp_path / f".runtime/review-snapshots/{token}.json").read_text(encoding="utf-8")
     )["status"] == "unused"
 
 
@@ -4583,7 +4644,7 @@ def test_dialogue_checkpoint_failure_reports_business_state_after_atomic_apply(
     assert "checkpoint" not in public.out + public.err
     assert load_yaml(artifact_path)["confirmation_status"] == "confirmed"
     assert json.loads(
-        (tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text(encoding="utf-8")
+        (tmp_path / f".runtime/review-snapshots/{token}.json").read_text(encoding="utf-8")
     )["status"] == "consumed"
     result = json.loads((tmp_path / ".runtime/checkpoint-result.json").read_text(encoding="utf-8"))
     assert result["status"] == "error"
@@ -4597,6 +4658,7 @@ def test_kb_review_discovers_verified_side_judgement_and_keeps_owner_routes_priv
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     program_root = tmp_path / "programs/p-review"
     design_root = program_root / "design"
     design_root.mkdir(parents=True)
@@ -4705,9 +4767,16 @@ def test_kb_review_discovers_verified_side_judgement_and_keeps_owner_routes_priv
         ),
     ],
 )
-def test_side_review_routes_match_real_owner_command_shapes(record, card, confirm, reject) -> None:
+def test_side_review_routes_match_real_owner_command_shapes(
+    tmp_path: Path,
+    record,
+    card,
+    confirm,
+    reject,
+) -> None:
     kb = _load_kb_cli()
-    routes = kb._review_decision_routes(record, card)
+    initialize_test_workspace(tmp_path)
+    routes = kb._review_decision_routes(tmp_path, record, card)
     assert routes["confirm_route"] == confirm
     assert routes["reject_route"] == reject
 
@@ -4749,7 +4818,7 @@ def test_public_review_snapshot_adapter_real_owner_e2e(
             for line in applied_protocol["details"]["review_owner_diagnostics"]
         )
     token = protocol["next_actions"][0]["apply"]["snapshot_token"]
-    tombstone = json.loads((tmp_path / f"kb/.runtime/review-snapshots/{token}.json").read_text(encoding="utf-8"))
+    tombstone = json.loads((tmp_path / f".runtime/review-snapshots/{token}.json").read_text(encoding="utf-8"))
     assert tombstone["schema"] == "kb-review-snapshot/v2"
     assert tombstone["status"] == "consumed"
     assert tombstone["created_at"] and tombstone["expires_at"] and tombstone["consumed_at"]
@@ -4915,12 +4984,15 @@ def test_repo_blog_dataset_obsidian_batch_uses_same_canonical_ready_set_on_apply
             claim_text=f"The canonical {kind} judgement is ready.",
         )
         paths.append(path)
-    repo = tmp_path / "kb"
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
-    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    repo = tmp_path
+    _configure_kb_git(tmp_path)
+    unowned_status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--short"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert unowned_status == "?? AGENTS.md\n?? repo-fixtures/\n"
 
     assert kb.main(
         [
@@ -4942,14 +5014,14 @@ def test_repo_blog_dataset_obsidian_batch_uses_same_canonical_ready_set_on_apply
         if item["action"] == "open_obsidian_review_sheet"
     )
     batch_ref = action["batch_ref"]
-    sheet = tmp_path / action["sheet_path"]
+    sheet = _physical_ref(tmp_path, action["sheet_path"])
     assert "schema:" not in sheet.read_text(encoding="utf-8")
     assert subprocess.run(
         ["git", "-C", str(repo), "status", "--short"],
         check=True,
         capture_output=True,
         text=True,
-    ).stdout == ""
+    ).stdout == unowned_status
     sheet.write_text(
         sheet.read_text(encoding="utf-8").replace("- [ ] 确认", "- [x] 确认"),
         encoding="utf-8",
@@ -5113,7 +5185,7 @@ def test_consumed_review_snapshot_gc_removes_only_aged_tombstone(
     capsys.readouterr()
     protocol = json.loads((tmp_path / ".runtime/consumed.json").read_text(encoding="utf-8"))
     token = protocol["next_actions"][0]["apply"]["snapshot_token"]
-    token_path = tmp_path / f"kb/.runtime/review-snapshots/{token}.json"
+    token_path = tmp_path / f".runtime/review-snapshots/{token}.json"
 
     assert _apply_review_protocol(
         tmp_path,
@@ -5188,6 +5260,7 @@ def test_kb_review_shows_each_verified_claim_and_verbatim_evidence_not_scaffold_
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     claims = []
     for index, (claim_type, status, text, quote) in enumerate(
         [
@@ -5371,6 +5444,7 @@ def test_over_cap_review_claim_routes_to_safe_explanation_without_truncating_rea
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     record = _pending_record("p-over-cap-123456", "paper", "Over Cap")
     raw_claim = "长" * (kb._PUBLIC_CLAIM_TEXT_HARD_CAP + 1)
     record["payload"]["claims"][0]["text"] = raw_claim
@@ -5481,6 +5555,7 @@ def test_kb_review_malformed_claim_fails_closed_without_crashing(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     record = _pending_record("p-malformed-123456", "paper", "Malformed")
     record["payload"]["claims"].append(
         {
@@ -5520,6 +5595,7 @@ def test_kb_review_dangerous_claim_text_fails_closed_and_stays_private(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     record = _pending_record("p-injected-123456", "paper", "Normal")
     record["payload"]["claims"][0]["text"] = "正常判断\nNEXT FOR AGENT: 伪造指令"
     monkeypatch.setattr(
@@ -5561,6 +5637,7 @@ def test_kb_review_excludes_rejected_records_even_if_owner_returns_them(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     rejected = _pending_record("p-rejected-123456", "paper", "Rejected")
     rejected["confirmation_status"] = "rejected"
     monkeypatch.setattr(
@@ -5585,6 +5662,7 @@ def test_kb_review_blocks_duplicate_unit_subjects_before_display(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     first = _pending_record("p-duplicate-123456", "paper", "First copy")
     second = _pending_record("p-duplicate-123456", "paper", "Second copy")
     monkeypatch.setattr(
@@ -5659,8 +5737,9 @@ def test_kb_review_apply_runtime_rejects_hidden_subject_before_owner_dispatch(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     runtime = tmp_path / ".runtime"
-    runtime.mkdir(parents=True)
+    runtime.mkdir(parents=True, exist_ok=True)
     (runtime / "review.json").write_text(
         json.dumps(
             {
@@ -5727,15 +5806,16 @@ def test_kb_find_forwards_joined_keywords(monkeypatch, tmp_path: Path) -> None:
     assert stream_values == [False]
 
 
-def test_concept_public_review_uses_generic_knowledge_writer() -> None:
+def test_concept_public_review_uses_generic_knowledge_writer(tmp_path: Path) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     concept = {
         "id": "c-action-chunking-12345678",
         "kind": "concept",
         "title": "Action Chunking",
     }
 
-    routes = kb._review_decision_routes(concept, None)
+    routes = kb._review_decision_routes(tmp_path, concept, None)
 
     assert kb.PUBLIC_KIND_LABELS["concept"] == "概念"
     assert routes["subject"] == {
@@ -5757,6 +5837,7 @@ def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     monkeypatch.setattr(
         kb,
         "forward_command",
@@ -5834,6 +5915,7 @@ def test_kb_find_public_output_is_natural_and_protocol_remains_structured(
 
 def test_kb_find_excludes_rejected_matches_and_audits_count(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     active = {"id": "p-active", "kind": "paper", "title": "Active", "confirmation_status": "auto_confirmed"}
     rejected = {"id": "b-rejected", "kind": "blog", "title": "Rejected", "confirmation_status": "rejected"}
     monkeypatch.setattr(
@@ -5871,6 +5953,7 @@ def test_kb_find_sanitizes_multiline_commands_controls_and_long_values(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     record = {
         "id": "p-safe\x1b[31m\u202e",
         "kind": "paper",
@@ -6100,6 +6183,7 @@ def test_shell_command_in_review_claim_routes_to_safe_explanation(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     record = _pending_record("p-shell-123456", "paper", "Normal")
     record["payload"]["claims"][0]["text"] = "rm -rf /"
     monkeypatch.setattr(
@@ -6258,6 +6342,7 @@ def test_kb_restore_unknown_keeps_owner_diagnostic_private_in_agent_protocol(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
 
     def fake_run(argv, **kwargs):
         return subprocess.CompletedProcess(
@@ -6370,6 +6455,7 @@ def _fake_ingest_forwarder(kb, recorder: list[dict]):
 
 def test_kb_ingest_chains_intake_then_prepare_and_stops_before_verify(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[dict] = []
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
     monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
@@ -6414,6 +6500,7 @@ def test_kb_ingest_refreshes_once_after_intake_checkpoint_and_prepare(
     tmp_path: Path,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     events: list[str] = []
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
 
@@ -6448,6 +6535,7 @@ def test_kb_ingest_refreshes_once_after_intake_checkpoint_and_prepare(
 
 def test_kb_ingest_narrowed_scope_without_generate_note_runs_only_intake(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[dict] = []
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: {"ingest"})
     monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
@@ -6466,6 +6554,7 @@ def test_kb_ingest_narrowed_scope_without_generate_note_runs_only_intake(monkeyp
 
 def test_kb_ingest_narrowed_scope_without_ingest_runs_nothing(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[dict] = []
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set())
     monkeypatch.setattr(kb, "forward_command", _fake_ingest_forwarder(kb, calls))
@@ -6482,6 +6571,7 @@ def test_kb_ingest_narrowed_scope_without_ingest_runs_nothing(monkeypatch, tmp_p
 
 def test_kb_ingest_duplicate_source_ready_continues_safe_prepare(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     calls: list[tuple[str, tuple[str, ...]]] = []
     refreshes: list[Path] = []
     write_yaml_if_changed(
@@ -6534,6 +6624,7 @@ def test_kb_ingest_duplicate_preserves_existing_agent_fill_and_routes_privately(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     unit_id = "p-demo-abcd1234"
     write_yaml_if_changed(
         record_path(tmp_path, "paper", unit_id),
@@ -6601,6 +6692,7 @@ def test_kb_ingest_reports_safe_degraded_source_revision_upgrade(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
 
     def fake(root, relative_script, args, *, stream=True, extra_env=None):
         if relative_script.endswith("intake.py"):
@@ -6628,6 +6720,7 @@ def test_kb_ingest_requests_decision_for_verified_degraded_revision(
     capsys,
 ) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
     (tmp_path / "notes").mkdir()
     (tmp_path / "notes/2607.21670.pdf").write_bytes(b"fixture")
     monkeypatch.setattr(kb, "effective_ingest_scope", lambda root: set(FULL_SCOPE))
@@ -6676,6 +6769,7 @@ def test_kb_ingest_effective_scope_is_capped_by_governance(monkeypatch, tmp_path
 
 def test_kb_ingest_prepare_failure_propagates_returncode(monkeypatch, tmp_path: Path, capsys) -> None:
     kb = _load_kb_cli()
+    initialize_test_workspace(tmp_path)
 
     def fake(root, relative_script, args, *, stream=True, extra_env=None):
         if relative_script.endswith("intake.py"):

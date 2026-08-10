@@ -378,7 +378,7 @@ def test_multi_preference_owner_failure_rolls_back_canonical_files_and_snapshot(
     assert learnings_path(root).read_bytes() == before_learning
     assert runtime_preferences_path(root).read_bytes() == before_runtime
     tombstone = json.loads(
-        (root / f"kb/.runtime/review-snapshots/{token}.json").read_text(encoding="utf-8")
+            (root / f".runtime/review-snapshots/{token}.json").read_text(encoding="utf-8")
     )
     assert tombstone["status"] == "unused"
     assert len(items) == 2

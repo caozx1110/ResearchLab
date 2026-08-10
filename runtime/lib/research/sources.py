@@ -72,7 +72,12 @@ from .confirm import (
     write_record,
 )
 from .journal import mutation_transaction
-from .path_contract import logical_ref_to_physical_path
+from .path_contract import (
+    PathContractError,
+    TargetClass,
+    classify_data_relative_path,
+    logical_ref_to_physical_path,
+)
 from .source_materials import (
     ARCHIVE_NAME,
     ASSETS_DIR_NAME,
@@ -219,6 +224,12 @@ def _storage_rewrite_paths(project_root: Path) -> list[Path]:
             relative = path.resolve().relative_to(root)
         except ValueError:
             continue
+        try:
+            target_class = classify_data_relative_path(relative.as_posix())
+        except PathContractError:
+            continue
+        if target_class is not TargetClass.CANONICAL_ARTIFACT:
+            continue
         if any(part in {".git", ".journal", ".runtime"} for part in relative.parts):
             continue
         if relative.parts and relative.parts[0] == "raw":
@@ -242,6 +253,8 @@ def storage_sync_target_paths(project_root: Path) -> list[Path]:
     targets: set[Path] = set()
     for name, destination_root in (("raw", raw_storage_root(project_root)), ("output", output_storage_root(project_root))):
         source_root = project_root / name
+        if source_root.absolute() == destination_root.absolute():
+            continue
         if source_root.is_dir() and not source_root.is_symlink():
             targets.update(destination_root / child.name for child in source_root.iterdir())
 
@@ -284,6 +297,8 @@ def _sync_storage_layout_unlocked(project_root: Path) -> dict[str, Any]:
     preserved_legacy_roots: list[str] = []
     for name, destination_root in (("raw", raw_storage_root(project_root)), ("output", output_storage_root(project_root))):
         source_root = project_root / name
+        if source_root.absolute() == destination_root.absolute():
+            continue
         if not source_root.exists():
             continue
         preserved_legacy_roots.append(source_root.as_posix())

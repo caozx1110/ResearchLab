@@ -168,4 +168,3 @@ def test_root_git_uses_explicit_canonical_scope_and_leaves_integration_untracked
     dirty = [path.relative_to(workspace).as_posix() for path in dirty_kb_paths(workspace)]
     assert "unknown.txt" not in dirty
     assert "AGENTS.md" not in dirty
-

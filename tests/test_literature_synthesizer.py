@@ -5,7 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 import yaml
@@ -40,6 +40,7 @@ def load_synthesizer():
 
 
 def write_confirmed_unit(module, root: Path, record: dict, evidence_text: str = "") -> Path:
+    initialize_test_workspace(root)
     unit_dir = module.unit_root(root, record["kind"], record["id"])
     unit_dir.mkdir(parents=True, exist_ok=True)
     if evidence_text:
@@ -65,6 +66,7 @@ def write_confirmed_unit(module, root: Path, record: dict, evidence_text: str = 
 
 
 def write_confirmed_external_repo_unit(root: Path) -> tuple[dict, Path]:
+    initialize_test_workspace(root)
     repo_root = root / "mini-repo"
     repo_root.mkdir()
     source_path = repo_root / "README.md"
@@ -395,7 +397,8 @@ def test_verify_rejects_fabricated_quote(tmp_path: Path) -> None:
 
 def test_verify_cli_persists_only_verified_survey(tmp_path: Path, monkeypatch) -> None:
     module, scaffold = build_filled_survey(tmp_path)
-    fill_path = tmp_path / "agent-filled.yaml"
+    fill_path = tmp_path / "synthesis" / "robot-learning" / "agent-filled.yaml"
+    fill_path.parent.mkdir(parents=True, exist_ok=True)
     fill_path.write_text(yaml.safe_dump(scaffold, allow_unicode=True, sort_keys=False), encoding="utf-8")
     monkeypatch.setattr(
         sys,
@@ -419,6 +422,7 @@ def test_verify_cli_persists_only_verified_survey(tmp_path: Path, monkeypatch) -
 
 
 def test_prepare_rejects_unit_with_symlink_artifact(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     module = load_synthesizer()
     outside = tmp_path / "outside.txt"
     outside.write_text("outside evidence", encoding="utf-8")

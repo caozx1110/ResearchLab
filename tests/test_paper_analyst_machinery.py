@@ -397,6 +397,7 @@ def test_legacy_quick_screen_type_can_verify_old_flat_fill_without_writeback(tmp
 # 3. Legit filled content + verbatim evidence -> validates, fills, persists.
 # --------------------------------------------------------------------------- #
 def test_note_fill_legit_evidence_validates_and_clears_substance_gate(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     paper = _load_paper_module()
     record = _paper_record("p-fill-legit-1")
     unit_dir = record_path(tmp_path, "paper", record["id"]).parent

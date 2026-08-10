@@ -10,7 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from repo_paths import REPO_ROOT
+from repo_paths import REPO_ROOT, initialize_test_workspace
 
 import pytest
 import yaml
@@ -25,6 +25,11 @@ from research.obsidian import (
 )
 from research.relations import project_relation_edges
 import research.obsidian as obsidian_module
+
+
+@pytest.fixture(autouse=True)
+def _active_workspace(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
 
 
 class _ObsidianBaseDumper(yaml.SafeDumper):
@@ -649,10 +654,8 @@ def test_status_is_zero_write_for_an_empty_missing_workspace(tmp_path: Path) -> 
     root = tmp_path / "missing"
     before = list(tmp_path.iterdir())
 
-    report = obsidian_projection_status(root)
-
-    assert report["status"] == "PASS"
-    assert report["counts"]["records"] == 0
+    with pytest.raises(SystemExit, match="workspace root does not exist"):
+        obsidian_projection_status(root)
     assert not root.exists()
     assert list(tmp_path.iterdir()) == before
 
@@ -999,15 +1002,15 @@ def test_canonical_symlinks_fail_closed_without_reading_or_writing_targets(tmp_p
     (root / "kb").symlink_to(outside, target_is_directory=True)
     before = secret.read_bytes()
 
-    report = obsidian_projection_status(root)
-    assert report["status"] == "FAIL"
-    assert report["findings"][0]["code"] == "OBSIDIAN_KB_ROOT_UNSAFE"
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="kb init.*workspace-root layout"):
+        obsidian_projection_status(root)
+    with pytest.raises(SystemExit, match="kb init.*workspace-root layout"):
         update_obsidian_projection(root)
     assert secret.read_bytes() == before
     assert not (outside / "obsidian").exists()
 
     safe_root = tmp_path / "safe-workspace"
+    initialize_test_workspace(safe_root)
     unit = safe_root / "units/papers/p-linked-12345678"
     unit.mkdir(parents=True)
     outside_record = tmp_path / "outside-record.yaml"

@@ -14,6 +14,7 @@ import pytest
 
 import serve_kb_browser
 from kb_browser_lib import browser_url
+from repo_paths import initialize_test_workspace
 from serve_kb_browser import BrowserHTTPServer, create_handler
 
 
@@ -117,9 +118,10 @@ def test_auth_headers_are_accepted(tmp_path: Path, headers: dict[str, str]) -> N
 
 
 def test_browser_url_includes_token_without_changing_health_urls(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
     url = browser_url("127.0.0.1", 8765, tmp_path, token="one-time-token")
 
-    assert url.endswith("/kb/user/kb/index.html?token=one-time-token")
+    assert url.endswith("/user/kb/index.html?token=one-time-token")
 
 
 def test_access_log_redacts_token(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

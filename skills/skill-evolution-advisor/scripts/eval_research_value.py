@@ -664,9 +664,10 @@ def main() -> int:
             print(f"  papers with empty core_content: {gi['papers_empty_core_content']}/{gi['papers_total']}")
         return 0
 
+    canonical_root = root if args.no_write and not root.exists() else kb_root(root)
     meta = {
         "utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "kb_head": git_short_head(kb_root(root)),
+        "kb_head": git_short_head(canonical_root),
         "repo_head": git_short_head(root),
         "n_questions": len(result["questions"]),
         "programs": [str(p) for p in (

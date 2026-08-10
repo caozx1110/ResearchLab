@@ -1065,7 +1065,7 @@ def load_decisions(
     current_container_validators: list[Callable[[], bool]] = []
     known_ids: set[str] = set()
     if snapshot_batch is not None:
-        target_path = root.resolve() / decisions_relative
+        target_path = kb_root(root).absolute().joinpath(*decisions_relative.parts[1:])
         matching_containers = [
             container
             for container in snapshot_batch.side_containers

@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from repo_paths import RESEARCH_LIB_ROOT, SKILLS_ROOT
+from repo_paths import RESEARCH_LIB_ROOT, SKILLS_ROOT, initialize_test_workspace
 
 LIB = RESEARCH_LIB_ROOT
 if str(LIB) not in sys.path:
@@ -50,6 +50,7 @@ def _make_unit(tmp: Path, pages: int) -> tuple[Path, str]:
 
 def test_refresh_structure_preserves_full_parse_cache(tmp_path, monkeypatch):
     """refresh-structure keeps all cache pages and still writes structure.yaml."""
+    initialize_test_workspace(tmp_path)
     paper = _load(SKILL / "paper.py", "paper_fa")
     ud, pid = _make_unit(tmp_path, pages=30)
     cache = ud / "parse-cache.yaml"

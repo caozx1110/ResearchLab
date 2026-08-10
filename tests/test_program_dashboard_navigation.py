@@ -6,7 +6,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from repo_paths import MAINTAINER_NAVIGATOR_ROOT, REPO_ROOT
+from repo_paths import MAINTAINER_NAVIGATOR_ROOT, REPO_ROOT, initialize_test_workspace
 
 import pytest
 
@@ -36,7 +36,8 @@ def _load_script(skill: str, script_name: str, module_name: str):
 
 def _make_workspace(tmp_path: Path) -> Path:
     root = tmp_path / "workspace"
-    (root / ".agents" / "lib").mkdir(parents=True)
+    initialize_test_workspace(root)
+    (root / ".agents" / "lib").mkdir(parents=True, exist_ok=True)
     (root / "AGENTS.md").write_text("# Test\n", encoding="utf-8")
     return root
 
@@ -88,7 +89,7 @@ def test_navigator_skips_survey_below_symlinked_directory(tmp_path: Path, monkey
     outside = tmp_path / "outside-surveys"
     write_yaml_if_changed(outside / "survey.yaml", {"slug": "outside", "consumer_binding": {}})
     synthesis = root / "synthesis"
-    synthesis.mkdir(parents=True)
+    synthesis.mkdir(parents=True, exist_ok=True)
     (synthesis / "outside").symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(
         navigate,
@@ -127,6 +128,8 @@ def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path
     with pytest.raises(ValueError, match="unified kb review snapshot"):
         review_learning(root, learning_id=pref["id"], status="confirmed")
     review_learning(root, learning_id=gotcha["id"], status="confirmed")
+    current_state = root / "user" / "current-state.md"
+    before = current_state.read_bytes()
     monkeypatch.setattr(sys, "argv", ["navigate.py", "--root", str(root), "current-state"])
 
     assert navigate.main() == 0
@@ -136,7 +139,7 @@ def test_navigator_current_state_includes_recall_digest_without_writing(tmp_path
     assert "Prefer compact Chinese status pages." not in text
     assert "Do not skip confirmation gates." in text
     assert "Pending skill defects: 1" in text
-    assert not (root / "user" / "current-state.md").exists()
+    assert current_state.read_bytes() == before
 
 
 def test_navigator_refresh_transactions_exact_pages_before_checkpoint(tmp_path: Path, monkeypatch) -> None:

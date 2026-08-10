@@ -14,8 +14,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from urllib.parse import quote as url_quote
 
-from .common import utc_now_iso
+from .common import utc_now_iso, workspace_root_roles
 from .journal import mutation_transaction
+from .path_contract import (
+    PathContractError,
+    TargetClass,
+    assert_no_follow_target,
+    logical_ref_to_physical_path,
+)
 from .paths import UNIT_KIND_DIRS, ensure_kb_gitignore, kb_gitignore_path, kb_root, topic_taxonomy_path, unit_root, units_root
 from .records import normalize_record_schema
 from .figures import FigureIndexError, load_current_figure_index
@@ -181,11 +187,16 @@ def _canonical_source_path(project_root: Path, raw: Any, *, suffix: str | None) 
         return None
     if suffix is not None and lexical.suffix.lower() != suffix:
         return None
-    candidate = project_root.joinpath(*lexical.parts)
+    roots = workspace_root_roles(project_root).roots
     try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(kb_root(project_root).resolve())
-    except (OSError, ValueError):
+        candidate = logical_ref_to_physical_path(roots, text)
+        assessment = assert_no_follow_target(
+            roots,
+            candidate,
+            allowed_classes=(TargetClass.CANONICAL_ARTIFACT,),
+        )
+        resolved = assessment.physical_path.resolve(strict=True)
+    except (OSError, PathContractError, ValueError):
         return None
     if candidate.is_symlink() or not candidate.is_file():
         return None
@@ -202,11 +213,16 @@ def _canonical_kb_entry(project_root: Path, raw: Any, *, directory: bool) -> Pat
         return None
     if any(part in {"", ".", ".."} for part in lexical.parts):
         return None
-    candidate = project_root.joinpath(*lexical.parts)
+    roots = workspace_root_roles(project_root).roots
     try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(kb_root(project_root).resolve())
-    except (OSError, ValueError):
+        candidate = logical_ref_to_physical_path(roots, text)
+        assessment = assert_no_follow_target(
+            roots,
+            candidate,
+            allowed_classes=(TargetClass.CANONICAL_ARTIFACT,),
+        )
+        resolved = assessment.physical_path.resolve(strict=True)
+    except (OSError, PathContractError, ValueError):
         return None
     if candidate.is_symlink():
         return None
@@ -1494,7 +1510,7 @@ def update_obsidian_projection(project_root: Path) -> dict[str, Any]:
     gitignore_path = kb_gitignore_path(project_root)
     gitignore_ready = False
     if gitignore_path.is_file() and not gitignore_path.is_symlink():
-        gitignore_ready = "obsidian/managed/" in gitignore_path.read_text(encoding="utf-8").splitlines()
+        gitignore_ready = "/obsidian/managed/" in gitignore_path.read_text(encoding="utf-8").splitlines()
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise SystemExit("Obsidian projection root is not a safe directory.")
     if managed.is_symlink() or (managed.exists() and not managed.is_dir()):
@@ -1578,7 +1594,7 @@ def update_obsidian_projection(project_root: Path) -> dict[str, Any]:
         if gitignore_ready and (
             not gitignore_path.is_file()
             or gitignore_path.is_symlink()
-            or "obsidian/managed/" not in gitignore_path.read_text(encoding="utf-8").splitlines()
+            or "/obsidian/managed/" not in gitignore_path.read_text(encoding="utf-8").splitlines()
         ):
             raise SystemExit("The KB ignore policy changed during the update; retry from current state.")
 

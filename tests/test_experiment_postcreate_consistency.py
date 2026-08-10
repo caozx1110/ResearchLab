@@ -20,6 +20,11 @@ import pytest
 from research.common import load_yaml
 from research.core import ensure_workspace
 from research.preference_selection import eligible_preferences, record_effective_selection
+from research.path_contract import (
+    PathContractError,
+    TargetClass,
+    classify_data_relative_path,
+)
 
 
 MUTATIONS = (
@@ -108,11 +113,14 @@ def _record_selection(root: Path, module, args, record: dict, unit_root: Path, s
 
 
 def _business_snapshot(root: Path) -> dict[str, tuple]:
-    kb = root / "kb"
     snapshot: dict[str, tuple] = {}
-    for path in sorted(kb.rglob("*"), key=lambda item: item.relative_to(kb).as_posix()):
-        relative = path.relative_to(kb)
-        if relative.parts and relative.parts[0] in {".journal", ".runtime"}:
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root)
+        try:
+            target_class = classify_data_relative_path(relative.as_posix())
+        except PathContractError:
+            continue
+        if target_class is not TargetClass.CANONICAL_ARTIFACT:
             continue
         metadata = path.lstat()
         name = relative.as_posix()

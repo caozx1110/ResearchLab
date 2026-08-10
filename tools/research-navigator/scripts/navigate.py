@@ -52,10 +52,10 @@ def load_program_states(root: Path) -> list[dict]:
 
 def load_survey_freshness(root: Path) -> list[dict]:
     """Pure-read freshness projection for verified surveys."""
-    project = root.resolve()
-    synthesis = project / "kb" / "synthesis"
+    project = kb_root(root).resolve()
+    synthesis = project / "synthesis"
     cursor = project
-    for part in ("kb", "synthesis"):
+    for part in ("synthesis",):
         cursor = cursor / part
         if cursor.is_symlink():
             return []

@@ -407,11 +407,17 @@ def _git_relative_path(
     if ".." in path.parts:
         raise SystemExit("Checkpoint target contains parent traversal.")
     lexical_repo = Path(os.path.abspath(os.fspath(repo)))
+    canonical_repo = lexical_repo.resolve()
     lexical_target = Path(os.path.abspath(os.fspath(path)))
-    try:
-        relative = lexical_target.relative_to(lexical_repo)
-    except ValueError as exc:
-        raise SystemExit("Checkpoint target escaped the workspace repository.") from exc
+    relative: Path | None = None
+    for candidate_repo in (lexical_repo, canonical_repo):
+        try:
+            relative = lexical_target.relative_to(candidate_repo)
+            break
+        except ValueError:
+            continue
+    if relative is None:
+        raise SystemExit("Checkpoint target escaped the workspace repository.")
     if relative == Path("."):
         raise SystemExit("Checkpoint target cannot be the whole workspace repository.")
     relative_path = relative.as_posix()
@@ -785,7 +791,13 @@ def _restore_committed_range(
                         source_entry=entry,
                         target_keys=keys_by_id[source_id],
                     ):
-                        restored_by_key[_target_key(project_root, restored_path)] = restored_path
+                        restored_by_key[
+                            _target_key(
+                                project_root,
+                                restored_path,
+                                allowed_classes=RECOVERABLE_TARGET_CLASSES,
+                            )
+                        ] = restored_path
                 for key in sorted(disposable_union_keys):
                     _invalidate_recovery_target(project_root, key)
             restored = [restored_by_key[key] for key in sorted(restored_by_key)]

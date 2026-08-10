@@ -19,7 +19,7 @@ from research.judgements import (
     discover_pending_judgements,
     judgement_confirmation_is_current,
 )
-from research.paths import config_root
+from research.paths import config_root, rel
 from research.records import trusted_claim_source_roots as shared_source_roots
 
 
@@ -271,7 +271,7 @@ def test_prepare_verify_confirm_promotes_state_and_event_only_at_confirmation(tm
         "kind": "method_selection",
         "id": f"method-selection:{PROGRAM_ID}:{IDEA_ID}",
         "owner": "method-designer",
-        "path": paths["choice"].relative_to(root).as_posix(),
+        "path": rel(root, paths["choice"]),
     }
     assert event["confirmation_binding"]["content_digest"] == choice["confirmation"]["content_digest"]
     op_types = {str(item.get("op_type") or "") for item in committed_ops(root)}

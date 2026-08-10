@@ -203,18 +203,19 @@ def synthesis_preference_state(resolution: dict[str, object]) -> dict[str, objec
 
 
 def _assert_composite_path_safe(root: Path, path: Path) -> None:
+    data_root = kb_root(root)
     try:
-        relative = path.relative_to(root)
+        relative = path.relative_to(data_root)
     except ValueError as exc:
         raise SystemExit("Composite survey state escaped the synthesis boundary.") from exc
-    if relative.parts[:2] != ("kb", "synthesis"):
+    if relative.parts[:1] != ("synthesis",):
         raise SystemExit("Composite survey state escaped the synthesis boundary.")
-    cursor = root
+    cursor = data_root
     for part in relative.parts[:-1]:
         cursor = cursor / part
         if cursor.is_symlink() or (cursor.exists() and not cursor.is_dir()):
             raise SystemExit("Composite survey state has an unsafe ancestor.")
-    allowed = (kb_root(root) / "synthesis").resolve()
+    allowed = (data_root / "synthesis").resolve()
     try:
         path.resolve().relative_to(allowed)
     except ValueError as exc:
@@ -1372,10 +1373,10 @@ def main() -> int:
         yaml_path = verified_root / f"{mode}.yaml"
         md_path = verified_root / "summary.md"
         try:
-            fill_path.relative_to(kb_root(root).resolve())
+            fill_path.resolve(strict=True).relative_to(synthesis_root(root).resolve())
             checkpointable_fill = [fill_path]
         except ValueError:
-            checkpointable_fill = []
+            raise SystemExit(f"{mode} verify input must be a canonical synthesis artifact")
         verify_targets = [*checkpointable_fill, yaml_path, md_path]
         with mutation_transaction(root, f"verify-{mode}", verify_targets):
             violations, payload = verify_survey_fill(fill, root)

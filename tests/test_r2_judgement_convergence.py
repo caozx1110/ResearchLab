@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from repo_paths import REPO_ROOT, source_path
+from repo_paths import REPO_ROOT, initialize_test_workspace, source_path
 
 import pytest
 
@@ -26,6 +26,11 @@ from research.paths import runtime_preferences_path
 
 
 ROOT = REPO_ROOT
+
+
+@pytest.fixture(autouse=True)
+def _activate_workspace_root(tmp_path: Path) -> None:
+    initialize_test_workspace(tmp_path)
 
 
 def test_bound_unit_judgement_snapshot_rejects_same_bytes_directory_replacement(
@@ -63,7 +68,7 @@ def test_bound_side_judgement_revalidates_current_candidate_after_rediscovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    decisions_path = tmp_path / "kb/programs/p-side-final/workflow/decisions.yaml"
+    decisions_path = tmp_path / "programs/p-side-final/workflow/decisions.yaml"
     decisions_path.parent.mkdir(parents=True)
     write_yaml_if_changed(
         decisions_path,
@@ -109,7 +114,7 @@ def test_side_discovery_captures_each_container_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for index in range(8):
-        path = tmp_path / f"kb/programs/p-scan-{index}/workflow/decisions.yaml"
+        path = tmp_path / f"programs/p-scan-{index}/workflow/decisions.yaml"
         path.parent.mkdir(parents=True)
         write_yaml_if_changed(
             path,
@@ -144,7 +149,7 @@ def test_side_discovery_rejects_malformed_container_replaced_by_duplicate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    program_a = tmp_path / "kb/programs/p-malformed-a"
+    program_a = tmp_path / "programs/p-malformed-a"
     workflow_a = program_a / "workflow"
     workflow_a.mkdir(parents=True)
     evidence = program_a / "evidence.md"
@@ -183,7 +188,7 @@ def test_side_discovery_rejects_malformed_container_replaced_by_duplicate(
     )
     decisions_a = workflow_a / "decisions.yaml"
     write_yaml_if_changed(decisions_a, {"items": [decision]})
-    decisions_z = tmp_path / "kb/programs/p-malformed-z/workflow/decisions.yaml"
+    decisions_z = tmp_path / "programs/p-malformed-z/workflow/decisions.yaml"
     decisions_z.parent.mkdir(parents=True)
     decisions_z.write_text("items: [\n", encoding="utf-8")
     replacement = tmp_path / "replacement-duplicate.yaml"
@@ -295,7 +300,7 @@ def test_missing_claims_prepare_fill_files_without_hollow_judgements(tmp_path: P
         "--decision",
         "Use route A",
     )
-    workflow = tmp_path / "kb/programs/p-r2/workflow"
+    workflow = tmp_path / "programs/p-r2/workflow"
     assert load_yaml(workflow / "decision-fill.yaml")["status"] == "awaiting_agent_fill"
     assert load_yaml(workflow / "decisions.yaml")["items"] == []
 
@@ -308,7 +313,7 @@ def test_missing_claims_prepare_fill_files_without_hollow_judgements(tmp_path: P
         "--program-id",
         "p-r2",
     )
-    record_path = next((tmp_path / "kb/units/experiments").glob("*/record.yaml"))
+    record_path = next((tmp_path / "units/experiments").glob("*/record.yaml"))
     experiment_id = load_yaml(record_path)["id"]
     _run(
         ".agents/skills/experiment-workbench/scripts/experiment.py",
@@ -324,7 +329,7 @@ def test_missing_claims_prepare_fill_files_without_hollow_judgements(tmp_path: P
 
 
 def test_discovery_requires_current_verification_and_supports_side_artifacts(tmp_path: Path) -> None:
-    program_root = tmp_path / "kb/programs/p-r2"
+    program_root = tmp_path / "programs/p-r2"
     design_root = program_root / "design"
     design_root.mkdir(parents=True)
     evidence_path = program_root / "evidence.md"
@@ -429,8 +434,8 @@ def test_cross_unit_symlink_evidence_root_is_never_trusted(tmp_path: Path) -> No
     ]
     build_verification_receipt(record, outside)
     write_yaml_if_changed(outside / "record.yaml", record)
-    link = tmp_path / "kb/units/papers" / unit_id
-    link.parent.mkdir(parents=True)
+    link = tmp_path / "units/papers" / unit_id
+    link.parent.mkdir(parents=True, exist_ok=True)
     link.symlink_to(outside, target_is_directory=True)
 
     assert discover_pending_judgements(tmp_path) == []
@@ -446,7 +451,7 @@ def test_cross_unit_symlink_evidence_root_is_never_trusted(tmp_path: Path) -> No
 
 
 def test_discovery_and_owner_fail_closed_on_duplicate_program_subject(tmp_path: Path) -> None:
-    program_root = tmp_path / "kb/programs/p-duplicate"
+    program_root = tmp_path / "programs/p-duplicate"
     workflow = program_root / "workflow"
     workflow.mkdir(parents=True)
     evidence_path = program_root / "evidence.md"
@@ -512,7 +517,8 @@ def test_discovery_and_owner_fail_closed_on_duplicate_program_subject(tmp_path: 
 
 def test_discovery_ignores_canonical_artifact_symlink_that_escapes_root(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    workflow = root / "kb/programs/p-link/workflow"
+    initialize_test_workspace(root)
+    workflow = root / "programs/p-link/workflow"
     workflow.mkdir(parents=True)
     outside = tmp_path / "outside-decisions.yaml"
     write_yaml_if_changed(
@@ -537,7 +543,8 @@ def test_discovery_ignores_canonical_artifact_symlink_that_escapes_root(tmp_path
 
 def test_discovery_rejects_unit_record_symlink_to_directory_before_read(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    unit = root / "kb/units/papers/p-directory-link"
+    initialize_test_workspace(root)
+    unit = root / "units/papers/p-directory-link"
     unit.mkdir(parents=True)
     outside = tmp_path / "outside-directory"
     outside.mkdir()
@@ -559,7 +566,7 @@ def test_discovery_skips_malformed_candidate_yaml_without_blocking_inbox(
     tmp_path: Path,
     relative: str,
 ) -> None:
-    path = tmp_path / relative
+    path = tmp_path.joinpath(*Path(relative).parts[1:])
     path.parent.mkdir(parents=True)
     path.write_text("items: [\n", encoding="utf-8")
 
@@ -578,7 +585,7 @@ def test_program_decision_reject_is_owner_owned_and_closes_pending_claims(tmp_pa
         "--goal",
         "Choose a grounded route",
     )
-    program_root = tmp_path / "kb/programs/p-reject"
+    program_root = tmp_path / "programs/p-reject"
     evidence_path = program_root / "evidence.md"
     evidence_path.write_text("The benchmark shows route A has the required coverage", encoding="utf-8")
     claims_path = program_root / "workflow/decision-claims.yaml"
@@ -710,7 +717,7 @@ def test_public_review_snapshot_rejects_unit_and_closes_canonical_claims(tmp_pat
         "unit-review.json",
         "review",
     )
-    protocol = json.loads((tmp_path / "kb/.runtime/unit-review.json").read_text(encoding="utf-8"))
+    protocol = json.loads((tmp_path / ".runtime/unit-review.json").read_text(encoding="utf-8"))
     item = protocol["next_actions"][0]["review_items"][0]
     subject_ref = f"{item['subject']['kind']}:{item['subject']['id']}"
     applied = _run(
@@ -761,7 +768,7 @@ def test_public_review_snapshot_executes_real_program_owner_route(tmp_path: Path
         "--goal",
         "Apply one informed decision",
     )
-    program_root = tmp_path / "kb/programs/p-apply"
+    program_root = tmp_path / "programs/p-apply"
     evidence_path = program_root / "evidence.md"
     evidence_path.write_text("The benchmark shows route A has the required coverage", encoding="utf-8")
     claims_path = program_root / "workflow/decision-claims.yaml"
@@ -811,7 +818,7 @@ def test_public_review_snapshot_executes_real_program_owner_route(tmp_path: Path
         "review",
     )
     assert "决策内容：Use route A" in listed.stdout
-    protocol = json.loads((tmp_path / "kb/.runtime/review.json").read_text(encoding="utf-8"))
+    protocol = json.loads((tmp_path / ".runtime/review.json").read_text(encoding="utf-8"))
     item = protocol["next_actions"][0]["review_items"][0]
     subject_ref = f"{item['subject']['kind']}:{item['subject']['id']}"
 
@@ -844,7 +851,7 @@ def test_public_review_snapshot_executes_real_program_owner_route(tmp_path: Path
         "review-current.json",
         "review",
     )
-    current_protocol = json.loads((tmp_path / "kb/.runtime/review-current.json").read_text(encoding="utf-8"))
+    current_protocol = json.loads((tmp_path / ".runtime/review-current.json").read_text(encoding="utf-8"))
     current_item = current_protocol["next_actions"][0]["review_items"][0]
     subject_ref = f"{current_item['subject']['kind']}:{current_item['subject']['id']}"
 
@@ -871,7 +878,7 @@ def test_public_review_snapshot_executes_real_program_owner_route(tmp_path: Path
 
 def test_report_fail_closed_for_decision_unknown_and_stale_confirmation(tmp_path: Path) -> None:
     report = _report_module()
-    workflow = tmp_path / "kb/programs/p-r2/workflow"
+    workflow = tmp_path / "programs/p-r2/workflow"
     workflow.mkdir(parents=True)
     events = [
         {"event_type": "decision", "summary": "Choose route A"},
@@ -912,8 +919,8 @@ def test_report_fail_closed_for_decision_unknown_and_stale_confirmation(tmp_path
             ],
         },
     }
-    roots = {"program:p-r2": tmp_path / "kb/programs/p-r2"}
-    build_verification_receipt(decision, tmp_path / "kb/programs/p-r2", source_roots=roots)
+    roots = {"program:p-r2": tmp_path / "programs/p-r2"}
+    build_verification_receipt(decision, tmp_path / "programs/p-r2", source_roots=roots)
     apply_confirmation(
         decision,
         confirmed_by="Human Reviewer",
@@ -921,7 +928,7 @@ def test_report_fail_closed_for_decision_unknown_and_stale_confirmation(tmp_path
         user_authorization="I confirm route A.",
         authorization_source="user_message",
         project_root=tmp_path,
-        verification_root=tmp_path / "kb/programs/p-r2",
+        verification_root=tmp_path / "programs/p-r2",
         trusted_source_roots=roots,
     )
     decisions_path = workflow / "decisions.yaml"
@@ -967,9 +974,9 @@ def test_discussion_archive_is_explicitly_pending_until_migrated(tmp_path: Path)
         "--decision",
         "Use route A",
     )
-    note = tmp_path / "kb/programs/p-r2/discussions/route-tradeoff.md"
+    note = tmp_path / "programs/p-r2/discussions/route-tradeoff.md"
     assert "Pending / Unverified judgement" in note.read_text(encoding="utf-8")
-    events = load_yaml(tmp_path / "kb/programs/p-r2/workflow/reporting-events.yaml")["items"]
+    events = load_yaml(tmp_path / "programs/p-r2/workflow/reporting-events.yaml")["items"]
     event = events[-1]
     assert event["event_type"] == "discussion-conclusion"
     assert event["governance_status"] == "needs_agent_repair"
