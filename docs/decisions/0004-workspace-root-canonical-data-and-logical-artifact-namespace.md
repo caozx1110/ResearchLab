@@ -1,6 +1,6 @@
 # ADR 0004: Workspace root canonical data and logical artifact namespace
 
-- Status: Accepted（候选；仅在本 ADR 经人类 review 合入 default branch 后生效）
+- Status: Accepted（由 [PR #31](https://github.com/caozx1110/ResearchLab/pull/31) 经人类 review 合入 default branch；后续实现的交付状态以对应 Issue/PR/Actions 为准）
 - Date: 2026-08-04
 - Atomic Issue: [#27](https://github.com/caozx1110/ResearchLab/issues/27)
 - Parent Epic: [#21](https://github.com/caozx1110/ResearchLab/issues/21)
@@ -10,7 +10,7 @@
 
 ## Context
 
-当前安装态把三种不同职责隐含在一个 `project_root` 与一个物理 `kb/` 前缀周围：
+本 ADR 制定时的安装态把三种不同职责隐含在一个 `project_root` 与一个物理 `kb/` 前缀周围：
 
 1. workspace/integration root：用户选择的工作区，以及 `.agents/`、`.venv/`、根 `AGENTS.md`、Claude/Codex 接入和安装 manifest 的归属边界；
 2. canonical data root：unit、program、synthesis、config、memory、source、journal 与 KB Git 的物理根；
@@ -30,7 +30,7 @@ ADR 0002 正确地把 tracked product source、维护者本地工具和安装 pa
 - **Canonical data root** 是 canonical artifacts 与 KB-local operational state 的物理根。legacy layout 为 `<workspace>/kb`；目标 layout 为 `<workspace>`。
 - **Product bundle root** 是已验证 shipping skills/runtime 的来源，不从 target workspace 的同名路径猜测。
 
-调用方必须通过 typed root roles 声明 layout；不得再让一个未标注的 `root` 参数同时承担三种角色。Wave 1 只交付纯合同与测试，不改变生产 owner 的 legacy root 选择。Wave 2 才可在各 owner 明确接入后激活 workspace-root data layout。
+调用方必须通过 typed root roles 声明 layout；不得再让一个未标注的 `root` 参数同时承担三种角色。本 ADR 的交付顺序要求 Wave 1 只交付纯合同与测试，不改变当时生产 owner 的 legacy root 选择；Wave 2 在各 owner 明确接入后才激活 workspace-root data layout。
 
 ### 2. `kb/...` 是稳定逻辑 namespace
 
@@ -82,11 +82,11 @@ Wave 2 在激活 root layout 前必须：
 
 Wave 3 必须让根 `AGENTS.md` 保持 user-owned，managed block 只含稳定 `.agents/WORKSPACE_RULES.md` 指针；删除或证明 `.agents/AGENTS.md` 重复副本的必要性。skill progressive disclosure 与最小 always-on rules 不得通过复制全文绕过。
 
-Issue #22 的 development candidate 实现该 Wave 3 obligation：根 managed block 只保留指针，`.agents/WORKSPACE_RULES.md` 是带机械身份门的最小规则层，旧 `.agents/AGENTS.md` / `.agents/AGENT_GUIDE.md` 仅按 manifest ownership 安全清理，多操作 owner 使用一跳 references。该事实随候选 PR 仍是 proposal，只有合入 default branch 后才成为本 ADR 的 accepted implementation state。
+Issue #22 对应的实现落实该 Wave 3 obligation：根 managed block 只保留指针，`.agents/WORKSPACE_RULES.md` 是带机械身份门的最小规则层，旧 `.agents/AGENTS.md` / `.agents/AGENT_GUIDE.md` 仅按 manifest ownership 安全清理，多操作 owner 使用一跳 references。候选、合并与验收状态只在 GitHub Issue/PR/Actions 记录，不在本 ADR 复制易漂移的活动状态。
 
 Wave 4 只通过显式迁移文档/流程处理 legacy workspace。普通 install/update 不静默移动 canonical data；新 runtime 发现未迁移 legacy layout 时给出安全迁移指引并停止 root-layout 写入。
 
-Issue #29 的 development candidate 实现该 Wave 4 obligation：detector 保持只读并区分 root、eligible legacy 与全部拒绝状态；owner-only plan/apply/rollback 绑定 exact filesystem/Git/tree/receipt、当前消息授权、同盘私有恢复材料与独占 lock。迁移 commit 以旧 HEAD 为直接父提交，显式 rollback 使用新的授权与普通 reverse commit；两者都保留 logical `kb/...` bytes，拒绝 outer Git、history rewrite、自动迁移和不完整恢复。该实现与[迁移指南](../MIGRATE_KB_TO_WORKSPACE_ROOT.md)随候选 PR 仍是 proposal，只有合入 default branch 后才成为本 ADR 的 accepted implementation state。
+Issue #29 对应的实现落实该 Wave 4 obligation：detector 保持只读并区分 root、eligible legacy 与全部拒绝状态；owner-only plan/apply/rollback 绑定 exact filesystem/Git/tree/receipt、当前消息授权、同盘私有恢复材料与独占 lock。迁移 commit 以旧 HEAD 为直接父提交，显式 rollback 使用新的授权与普通 reverse commit；两者都保留 logical `kb/...` bytes，拒绝 outer Git、history rewrite、自动迁移和不完整恢复。完整操作合同见[迁移指南](../MIGRATE_KB_TO_WORKSPACE_ROOT.md)，交付状态仍由 GitHub 记录。
 
 ## Alternatives considered
 
@@ -104,11 +104,11 @@ Issue #29 的 development candidate 实现该 Wave 4 obligation：detector 保�
 - Downstream owner 必须显式携带 root role 与 target class，短期增加接口迁移工作，但消除 `project_root` 多义性。
 - Legacy arbitrary files directly under `kb/` 不会被静默认作 root-layout canonical top-level；Wave 4 必须在 preflight 中报告并由人处理 collision/placement。
 - `AGENTS.md` 可进入用户 Git 历史，但业务 mutation 与 installer ownership 仍分离，需要 Git owner 的专门 allowlist。
-- Wave 1 merge 后现有产品仍使用 `<workspace>/kb/`。合同成为 Wave 2/3/4 的 load-bearing design，不是已经完成的 runtime migration。
+- Wave 1 merge 本身没有激活新布局；包含 Wave 2–4 实现的 revision 会让新初始化的 dedicated workspace 使用 workspace-root 布局，而 legacy workspace 仍须经过显式迁移，不能由普通 runtime 或 installer 自动转换。
 
 ## Migration and rollback
 
-本 ADR/Wave 1 不迁移数据，也不激活新 layout。它只新增纯 resolver/classifier/no-follow API、设计和 characterization tests。
+本 ADR/Wave 1 自身不迁移数据，也不激活新 layout；它只新增纯 resolver/classifier/no-follow API、设计和 characterization tests。后续 runtime activation 与 legacy migration 分别遵守上面的 Wave 2 和 Wave 4 边界。
 
 若 Wave 1 需要回滚，revert 对应 PR 即可；现有 workspace、KB Git、record/evidence/receipt bytes 与 installer payload 均不变化。后续已执行的 legacy migration 必须按 Wave 4 文档在 clean HEAD、无 incomplete journal、无 collision 条件下 exact 恢复原 Git metadata 与 canonical tree，并重装上一个兼容版本；不得改写 default history 或批量重签 receipt。
 
@@ -116,6 +116,6 @@ Issue #29 的 development candidate 实现该 Wave 4 obligation：detector 保�
 
 - Direct tests 覆盖两种 layout 的 byte-identical round trip、absolute/traversal/separator/unknown/reserved 拒绝。
 - Filesystem fixtures 覆盖 data-root、ancestor、leaf symlink，以及 FIFO/special node；helper 全程只读。
-- Characterization tests 锁定 `research_root()`、owner path、KB Git root、installer plan 与 public output 仍为 legacy behavior。
-- Candidate 需通过 focused security/path tests、full pytest、skill validator、rule-token check、compileall、diff check，以及 exact-head candidate/tested-merge Actions。
-- 只使用隔离临时 workspace；不读取或修改真实用户 KB。
+- Wave 1 characterization tests 锁定当时 `research_root()`、owner path、KB Git root、installer plan 与 public output 的 legacy behavior，供后续 wave 显式变更而非静默漂移。
+- 每个 downstream candidate 需通过 focused security/path tests、full pytest、skill validator、rule-token check、compileall、diff check，以及 exact-head candidate/tested-merge Actions。
+- 只使用隔离临时 workspace；不读取或修改真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局）。

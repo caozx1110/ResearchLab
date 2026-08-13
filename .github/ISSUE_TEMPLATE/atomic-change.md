@@ -72,7 +72,7 @@ Definition of Ready 未满足前不得施工。公开 Issue 不粘贴真实用�
 - [ ]
 - [ ] 相关测试和完整门禁通过
 - [ ] tracked 设计/schema/用户文档/CHANGELOG 已按需同步
-- [ ] 真实 `kb/` 零修改
+- [ ] 真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局）零修改
 - [ ] 治理、evidence、恢复和用户输出红线无削弱
 - [ ] consolidated PR 已创建并等待人类审查
 
