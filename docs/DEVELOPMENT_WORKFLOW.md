@@ -94,7 +94,7 @@ Atomic Issue 描述一个可独立 accept/reject/rollback 的 outcome。默认�
 3. 每合入一轨跑相关测试；
 4. 全部合入后跑完整/目标验收；
 5. 复现承重 claim 和 review finding，不只相信施工 Agent 的总结；
-6. 确认真实 `kb/` 未修改，治理与用户输出红线未削弱。
+6. 确认真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局）未修改，治理与用户输出红线未削弱。
 
 ### 6. 创建 consolidated PR
 
@@ -199,7 +199,7 @@ Branch push CI 验 candidate head；PR CI 验当前 base 上的 merge candidate�
 - [ ] 多 track 已集成，人类无需拼装
 - [ ] 相关测试、完整门禁和文档同步完成
 - [ ] PR 记录 candidate SHA、证据、风险和回滚
-- [ ] 真实 `kb/` 零修改，公开内容已脱敏
+- [ ] 真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局）零修改，公开内容已脱敏
 
 合并前后：
 

@@ -40,7 +40,7 @@ assignees: ""
 
 ## 全局 invariant / 红线
 
-- [ ] 不触碰真实用户 `kb/`
+- [ ] 不触碰真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局）
 - [ ] 不削弱确认、evidence、恢复和用户输出合同
 - [ ] 公开内容已脱敏，敏感安全问题转 private reporting
 - [ ]

@@ -1,9 +1,10 @@
 """Pure workspace/data-root and logical artifact path contracts.
 
-This module defines the path vocabulary needed by the workspace-root blueprint
-without activating that layout.  It deliberately performs no mutation and has
-no dependency on the high-level ``research.core`` facade.  Existing owners keep
-using the legacy physical ``<workspace>/kb`` root until the integration wave.
+This module defines the typed roots and path vocabulary shared by the active
+workspace-root runtime and the explicit legacy-layout migration boundary.  Its
+helpers deliberately perform no mutation and have no dependency on the
+high-level ``research.core`` facade.  Layout activation/currentness belongs to
+``workspace_layout``; legacy moves belong to ``legacy_migration``.
 
 The no-follow helper is a precondition, not a replacement for descriptor-based
 mutation.  A writer must repeat identity checks at its commit boundary so a

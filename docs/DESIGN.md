@@ -41,7 +41,7 @@ Release bundle 不包含任何私有 canonical workspace 数据。安装、更�
 
 [ADR 0004](decisions/0004-workspace-root-canonical-data-and-logical-artifact-namespace.md) 将 workspace/integration root、canonical data root 与 product bundle root 定义为三个显式角色。当前 runtime 只在 `config/workspace-layout.yaml` 为 byte-canonical `research-workspace-layout/v1 + workspace-root` 时，把 dedicated workspace 根解析为 physical data root；`.agents/**` 仍是 ignored、可重装的产品面。只有显式 `kb init` 可以在通过零写 collision preflight 的新 workspace 创建 marker；其他 mutation 在 marker 缺失、未知或身份漂移时一律先拒绝。
 
-现有 `<workspace>/kb/`、无 marker 的 Git repository、partial canonical tree、unknown sibling、symlink 与 special node 不会被猜测或自动转换。普通 install/update/reinstall 也不迁移数据。Wave 4 development candidate 提供只读 legacy detector 与 owner-only、receipt-bound plan/apply/rollback：只有 `eligible-legacy`、clean、同文件系统且当前消息明确授权的 dedicated workspace 可迁移；outer Git、collision、dirty/incomplete journal、linked worktree、symlink、special node 或 stale receipt 一律在业务写入前拒绝。完整流程见[迁移指南](MIGRATE_KB_TO_WORKSPACE_ROOT.md)。
+现有 `<workspace>/kb/`、无 marker 的 Git repository、partial canonical tree、unknown sibling、symlink 与 special node 不会被猜测或自动转换。普通 install/update/reinstall 也不迁移数据。当前 runtime 提供只读 legacy detector 与 owner-only、receipt-bound plan/apply/rollback：只有 `eligible-legacy`、clean、同文件系统且当前消息明确授权的 dedicated workspace 可迁移；outer Git、collision、dirty/incomplete journal、linked worktree、symlink、special node 或 stale receipt 一律在业务写入前拒绝。完整流程见[迁移指南](MIGRATE_KB_TO_WORKSPACE_ROOT.md)。
 
 Persisted `kb/...` 是稳定 logical artifact namespace，不再等同于物理目录前缀。同一 ref 在 legacy layout 映射到 `<workspace>/kb/...`，在 root layout 映射到 `<workspace>/...`，reverse mapping 必须保持 bytes 不变；record、history、evidence、receipt 与 survey/report bindings 不因物理迁移批量重写。
 

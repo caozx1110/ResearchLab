@@ -1,7 +1,7 @@
 # AGENTS.md — 开发本 skill 系统的工作流
 
 > 本文件面向在本仓库开发/演进 skill 系统的 Agent。`CLAUDE.md` 是指向本文件的软链。
-> 安装后使用 kb 的运行规则在 `.agents/AGENTS.md`。
+> 安装后执行知识库操作前加载 `.agents/WORKSPACE_RULES.md`；缺失或不可读时停止写入并通过可信安装源恢复。
 
 本仓库采用 GitHub-only 协作：**tracked 设计 → Epic（新蓝图才建）→ 原子 Issue → branch/worktree 施工并 push → 集成验证 → consolidated PR → 人类审查合并 → 远端收尾**。
 
@@ -31,9 +31,9 @@ Issue/PR 是公开记录，只写脱敏事实。漏洞、凭据暴露、治理�
 
 - `skills/` 是 15 个 shipping skill 的 tracked 产品源码；`runtime/` 是共享库和安装后规则的 tracked 产品源码。它们是普通代码，不是当前开发任务自动加载的执行规则。
 - 根 `/.agents/` 已被 Git 忽略，只供维护者安装自用 skill 或本地工具。这里的工具可以按正常适用规则辅助开发，但它们不是产品、release input、设计依据或验收证据，也不得与 shipping inventory 混算。
-- 安装器把 `skills/**` 与 `runtime/**` 映射到外部 workspace 的 `.agents/**`；安装后才由 workspace 根 `AGENTS.md`、`.agents/AGENT_GUIDE.md` 与 installed skills 接管运行态。
+- 安装器把 shipping `skills/**` 与 shared runtime payload 映射到外部 workspace 的 `.agents/**`，并只用 `runtime/AGENTS.md` 维护 workspace 根 `AGENTS.md` 的稳定加载指针；安装后由该指针加载 `.agents/WORKSPACE_RULES.md`，再按任务加载 installed skills。
 
-不得调用 `skills/*/SKILL.md` 来决定其自身需求、设计或验收；可以把这些 `SKILL.md`、脚本和协议当普通代码阅读、检索和测试。只有明确的行为测试、全新上下文冷验收，或用户明确要求测试某个 shipping skill 时，才可在隔离临时目录调用；不得触碰真实 `kb/`，也不得把 skill 自述当独立证据。开发态服从本文件、tracked design/ADR/schema、当前 Epic/Atomic Issue、remote commit、PR 和 Actions。
+不得调用 `skills/*/SKILL.md` 来决定其自身需求、设计或验收；可以把这些 `SKILL.md`、脚本和协议当普通代码阅读、检索和测试。只有明确的行为测试、全新上下文冷验收，或用户明确要求测试某个 shipping skill 时，才可在隔离临时目录调用；不得触碰真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局），也不得把 skill 自述当独立证据。开发态服从本文件、tracked design/ADR/schema、当前 Epic/Atomic Issue、remote commit、PR 和 Actions。
 
 ## 普通工作流
 
@@ -76,7 +76,7 @@ Issue/PR 是公开记录，只写脱敏事实。漏洞、凭据暴露、治理�
 - internal tracks 都 push，按依赖顺序进入 delivery branch；人类不负责拼装分支。
 - 每合入一轨跑相关测试，全部集成后跑目标/完整门禁。
 - 不只信施工 Agent 总结：复现承重 claim、bug 和 review finding 后再修改。
-- 确认真实 `kb/` 零修改，确认/evidence/恢复/用户输出红线没有削弱。
+- 确认真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局）零修改，确认/evidence/恢复/用户输出红线没有削弱。
 
 ### 6. 提交 consolidated PR
 

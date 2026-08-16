@@ -59,7 +59,7 @@
 
 ## 安全、治理与数据边界
 
-- [ ] 真实用户 `kb/` 未修改；测试使用隔离临时目录
+- [ ] 真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局）未修改；测试使用隔离临时目录
 - [ ] 确认、逐字 evidence、恢复和用户输出合同未削弱
 - [ ] Issue/PR 未泄漏真实用户数据、本机路径、token、secret 或未公开研究
 - [ ] 无未登记 scope creep；实质变化已先更新 Issue 或改走 replacement
