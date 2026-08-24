@@ -7,7 +7,7 @@ description: 独立审核 Research Vault v2 的 claim/evidence，生成可读 re
 
 当用户要审核证据、准备 review packet、确认/拒绝/暂缓 claim，或验证既有 review receipt 是否仍可用时，使用本 skill。它是独立治理 owner，不生成、补写或美化待审判断。
 
-<!-- protocol-reference-exempt: Research Vault v2 explicitly rejects the legacy SCHEMAS.md canonical model; this skill follows the accepted Markdown-first blueprint. -->
+<!-- protocol-reference-exempt: Research Vault v2 uses a self-contained Markdown-first contract. -->
 
 ## Ownership boundary
 

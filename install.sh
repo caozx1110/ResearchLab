@@ -123,7 +123,6 @@ usage() {
   usage_option "--system" "为当前用户做系统级配置"
 
   section "其他选项"
-  usage_option "--kb-on-path" "创建可在终端使用的 kb 快捷命令"
   usage_option "--dry-run" "只预览，不写入文件"
   usage_option "--agent-plan-json FILE" "供 Agent 审阅：零写预览，并把精确计划保存为 JSON"
   usage_option "--force" "更新时覆盖已修改的受管文件"
@@ -185,38 +184,25 @@ abs_dir() {
   cd -P -- "$1" >/dev/null 2>&1 && pwd
 }
 
-path_on_path() {
-  local needle entry normalized
-  if [ -d "$1" ]; then
-    needle=$(abs_dir "$1")
-  else
-    case $1 in
-      /*) needle=$1 ;;
-      *) needle=$(pwd)/$1 ;;
-    esac
-  fi
-  IFS=:
-  for entry in $PATH; do
-    [ -n "$entry" ] || entry=.
-    if [ -d "$entry" ]; then
-      normalized=$(abs_dir "$entry" 2>/dev/null || true)
-    else
-      case $entry in
-        /*) normalized=$entry ;;
-        *) normalized=$(pwd)/$entry ;;
-      esac
-    fi
-    if [ "$normalized" = "$needle" ]; then
-      unset IFS
-      return 0
-    fi
-  done
-  unset IFS
-  return 1
-}
-
 same_dir() {
   [ "$(abs_dir "$1")" = "$(abs_dir "$2")" ]
+}
+
+shipping_skill_names() {
+  printf '%s\n' \
+    research-analysis \
+    research-capture \
+    research-review \
+    research-vault \
+    research-workbench
+}
+
+shipping_runtime_files() {
+  printf '%s\n' \
+    __init__.py \
+    legacy_detector.py \
+    updater.py \
+    v2_bootstrap.py
 }
 
 claude_links_to_workspace_agents() {
@@ -259,8 +245,6 @@ AGENT_FLAG_SET=0
 SCOPE=""
 PROJECT_DIR=""
 PROJECT_FLAG_SET=0
-KB_ON_PATH=0
-KB_ON_PATH_FLAG_SET=0
 FORCE=0
 FROM_SNAPSHOT=0
 SYNC_SOURCE=""
@@ -276,8 +260,6 @@ ASSUME_YES=0
 WIZARD_MODE=0
 WIZARD_STEP=0
 INSTALL_INCOMPLETE=0
-KB_SHORTCUT_CREATED=0
-KB_SHORTCUT_AVAILABLE=0
 UPDATE_NO_CHANGES=0
 DRY_RUN_CHANGE_COUNT=0
 RUNTIME_BOOTSTRAP_NEEDED=0
@@ -305,6 +287,7 @@ done
 [ -f "$REPO_ROOT/runtime/AGENTS.md" ] || die "安装包不完整：缺少 runtime/AGENTS.md"
 [ -f "$REPO_ROOT/runtime/WORKSPACE_RULES.md" ] || die "安装包不完整：缺少 runtime/WORKSPACE_RULES.md"
 [ -f "$REPO_ROOT/install-lib/ws_sync.py" ] || die "安装包不完整：缺少 install-lib/ws_sync.py"
+[ -f "$REPO_ROOT/install-lib/smoke.py" ] || die "安装包不完整：缺少 install-lib/smoke.py"
 is_command python3 || die "需要 Python 3，请安装后重试"
 
 if [ "$#" -gt 0 ]; then
@@ -468,11 +451,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --system)
       SCOPE=system
-      shift
-      ;;
-    --kb-on-path)
-      KB_ON_PATH=1
-      KB_ON_PATH_FLAG_SET=1
       shift
       ;;
     *)
@@ -822,41 +800,10 @@ prompt_existing_copy_install() {
   restore_manifest_agent_selection "$manifest"
 }
 
-prompt_kb_on_path() {
-  local choice
-  if ! is_interactive_input; then
-    return 0
-  fi
-  wizard_step "是否创建终端快捷命令？"
-  info "这只影响终端；在 AI 对话中始终可以使用 kb。"
-  menu_option 1 "暂不创建" "（推荐）"
-  menu_option 2 "创建 kb 快捷命令"
-  while true; do
-    ask "请选择 [1]："
-    read -r choice || choice=""
-    choice=${choice:-1}
-    case "$choice" in
-      1|n|N|no|NO)
-        KB_ON_PATH=0
-        return 0
-        ;;
-      2|y|Y|yes|YES)
-        KB_ON_PATH=1
-        info "如果安装成功，终端中先运行 kb help，再运行 kb init。"
-        return 0
-        ;;
-      *)
-        note "请输入 1 或 2。"
-        ;;
-    esac
-  done
-}
-
 if is_interactive_input; then
   if [ "$ACTION_EXPLICIT" -eq 0 ] \
     || { [ "$AGENT_FLAG_SET" -eq 0 ] && { [ "$ACTION" = "install" ] || { [ "$ACTION" = "uninstall" ] && [ "$ACTION_FROM_SUBCOMMAND" -eq 0 ]; }; }; } \
-    || [ -z "$SCOPE" ] \
-    || { [ "$ACTION" = "install" ] && [ "$KB_ON_PATH_FLAG_SET" -eq 0 ]; }; then
+    || [ -z "$SCOPE" ]; then
     WIZARD_MODE=1
   fi
 fi
@@ -892,10 +839,6 @@ fi
 
 prompt_existing_copy_install
 
-if [ "$ACTION" = "install" ] && [ "$KB_ON_PATH_FLAG_SET" -eq 0 ] && [ "$WIZARD_MODE" -eq 1 ]; then
-  prompt_kb_on_path
-fi
-
 if [ -z "$PROJECT_DIR" ]; then
   if [ "$SCOPE" = "project" ]; then
     case "$ACTION" in
@@ -913,8 +856,6 @@ if [ -z "$PROJECT_DIR" ]; then
 fi
 WORKSPACE_ROOT=$(abs_dir "$PROJECT_DIR")
 SKILLS_SRC="$REPO_ROOT/skills"
-KB_SCRIPT="$REPO_ROOT/skills/kb-cli/scripts/kb"
-WS_KB_SCRIPT="$KB_SCRIPT"
 MANIFEST_PATH="$WORKSPACE_ROOT/.agents/.install-manifest.json"
 SELF_CONTAINED=0
 COPY_PROJECT=0
@@ -924,7 +865,6 @@ if same_dir "$WORKSPACE_ROOT" "$REPO_ROOT"; then
 elif [ "$SCOPE" = "project" ]; then
   COPY_PROJECT=1
   SELF_CONTAINED=1
-  WS_KB_SCRIPT="$WORKSPACE_ROOT/.agents/skills/kb-cli/scripts/kb"
 fi
 
 if [ "$ACTION" = "update" ] || [ "$ACTION" = "reinstall" ]; then
@@ -954,14 +894,6 @@ print_plan() {
   if [ "$SCOPE" = "project" ]; then
     bullet "工作区：$(mode_label)"
   fi
-  if [ "$ACTION" = "install" ]; then
-    if [ "$KB_ON_PATH" -eq 1 ]; then
-      bullet "终端快捷命令：创建 kb"
-    else
-      bullet "终端快捷命令：暂不创建"
-    fi
-  fi
-
   case "$ACTION" in
     install)
       if [ "$COPY_PROJECT" -eq 1 ]; then
@@ -1019,10 +951,8 @@ confirm_plan() {
 print_next_steps() {
   section "开始使用"
   info "打开 $(agent_label)，在对话中输入："
-  printf '  %bkb init%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
-  info "初始化完成后，可以输入："
-  printf '  %bkb status%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
-  info "也可以直接告诉 AI：帮我建立研究知识库，并说明下一步。"
+  printf '  %b帮我在当前工作区初始化 Research Vault，并说明下一步。%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
+  info "初始化后直接用自然语言摄入来源、分析证据或推进研究项目。"
 }
 
 print_done() {
@@ -1053,18 +983,6 @@ print_done() {
         bullet "工作区：$(mode_label)"
       else
         bullet "使用范围：当前用户的所有工作区"
-      fi
-      if [ "$INSTALL_INCOMPLETE" -eq 0 ]; then
-        if [ "$KB_SHORTCUT_AVAILABLE" -eq 1 ]; then
-          ok "终端可直接运行："
-          printf '  %bkb help%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
-          printf '  %bkb init%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
-        elif [ "$KB_SHORTCUT_CREATED" -eq 1 ]; then
-          note "已创建 kb 快捷入口，但它所在的目录还不在 PATH 中。"
-          info "请让 Agent 将快捷入口目录加入 PATH，重新打开终端后运行："
-          printf '  %bkb help%b\n' "$C_BOLD$C_CYAN" "$C_RESET"
-          info "安装器不会自动修改 shell 配置。"
-        fi
       fi
       if [ "$INSTALL_INCOMPLETE" -eq 1 ]; then
         section "需要处理"
@@ -1112,28 +1030,15 @@ preflight_yaml() {
     else
       SELECTED_RUNTIME_SOURCE="current-python"
     fi
-    # 与 runtime bootstrap 的判定保持一致：核心依赖可用但缺少论文 PDF 深读
-    # 后端时，首次使用会自动准备受管运行环境，这里如实预告。显式指定的
-    # RESEARCH_PYTHON 不会触发自动准备，因此保持原有绑定。Agent 计划
-    # （schema 3）要求“就绪运行环境”与“resolver 管理的 .venv 条件目标”
-    # 二选一，所以这种情况下不再签署当前解释器，改为暴露条件目标。
-    if [ -z "${RESEARCH_PYTHON:-}" ] && [ "${RESEARCH_NO_MANAGED_VENV:-}" != "1" ] \
-      && [ "${RESEARCH_NO_PDF_BACKEND:-}" != "1" ] \
-      && ! python_has_pdf_backend "$SELECTED_RUNTIME_PYTHON"; then
-      RUNTIME_BOOTSTRAP_NEEDED=1
-      SELECTED_RUNTIME_PYTHON=""
-      SELECTED_RUNTIME_SOURCE=""
-      note "论文 PDF 解析依赖尚未就绪；首次使用时会自动准备，无需手动处理。" >&2
-    fi
     return 0
   fi
   if [ -z "${RESEARCH_VENV:-}" ]; then
     managed_python=$(managed_workspace_venv_has_core_runtime || true)
     if [ -n "$managed_python" ]; then
-      # The current safe probe proves readiness, but Agent plan schema 3 does
+      # The current safe probe proves readiness, but Agent plan schema 4 does
       # not yet serialize the complete managed invocation chain. Keep the
       # resolver-owned tree conservative instead of signing the external base
-      # executable as though installed kb would invoke it directly.
+      # executable as though an installed skill would invoke it directly.
       [ "$AGENT_PLAN" -eq 0 ] || RUNTIME_BOOTSTRAP_NEEDED=1
       return 0
     fi
@@ -1217,7 +1122,7 @@ for raw_directory in os.environ.get("PATH", "").split(os.pathsep):
         )
         try:
             completed = subprocess.run(
-                [str(resolved), "-I", "-c", "import yaml, markdownify, bs4"],
+                [str(resolved), "-I", "-c", "import yaml"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1252,33 +1157,12 @@ import sys
 candidate = sys.argv[1]
 try:
     completed = subprocess.run(
-        [candidate, "-c", "import yaml, markdownify, bs4"],
+        [candidate, "-c", "import yaml"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
         timeout=5,
-    )
-except (OSError, subprocess.SubprocessError):
-    raise SystemExit(1)
-raise SystemExit(0 if completed.returncode == 0 else 1)
-PY
-}
-
-python_has_pdf_backend() {
-  python3 - "$1" <<'PY' >/dev/null 2>&1
-import subprocess
-import sys
-
-candidate = sys.argv[1]
-try:
-    completed = subprocess.run(
-        [candidate, "-c", "import pymupdf4llm, fitz"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-        timeout=15,
     )
 except (OSError, subprocess.SubprocessError):
     raise SystemExit(1)
@@ -1372,7 +1256,7 @@ try:
         raise OSError("managed runtime interpreter target is unsafe")
 
     completed = subprocess.run(
-        [str(target_path), "-c", "import yaml, markdownify, bs4"],
+        [str(target_path), "-c", "import yaml"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1429,8 +1313,8 @@ record_agent_runtime_target() {
   record_agent_plan_target \
     "conditional-runtime-tree" \
     "$(managed_runtime_root)" \
-    "research.bootstrap.CORE_RUNTIME_MODULES / managed dependency resolver" \
-    "only when managed runtime is enabled and the selected Python lacks yaml, markdownify, bs4, or the pymupdf4llm PDF backend"
+    "research.v2_bootstrap.CORE_RUNTIME_MODULES / managed dependency resolver" \
+    "only when managed runtime is enabled and the selected Python lacks yaml"
 }
 
 source_commit() {
@@ -1470,7 +1354,6 @@ verify_agent_apply_contract() {
   [ "$CONFIG_CLAUDE" -eq 0 ] || args+=("--current-tool" "claude")
   [ "$CONFIG_CODEX" -eq 0 ] || args+=("--current-tool" "codex")
   [ "$FORCE" -eq 0 ] || args+=("--current-force")
-  [ "$KB_ON_PATH" -eq 0 ] || args+=("--current-kb-on-path")
   if [ -n "$SELECTED_RUNTIME_PYTHON" ]; then
     args+=(
       "--current-runtime-interpreter" "$SELECTED_RUNTIME_PYTHON"
@@ -1607,7 +1490,6 @@ write_agent_plan_json() {
       apply_args+=("--codex")
     fi
   fi
-  [ "$KB_ON_PATH" -eq 0 ] || apply_args+=("--kb-on-path")
   [ "$FORCE" -eq 0 ] || apply_args+=("--force")
   [ -z "$SYNC_SOURCE" ] || apply_args+=("--source" "$SYNC_SOURCE")
   [ -z "$OPERATION_TIME" ] || apply_args+=("--operation-time" "$OPERATION_TIME")
@@ -1773,8 +1655,8 @@ ws_sync_error_tail() {
   # fail-closed 的稳定类别，不猜测、更不回显路径、token 或 traceback。
   case "$1" in
     *"检测到旧版知识库布局"*)
-      printf '%s\n' "  原因：检测到旧版知识库布局，安装生命周期不会自动搬运研究数据。"
-      printf '%s\n' "  处理：请先阅读迁移旧知识库到工作区根目录的指南，让 Agent 完成显式检查、授权与迁移。"
+      printf '%s\n' "  原因：检测到旧版知识库布局，Research Vault v2 不会读取或搬运其中的数据。"
+      printf '%s\n' "  处理：请保留原工作区并选择一个新的空目录安装；本版本不提供旧格式迁移。"
       ;;
     *"source-not-git-worktree"*|*"source must be a git worktree"*)
       printf '%s\n' "  原因：安装源码缺少可验证的版本信息。"
@@ -1860,7 +1742,6 @@ uninstall_workspace_copy() {
   manifest_is_ours "$MANIFEST_PATH" || die "无法确认安装记录，为避免误删已停止卸载"
   had_manifest=1
   ws_sync uninstall
-  uninstall_kb_on_path
   if [ "$had_manifest" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
     info "研究资料和本地运行环境已保留；这个工作区现在不再由安装器管理。"
   fi
@@ -1914,13 +1795,6 @@ guard_selected_managed_parents() {
     guard_managed_directory_chain "$HOME/.codex/$INSTALL_NAME"
     if [ -e "$HOME/.codex/skills" ] || [ -L "$HOME/.codex/skills" ]; then
       guard_managed_directory_chain "$HOME/.codex/skills"
-    fi
-  fi
-  if [ "$KB_ON_PATH" -eq 1 ]; then
-    if [ "$SCOPE" = "system" ]; then
-      guard_managed_directory_chain "$HOME/.local/bin"
-    else
-      guard_managed_directory_chain "$WORKSPACE_ROOT/bin"
     fi
   fi
 }
@@ -2188,13 +2062,10 @@ install_claude_system() {
   ensure_dir "$HOME/.claude/skills"
   ensure_dir "$HOME/.claude/.agents"
   link_force "$REPO_ROOT/runtime/WORKSPACE_RULES.md" "$HOME/.claude/.agents/WORKSPACE_RULES.md"
-  # System scope links each skill back to the source tree; entrypoints resolve
-  # runtime/lib from their own physical source path.
-  for skill in "$SKILLS_SRC"/*; do
-    [ -d "$skill" ] || continue
-    name=${skill##*/}
+  while IFS= read -r name; do
+    skill="$SKILLS_SRC/$name"
     link_force "$skill" "$HOME/.claude/skills/$name"
-  done
+  done < <(shipping_skill_names)
   if [ "$AGENT_PLAN" -eq 1 ]; then
     block_digest=$(claude_block_digest copy "$HOME/.claude")
   else
@@ -2207,11 +2078,10 @@ install_claude_system() {
 
 uninstall_claude_system() {
   local skill name
-  for skill in "$SKILLS_SRC"/*; do
-    [ -d "$skill" ] || continue
-    name=${skill##*/}
+  while IFS= read -r name; do
+    skill="$SKILLS_SRC/$name"
     remove_symlink_if_matches "$HOME/.claude/skills/$name" "$skill"
-  done
+  done < <(shipping_skill_names)
   remove_symlink_if_matches "$HOME/.claude/.agents/WORKSPACE_RULES.md" "$REPO_ROOT/runtime/WORKSPACE_RULES.md"
   rmdir "$HOME/.claude/.agents" >/dev/null 2>&1 || true
   remove_managed_block "$HOME/.claude/CLAUDE.md"
@@ -2240,22 +2110,29 @@ uninstall_codex_project() {
 }
 
 install_codex_system() {
-  local global_dir skill name
+  local global_dir skill name runtime_name
   global_dir="$HOME/.codex/$INSTALL_NAME"
   ensure_dir "$global_dir"
-  # Compose the installed shape from the separated source roots.  Do not link
-  # the repository-local .agents tree: it is reserved for untracked tools.
   ensure_dir "$global_dir/.agents"
-  link_force "$REPO_ROOT/skills" "$global_dir/.agents/skills"
-  link_force "$REPO_ROOT/runtime/lib" "$global_dir/.agents/lib"
+  ensure_dir "$global_dir/.agents/skills"
+  ensure_dir "$global_dir/.agents/lib"
+  ensure_dir "$global_dir/.agents/lib/research"
+  link_force "$REPO_ROOT/skills/metadata.yaml" "$global_dir/.agents/skills/metadata.yaml"
+  while IFS= read -r name; do
+    link_force "$SKILLS_SRC/$name" "$global_dir/.agents/skills/$name"
+  done < <(shipping_skill_names)
+  while IFS= read -r runtime_name; do
+    link_force \
+      "$REPO_ROOT/runtime/lib/research/$runtime_name" \
+      "$global_dir/.agents/lib/research/$runtime_name"
+  done < <(shipping_runtime_files)
   link_force "$REPO_ROOT/runtime/WORKSPACE_RULES.md" "$global_dir/.agents/WORKSPACE_RULES.md"
   link_force "$REPO_ROOT/runtime/AGENTS.md" "$global_dir/AGENTS.md"
   if [ -d "$HOME/.codex/skills" ]; then
-    for skill in "$SKILLS_SRC"/*; do
-      [ -d "$skill" ] || continue
-      name=${skill##*/}
+    while IFS= read -r name; do
+      skill="$SKILLS_SRC/$name"
       link_force "$skill" "$HOME/.codex/skills/$name"
-    done
+    done < <(shipping_skill_names)
   else
     warn "未找到 Codex 的系统级 skills 目录，已跳过这部分配置。"
     record_agent_plan_conflict "未找到 Codex 系统级 skills 目录，跳过 skill 链接"
@@ -2265,10 +2142,20 @@ install_codex_system() {
 }
 
 uninstall_codex_system() {
-  local global_dir skill name
+  local global_dir skill name runtime_name
   global_dir="$HOME/.codex/$INSTALL_NAME"
-  remove_symlink_if_matches "$global_dir/.agents/skills" "$REPO_ROOT/skills" "$REPO_ROOT/.agents/skills"
-  remove_symlink_if_matches "$global_dir/.agents/lib" "$REPO_ROOT/runtime/lib" "$REPO_ROOT/.agents/lib"
+  remove_symlink_if_matches "$global_dir/.agents/skills/metadata.yaml" "$REPO_ROOT/skills/metadata.yaml"
+  while IFS= read -r name; do
+    remove_symlink_if_matches "$global_dir/.agents/skills/$name" "$SKILLS_SRC/$name"
+  done < <(shipping_skill_names)
+  while IFS= read -r runtime_name; do
+    remove_symlink_if_matches \
+      "$global_dir/.agents/lib/research/$runtime_name" \
+      "$REPO_ROOT/runtime/lib/research/$runtime_name"
+  done < <(shipping_runtime_files)
+  rmdir "$global_dir/.agents/skills" >/dev/null 2>&1 || true
+  rmdir "$global_dir/.agents/lib/research" >/dev/null 2>&1 || true
+  rmdir "$global_dir/.agents/lib" >/dev/null 2>&1 || true
   remove_symlink_if_matches "$global_dir/.agents/WORKSPACE_RULES.md" "$REPO_ROOT/runtime/WORKSPACE_RULES.md"
   # Compatibility cleanup for system installs created before Wave 3.
   remove_symlink_if_matches "$global_dir/.agents/AGENTS.md" "$REPO_ROOT/runtime/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
@@ -2278,54 +2165,15 @@ uninstall_codex_system() {
   remove_symlink_if_matches "$global_dir/AGENTS.md" "$REPO_ROOT/runtime/AGENTS.md" "$REPO_ROOT/.agents/AGENTS.md"
   rmdir "$global_dir" >/dev/null 2>&1 || true
   if [ -d "$HOME/.codex/skills" ]; then
-    for skill in "$SKILLS_SRC"/*; do
-      [ -d "$skill" ] || continue
-      name=${skill##*/}
+    while IFS= read -r name; do
+      skill="$SKILLS_SRC/$name"
       remove_symlink_if_matches "$HOME/.codex/skills/$name" "$skill"
-    done
+    done < <(shipping_skill_names)
   fi
-}
-
-install_kb_on_path() {
-  local dir link
-  if [ "$SCOPE" = "system" ]; then
-    dir="$HOME/.local/bin"
-    WS_KB_SCRIPT="$KB_SCRIPT"
-  else
-    dir="$WORKSPACE_ROOT/bin"
-  fi
-  link="$dir/kb"
-  ensure_dir "$dir"
-  link_force "$WS_KB_SCRIPT" "$link"
-  if [ "$DRY_RUN" -eq 0 ] && [ -L "$link" ] && [ "$(readlink "$link")" = "$WS_KB_SCRIPT" ]; then
-    KB_SHORTCUT_CREATED=1
-  fi
-  if [ "$KB_SHORTCUT_CREATED" -eq 1 ] && path_on_path "$dir"; then
-    KB_SHORTCUT_AVAILABLE=1
-  elif [ "$KB_SHORTCUT_CREATED" -eq 1 ]; then
-    warn "kb 快捷入口已创建，但终端尚未搜索它所在的目录。"
-  fi
-}
-
-uninstall_kb_on_path() {
-  local dir link
-  if [ "$SCOPE" = "system" ]; then
-    dir="$HOME/.local/bin"
-  else
-    dir="$WORKSPACE_ROOT/bin"
-  fi
-  link="$dir/kb"
-  if [ -e "$link" ] && [ ! -L "$link" ]; then
-    warn "kb 快捷入口不是安装器创建的链接，已保留。"
-    record_agent_plan_conflict "kb 快捷入口是普通文件，保留：$link"
-    INSTALL_INCOMPLETE=1
-    return 0
-  fi
-  remove_symlink_if_matches "$link" "$WS_KB_SCRIPT" "$KB_SCRIPT" "$REPO_ROOT/.agents/skills/kb-cli/scripts/kb"
 }
 
 run_smoke() {
-  local smoke_output
+  local smoke_output skill_root runtime_lib smoke_python
   if [ "$DRY_RUN" -eq 1 ]; then
     return 0
   fi
@@ -2333,39 +2181,37 @@ run_smoke() {
     return 0
   fi
   section "安装检查"
-  info "正在检查 kb 基础功能..."
-  if [ -n "$DISCOVERED_RUNTIME_PYTHON" ] && [ -z "${RESEARCH_PYTHON:-}" ]; then
-    export RESEARCH_PYTHON="$DISCOVERED_RUNTIME_PYTHON"
+  info "正在检查五个 Research Vault skill..."
+  if [ "$COPY_PROJECT" -eq 1 ]; then
+    skill_root="$WORKSPACE_ROOT/.agents/skills"
+    runtime_lib="$WORKSPACE_ROOT/.agents/lib"
+  else
+    skill_root="$REPO_ROOT/skills"
+    runtime_lib="$REPO_ROOT/runtime/lib"
   fi
+  smoke_python=${SELECTED_RUNTIME_PYTHON:-${DISCOVERED_RUNTIME_PYTHON:-python3}}
   # Child diagnostics can contain tracebacks and internal paths; keep them private.
-  if ! smoke_output=$(_RESEARCH_BOOTSTRAP_ALLOW_PROVISION=1 "$WS_KB_SCRIPT" help 2>&1); then
-    warn "kb 安装检查未通过，请让 Agent 检查后重试。"
+  if ! smoke_output=$(PYTHONDONTWRITEBYTECODE=1 \
+    "$smoke_python" -B "$REPO_ROOT/install-lib/smoke.py" \
+      --runtime-lib "$runtime_lib" \
+      --workspace "$WORKSPACE_ROOT" \
+      --skills "$skill_root" 2>&1); then
+    case "$smoke_output" in
+      *"核心运行环境尚未就绪"*|*"无法准备运行所需的环境"*)
+        warn "工作区文件已安装，但核心运行环境尚未就绪；请让 Agent 准备依赖后重新运行安装检查。"
+        return 0
+        ;;
+    esac
+    warn "Research Vault skill 安装检查未通过，请让 Agent 检查后重试。"
     return 1
   fi
   case "$smoke_output" in
-    *"核心运行环境尚未就绪"*)
-      warn "工作区文件已安装，但核心运行环境尚未就绪；请让 Agent 按安装说明准备依赖后再使用 kb doctor 复查。"
+    *"核心运行环境尚未就绪"*|*"无法准备运行所需的环境"*)
+      warn "工作区文件已安装，但核心运行环境尚未就绪；请让 Agent 准备依赖后重新运行安装检查。"
       return 0
       ;;
   esac
-  if [ "$COPY_PROJECT" -eq 1 ]; then
-    if ! smoke_output=$(_RESEARCH_BOOTSTRAP_ALLOW_PROVISION=1 "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
-      warn "kb 安装检查未通过，请让 Agent 检查后重试。"
-      return 1
-    fi
-  else
-    if ! smoke_output=$(RESEARCH_SKILLS_HOME="$REPO_ROOT" _RESEARCH_BOOTSTRAP_ALLOW_PROVISION=1 "$WS_KB_SCRIPT" --root "$WORKSPACE_ROOT" doctor 2>&1); then
-      warn "kb 安装检查未通过，请让 Agent 检查后重试。"
-      return 1
-    fi
-  fi
-  case "$smoke_output" in
-    *"核心运行环境尚未就绪"*)
-      warn "工作区文件已安装，但核心运行环境尚未就绪；请让 Agent 按安装说明准备依赖后再使用 kb doctor 复查。"
-      return 0
-      ;;
-  esac
-  ok "kb 基础入口可用。"
+  ok "五个 Research Vault skill 可用。"
 }
 
 if [ "$ACTION" != "uninstall" ]; then
@@ -2414,7 +2260,6 @@ case "$ACTION" in
         install_codex_project
       fi
     fi
-    [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
     run_smoke
     print_done Install
     ;;
@@ -2427,7 +2272,6 @@ case "$ACTION" in
     if [ "$UPDATE_CONFIG_CODEX" = "1" ]; then
       install_codex_project
     fi
-    [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
     print_done Update
     ;;
   reinstall)
@@ -2439,7 +2283,6 @@ case "$ACTION" in
     if [ "$UPDATE_CONFIG_CODEX" = "1" ]; then
       install_codex_project
     fi
-    [ "$KB_ON_PATH" -eq 1 ] && install_kb_on_path
     run_smoke
     print_done Reinstall
     ;;
@@ -2470,7 +2313,6 @@ case "$ACTION" in
         uninstall_codex_project
       fi
     fi
-    uninstall_kb_on_path
     if [ "$CORRUPT_MANIFEST_UNINSTALL" -eq 1 ]; then
       warn "研究资料和本地运行环境未被改动"
     fi

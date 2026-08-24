@@ -1,4 +1,5 @@
 interface:
   display_name: Research Analysis
   short_description: Evidence-bound Markdown analysis and synthesis
-  default_prompt: Use $research-analysis to author and verify Markdown-first claims and multi-source synthesis with exact evidence bindings.
+  default_prompt: Use $research-analysis to author and verify Markdown-first claims and multi-source synthesis with exact
+    evidence bindings.

@@ -1,5 +1,0 @@
-interface:
-  display_name: Report Author
-  short_description: Create grounded reports, summaries, and presentation materials
-  default_prompt: Use $report-author to turn a program's reporting-events and linked evidence into standalone advisor-facing
-    weekly reports, stage summaries, and PPT-ready material.

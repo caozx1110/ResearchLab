@@ -23,7 +23,7 @@ def test_every_discoverable_skill_rule_bundle_fits_fixed_budget() -> None:
 
     assert payload["encoding"] == "cl100k_base"
     assert payload["limit"] == 8000
-    assert payload["discoverable_skill_count"] == 15
+    assert payload["discoverable_skill_count"] == 5
     assert payload["passed"] is True, [
         (row["skill"], row["total_tokens"])
         for row in payload["bundles"]

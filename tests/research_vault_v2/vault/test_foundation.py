@@ -189,6 +189,18 @@ def test_index_rebuild_is_derived_and_does_not_touch_home(fresh_vault: Path) -> 
     assert vault.GENERATED_VIEW_MARKER in (fresh_vault / "Views/Active Projects.md").read_text(encoding="utf-8")
 
 
+def test_index_rebuild_ignores_installed_agent_rules(fresh_vault: Path) -> None:
+    rules = fresh_vault / "AGENTS.md"
+    rules.write_text("# Installed agent rules\n", encoding="utf-8")
+
+    result = vault.rebuild_index(fresh_vault)
+
+    assert result["schema"] == "research-vault-index/v2"
+    pages = json.loads((fresh_vault / ".research/index/pages.json").read_text(encoding="utf-8"))
+    assert all(item["path"] != "AGENTS.md" for item in pages["pages"])
+    assert rules.read_bytes() == b"# Installed agent rules\n"
+
+
 def test_rebuild_refuses_to_overwrite_edited_derived_view(fresh_vault: Path) -> None:
     view = fresh_vault / "Views" / "Active Projects.md"
     view.write_text("# User-owned view\n", encoding="utf-8")

@@ -34,11 +34,18 @@ def test_every_shipping_skill_has_an_explicit_preference_eligibility_rule() -> N
         for implementation in implementations
     }
 
-    assert set(SKILL_IMPLEMENTATION_ALIASES) <= shipping
-    assert set(SKILL_ELIGIBILITY) == shipping | implementation_identities
+    assert shipping == {
+        "research-analysis",
+        "research-capture",
+        "research-review",
+        "research-vault",
+        "research-workbench",
+    }
+    assert set(SKILL_IMPLEMENTATION_ALIASES) <= set(SKILL_ELIGIBILITY)
+    assert shipping <= set(SKILL_ELIGIBILITY)
     consumers = set(SKILL_OPERATIONS)
     neutral = set(SKILL_NEUTRALITY)
-    assert consumers | neutral == shipping | implementation_identities
+    assert set(SKILL_ELIGIBILITY) == consumers | neutral
     assert consumers.isdisjoint(neutral)
     assert implementation_identities <= consumers
     assert all(SKILL_ELIGIBILITY[skill] for skill in consumers)

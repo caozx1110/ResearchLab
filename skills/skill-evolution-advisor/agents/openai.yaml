@@ -1,8 +1,0 @@
-interface:
-  display_name: Skill Evolution Advisor
-  short_description: Capture skill/workflow friction and improvement candidates
-  default_prompt: Use $skill-evolution-advisor to record skill/workflow friction, corrections, defects, or improvement candidates
-    without auto-editing a skill. Do not use it for optimizing a research model, method, or experiment; combine an independent
-    research-route archive through $research-orchestrator.
-policy:
-  allow_implicit_invocation: true

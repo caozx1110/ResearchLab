@@ -1,7 +1,0 @@
-interface:
-  display_name: Research Orchestrator
-  short_description: Manage program state, workflow logs, and research skill routing
-  default_prompt: Use $research-orchestrator to create or update a program, manage state/open questions/evidence requests/decision
-    logs/reporting events, and route work to the right research skill. For ambiguous or composed work, including a skill/workflow
-    improvement plus an independent research-route archive, produce an ordered route decision instead of letting one owner
-    absorb the other.

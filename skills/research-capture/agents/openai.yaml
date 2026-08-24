@@ -1,4 +1,5 @@
 interface:
   display_name: Research Capture
   short_description: Capture immutable source revisions and honest readers
-  default_prompt: Use $research-capture to save exact source bytes, build safe readers and source maps, and report readiness and degradation honestly.
+  default_prompt: Use $research-capture to save exact source bytes, build safe readers and source maps, and report readiness
+    and degradation honestly.

@@ -567,9 +567,7 @@ def _iter_visible_pages(root: Path) -> list[Page]:
     pages: list[Page] = []
     for candidate in sorted(root_path.rglob("*.md")):
         relative = candidate.relative_to(root_path)
-        if any(part.startswith(".") for part in relative.parts):
-            continue
-        if relative.parts and relative.parts[0] == "Views":
+        if classify_path(root_path, relative) != PathClass.SEMANTIC:
             continue
         if candidate.is_symlink():
             raise ContainmentError(f"symlink Markdown page is not allowed: {relative}")

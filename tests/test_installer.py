@@ -82,7 +82,6 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
             "--agent-plan-json",
             str(plan_path),
             "--all",
-            "--kb-on-path",
             "--project",
             str(workspace),
             "--yes",
@@ -120,13 +119,15 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert plan["source"]["commit"] == _git_output(_project_root(), "rev-parse", "HEAD")
     assert plan["source"]["origin"] == _git_output(_project_root(), "remote", "get-url", "origin")
     targets = plan["targets"]
-    kb_target = next(
+    vault_target = next(
         item
         for item in targets
-        if item["operation"] == "write" and item["path"] == str(workspace / ".agents/skills/kb-cli/scripts/kb")
+        if item["operation"] == "write"
+        and item["path"] == str(workspace / ".agents/skills/research-vault/SKILL.md")
     )
-    assert kb_target["precondition"] == {"type": "absent"}
-    assert re.fullmatch(r"[0-9a-f]{64}", kb_target["source_content_sha256"])
+    assert vault_target["precondition"] == {"type": "absent"}
+    assert re.fullmatch(r"[0-9a-f]{64}", vault_target["source_content_sha256"])
+    assert not any("/skills/kb-cli/" in item["path"] for item in targets)
     assert any(item["operation"] == "write-managed-block" and item["path"] == str(workspace / "CLAUDE.md") for item in targets)
     assert all(
         re.fullmatch(r"[0-9a-f]{64}", item["source_content_sha256"])
@@ -137,7 +138,7 @@ def test_agent_plan_lists_exact_targets_and_writes_nothing(tmp_path: Path) -> No
     assert len(runtime) == 1
     assert runtime[0]["path"] == str(workspace / ".venv")
     assert runtime[0]["precondition"] == {"type": "absent"}
-    assert "yaml, markdownify, bs4, or the pymupdf4llm PDF backend" in runtime[0]["condition"]
+    assert "selected Python lacks yaml" in runtime[0]["condition"]
     assert "intentionally not enumerated" in runtime[0]["boundary"]
     assert "preserved" in runtime[0]["cleanup"]
     tree = plan["source"]["distributable_tree"]
@@ -649,7 +650,7 @@ def test_agent_apply_rejects_target_concurrency_without_writes(tmp_path: Path) -
     assert not any(home.iterdir())
 
 
-def test_agent_plan_core_runtime_probe_catches_yaml_only_environment(tmp_path: Path) -> None:
+def test_agent_plan_accepts_yaml_only_v2_runtime(tmp_path: Path) -> None:
     workspace = tmp_path / "partial-runtime-workspace"
     workspace.mkdir()
     home = tmp_path / "partial-runtime-home"
@@ -657,7 +658,6 @@ def test_agent_plan_core_runtime_probe_catches_yaml_only_environment(tmp_path: P
     stubs = tmp_path / "partial-runtime-stubs"
     stubs.mkdir()
     (stubs / "yaml.py").write_text("# available\n", encoding="utf-8")
-    (stubs / "markdownify.py").write_text("# available\n", encoding="utf-8")
     isolated_python = tmp_path / "partial-python"
     isolated_python.write_text(f"#!/bin/sh\nexec {sys.executable!s} -S \"$@\"\n", encoding="utf-8")
     isolated_python.chmod(0o755)
@@ -673,11 +673,9 @@ def test_agent_plan_core_runtime_probe_catches_yaml_only_environment(tmp_path: P
     planned, plan = _plan_from_source(_project_root(), workspace, plan_path, env=env)
 
     assert planned.returncode == 0, planned.stdout + planned.stderr
-    assert "安装检查会尝试准备" in planned.stderr
-    runtime = plan["conditional_runtime_changes"]
-    assert len(runtime) == 1
-    assert runtime[0]["path"] == str(workspace / ".venv")
-    assert "yaml, markdownify, bs4, or the pymupdf4llm PDF backend" in runtime[0]["condition"]
+    assert "安装检查会尝试准备" not in planned.stderr
+    assert plan["conditional_runtime_changes"] == []
+    assert plan["runtime_precondition"]["core_runtime"]["modules"] == ["yaml"]
 
 
 def test_agent_uninstall_plan_reports_managed_block_and_exact_count(tmp_path: Path) -> None:
@@ -862,19 +860,6 @@ def test_ready_managed_venv_suppresses_update_warning_and_conditional_target(
         "RESEARCH_NO_PDF_BACKEND": "1",
     }
     env.pop("PYTHONEXECUTABLE", None)
-    doctor = subprocess.run(
-        [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "--root", str(workspace), "doctor"],
-        cwd=workspace,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    assert doctor.returncode == 0, doctor.stdout + doctor.stderr
-    assert "受管项目运行环境可用" in doctor.stdout
-
     plan_path = tmp_path / "ready-managed-update.json"
     planned = subprocess.run(
         [
@@ -1136,7 +1121,6 @@ def test_system_agent_plan_lists_missing_parent_directories(tmp_path: Path) -> N
             str(plan_path),
             "--all",
             "--system",
-            "--kb-on-path",
             "--yes",
         ],
         cwd=_project_root(),
@@ -1162,8 +1146,6 @@ def test_system_agent_plan_lists_missing_parent_directories(tmp_path: Path) -> N
         home / ".claude/skills",
         home / ".codex",
         home / ".codex/workspace-oss",
-        home / ".local",
-        home / ".local/bin",
     ):
         assert ("mkdir", str(directory)) in targets
     summary = re.search(r"预计受管目标：(\d+) 项", result.stdout)
@@ -1267,37 +1249,6 @@ def _run_pty_dialog(
         output.decode("utf-8", errors="replace"),
         "",
     )
-
-
-def _run_shortcut_install(
-    tmp_path: Path,
-    *,
-    shortcut_on_path: bool,
-) -> tuple[Path, subprocess.CompletedProcess[str]]:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    path_entries = ["/usr/bin", "/bin"]
-    if shortcut_on_path:
-        path_entries.insert(0, str(workspace / "bin"))
-    result = _run_pty_dialog(
-        tmp_path,
-        args=[
-            "install",
-            "--codex",
-            "--project",
-            str(workspace),
-            "--kb-on-path",
-            "--yes",
-        ],
-        exchanges=[],
-        env_overrides={
-            "PATH": ":".join(path_entries),
-            "RESEARCH_NO_MANAGED_VENV": "1",
-            "RESEARCH_NO_PDF_BACKEND": "1",
-            "RESEARCH_PYTHON": sys.executable,
-        },
-    )
-    return workspace, result
 
 
 def _run_copy_action(
@@ -1472,7 +1423,6 @@ def test_guided_dry_run_retries_invalid_choice_without_claiming_success(tmp_path
             ("请选择 [3]：", "3\n"),
             ("请选择 [1]：", "1\n"),
             ("目录 [", f"{workspace}\n"),
-            ("请选择 [1]：", "2\n"),
         ],
     )
 
@@ -1510,7 +1460,6 @@ def test_guided_cancel_writes_nothing(tmp_path: Path) -> None:
             ("请选择 [3]：", "2\n"),
             ("请选择 [1]：", "1\n"),
             ("目录 [", f"{workspace}\n"),
-            ("请选择 [1]：", "1\n"),
             ("确认执行？[Y/n]：", "n\n"),
         ],
     )
@@ -1521,57 +1470,51 @@ def test_guided_cancel_writes_nothing(tmp_path: Path) -> None:
     assert not any(workspace.iterdir())
 
 
-def test_guided_shortcut_choice_immediately_explains_terminal_usage(tmp_path: Path) -> None:
+def test_retired_kb_on_path_option_is_rejected(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    result = _run_pty_dialog(
-        tmp_path,
-        args=["install", "--dry-run", "--codex", "--project", str(workspace)],
-        exchanges=[("请选择 [1]：", "2\n")],
+    result = subprocess.run(
+        [
+            "bash",
+            str(_project_root() / "install.sh"),
+            "install",
+            "--dry-run",
+            "--codex",
+            "--project",
+            str(workspace),
+            "--kb-on-path",
+            "--yes",
+        ],
+        cwd=_project_root(),
+        env={**os.environ, "NO_COLOR": "1"},
+        text=True,
+        capture_output=True,
+        check=False,
     )
-
-    output = result.stdout
-    assert result.returncode == 0, output
-    prompt_position = output.index("请选择 [1]：")
-    help_position = output.index("kb help")
-    init_position = output.index("kb init")
-    preview_position = output.index("安装预览")
-    assert prompt_position < help_position < init_position < preview_position
+    assert result.returncode != 0
+    assert "无法识别的选项" in result.stderr
     assert not any(workspace.iterdir())
 
 
-def test_shortcut_completion_reports_direct_terminal_usage_when_on_path(tmp_path: Path) -> None:
-    workspace, result = _run_shortcut_install(tmp_path, shortcut_on_path=True)
+def test_help_and_completion_expose_natural_language_not_kb_cli(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    result = _run_copy_action(tmp_path, workspace, action="install")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "帮我在当前工作区初始化 Research Vault" in result.stdout
+    assert "kb help" not in result.stdout
+    assert "kb init" not in result.stdout
+    assert not (workspace / "bin" / "kb").exists()
 
-    output = result.stdout
-    assert result.returncode == 0, output
-    completion = output.split("安装完成", 1)[1]
-    terminal_guidance = completion.split("开始使用", 1)[0]
-    assert "终端可直接运行" in terminal_guidance
-    assert "kb help" in terminal_guidance
-    assert "kb init" in terminal_guidance
-    assert "不在 PATH" not in terminal_guidance
-    assert (workspace / "bin" / "kb").is_symlink()
-    for shell_config in (".zshrc", ".bashrc", ".profile"):
-        assert not (tmp_path / "home" / shell_config).exists()
-
-
-def test_shortcut_completion_explains_path_setup_when_not_on_path(tmp_path: Path) -> None:
-    workspace, result = _run_shortcut_install(tmp_path, shortcut_on_path=False)
-
-    output = result.stdout
-    assert result.returncode == 0, output
-    completion = output.split("安装完成", 1)[1]
-    terminal_guidance = completion.split("开始使用", 1)[0]
-    assert "不在 PATH" in terminal_guidance
-    assert "加入 PATH" in terminal_guidance
-    assert "重新打开终端" in terminal_guidance
-    assert "kb help" in terminal_guidance
-    assert "终端可直接运行" not in terminal_guidance
-    assert str(workspace / "bin") not in output
-    assert (workspace / "bin" / "kb").is_symlink()
-    for shell_config in (".zshrc", ".bashrc", ".profile"):
-        assert not (tmp_path / "home" / shell_config).exists()
+    help_result = subprocess.run(
+        ["bash", str(_project_root() / "install.sh"), "--help"],
+        cwd=_project_root(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert help_result.returncode == 0
+    assert "--kb-on-path" not in help_result.stdout
 
 
 def test_external_install_prints_completion_without_bash_variable_error(tmp_path: Path) -> None:
@@ -1580,7 +1523,7 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
     result = _run_pty_dialog(
         tmp_path,
         args=["install", "--codex", "--project", str(workspace), "--yes"],
-        exchanges=[("请选择 [1]：", "1\n")],
+        exchanges=[],
         env_overrides={
             "NO_COLOR": "1",
             "RESEARCH_NO_MANAGED_VENV": "1",
@@ -1638,13 +1581,13 @@ def test_external_install_prints_completion_without_bash_variable_error(tmp_path
 
 def test_noninteractive_copy_lifecycle_hides_sync_engine_output_and_preserves_semantics(tmp_path: Path) -> None:
     dry_workspace = tmp_path / "dry-workspace"
-    # Claude setup and the shortcut force this dry-run through ensure_dir,
-    # link_force, and write_managed_block after ws_sync returns.
+    # Claude setup forces this dry-run through ensure_dir and
+    # write_managed_block after ws_sync returns.
     dry_run = _run_copy_action(
         tmp_path,
         dry_workspace,
         action="install",
-        extra=("--claude", "--kb-on-path", "--dry-run"),
+        extra=("--claude", "--dry-run"),
     )
 
     assert dry_run.returncode == 0, dry_run.stdout + dry_run.stderr
@@ -1777,11 +1720,11 @@ def test_codex_only_copy_lifecycle_ignores_unmanaged_claude_symlink(tmp_path: Pa
 def test_noninteractive_smoke_failure_hides_child_diagnostics(tmp_path: Path) -> None:
     source = _make_linked_source(tmp_path)
     private_detail = tmp_path / "internal" / "smoke-traceback.log"
-    smoke_script = source / "skills" / "kb-cli" / "scripts" / "kb"
+    smoke_script = source / "skills" / "research-analysis" / "scripts" / "analysis.py"
     smoke_script.write_text(
-        "#!/usr/bin/env bash\n"
-        f"printf '%s\\n' 'Traceback: smoke child secret at {private_detail}' >&2\n"
-        "exit 23\n",
+        "import sys\n"
+        f"print('Traceback: smoke child secret at {private_detail}', file=sys.stderr)\n"
+        "raise SystemExit(23)\n",
         encoding="utf-8",
     )
     workspace = tmp_path / "workspace"
@@ -1789,7 +1732,7 @@ def test_noninteractive_smoke_failure_hides_child_diagnostics(tmp_path: Path) ->
     result = _run_copy_action(tmp_path, workspace, action="install", source=source)
 
     assert result.returncode != 0
-    assert "kb 安装检查未通过，请让 Agent 检查后重试" in result.stderr
+    assert "Research Vault skill 安装检查未通过，请让 Agent 检查后重试" in result.stderr
     assert "Traceback" not in result.stdout + result.stderr
     assert "smoke child secret" not in result.stdout + result.stderr
     assert str(private_detail) not in result.stdout + result.stderr
@@ -1856,19 +1799,8 @@ def test_offline_install_keeps_files_and_exposes_dependency_free_rescue(
     assert (workspace / ".agents" / ".install-manifest.json").is_file()
     assert (workspace / ".agents" / "requirements.txt").is_file()
 
-    doctor = subprocess.run(
-        [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "--root", str(workspace), "doctor"],
-        cwd=workspace,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
-    assert doctor.returncode == 0, doctor.stdout + doctor.stderr
-    assert "核心运行环境尚未就绪" in doctor.stdout
-    assert "离线恢复步骤" in doctor.stdout
+    assert not (workspace / ".agents/skills/kb-cli").exists()
+    assert (workspace / ".agents/skills/research-vault/SKILL.md").is_file()
 
 
 def test_project_install_from_linked_worktree_preserves_linked_checkout(tmp_path: Path) -> None:
@@ -2033,7 +1965,7 @@ def test_non_interactive_duplicate_install_still_fails_closed(tmp_path: Path) ->
     assert "重装" in result.stderr
 
 
-def test_system_uninstall_removes_matching_shortcut_without_kb_flag_and_preserves_foreign_link(
+def test_system_uninstall_does_not_manage_retired_kb_shortcuts(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -2062,42 +1994,11 @@ def test_system_uninstall_removes_matching_shortcut_without_kb_flag_and_preserve
     )
 
     assert removed.returncode == 0, removed.stdout + removed.stderr
-    assert not shortcut.is_symlink()
-
-    shortcut.symlink_to("/usr/bin/true")
-    preserved = subprocess.run(
-        command,
-        cwd=_project_root(),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert preserved.returncode == 0, preserved.stdout + preserved.stderr
     assert shortcut.is_symlink()
-    assert os.readlink(shortcut) == "/usr/bin/true"
-    assert "链接目标与安装记录不一致，已保留" in preserved.stderr
-
-    shortcut.unlink()
-    shortcut.write_text("user-owned\n", encoding="utf-8")
-    ordinary_file = subprocess.run(
-        command,
-        cwd=_project_root(),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert ordinary_file.returncode == 0, ordinary_file.stdout + ordinary_file.stderr
-    assert shortcut.read_text(encoding="utf-8") == "user-owned\n"
-    assert "kb 快捷入口不是安装器创建的链接，已保留" in ordinary_file.stderr
+    assert shortcut.readlink() == kb_script
 
 
-def test_legacy_project_uninstall_removes_matching_shortcut_without_kb_flag(tmp_path: Path) -> None:
+def test_legacy_project_uninstall_leaves_retired_kb_shortcut_unmanaged(tmp_path: Path) -> None:
     workspace = tmp_path / "legacy-workspace"
     workspace.mkdir()
     (workspace / ".agents").symlink_to(_project_root() / ".agents", target_is_directory=True)
@@ -2129,7 +2030,7 @@ def test_legacy_project_uninstall_removes_matching_shortcut_without_kb_flag(tmp_
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not shortcut.is_symlink()
+    assert shortcut.is_symlink()
     assert not (workspace / ".agents").exists()
 
 
@@ -2160,7 +2061,7 @@ def test_single_agent_conflict_stops_before_next_steps(tmp_path: Path) -> None:
     result = _run_pty_dialog(
         tmp_path,
         args=["install", "--claude", "--project", str(workspace), "--yes"],
-        exchanges=[("请选择 [1]：", "1\n")],
+        exchanges=[],
         env_overrides={
             "NO_COLOR": "1",
             "RESEARCH_NO_MANAGED_VENV": "1",

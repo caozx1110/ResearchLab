@@ -1,319 +1,178 @@
-# 安装指南
+# 安装与维护 Research Vault Skills
 
-这份指南说明如何把这套 workspace skill bundle 接入 Claude Code、Codex 和可选的 `kb` 快捷入口。安装目标是你的 **workspace 根目录**：安装后的 `.agents/` 与显式 `kb init` 激活的 canonical data root 同级；新 workspace 的 data root 就是 workspace 根，不再生成物理 `kb/` 子目录。安装入口是仓库根目录的 `install.sh`。
+这份文档面向安装者、维护者和 CI。普通用户完成一次安装后，应回到 Agent 对话并用自然语言工作，不需要运行内部 skill 脚本。
 
-> **普通用户只需完成一次安装。** 安装是日常使用之前唯一的技术 bootstrap；成功后请回到 Agent 对话，只用自然语言或 16 个 `kb <verb>` 伪 CLI 快捷入口。除“新用户快速安装”和“首次运行 KB”外，本页的 flags、scripts、环境变量与显式 paths 都是管理员、维护者或 CI 自动化参考，普通用户不需要复制或理解，Agent 也不应把它们作为日常操作步骤暴露给用户。
+## 安装边界
+
+安装目标是 workspace 根目录。Project scope 会管理：
+
+- `.agents/skills/` 下五个 shipping skill 与 `metadata.yaml`；
+- `.agents/lib/research/` runtime library；
+- `.agents/WORKSPACE_RULES.md`、requirements、version 和 license；
+- root `AGENTS.md` 中一个稳定、可验证的 managed pointer block；
+- 选择 Claude Code 时的 workspace skill integration。
+
+安装器不管理 `Home.md`、Sources、Notes、Projects、Experiments、Reviews、Reports、`.research/`、`.source/` 或 `.obsidian/`。Update、reinstall 和 uninstall 都保留这些用户数据。
+
+安装器不提供 executable research CLI，不创建 terminal shortcut，不修改 shell 配置，也不迁移 legacy workspace。
 
 ## 新用户快速安装
 
-### 直接把 GitHub 链接交给 Agent（推荐）
-
-你可以不先克隆仓库。把仓库链接粘贴给 Codex 或 Claude Code，并直接说：
-
-```text
-把这个 research skill 系统安装到我当前 workspace。先检查目标目录和已有 AGENTS.md，再使用仓库自带安装器；保留 canonical 研究数据、legacy kb、虚拟环境和所有用户文件。安装后验证 skill metadata、kb help 和一次全新临时 workspace 的 init，不要替我推送或发布。
-```
-
-仓库对 Agent 的安装合同如下，Agent 应自行完成，不让用户复制内部 flags：
-
-1. 将链接视为代码来源而不是知识材料；先用版本控制把它检出到临时目录，不通过管道执行远端脚本。记录仓库 origin、branch 与 commit，并检查根目录存在 `install.sh`、`runtime/VERSION`、`runtime/AGENTS.md`、`runtime/WORKSPACE_RULES.md` 与 `skills/`。
-2. 把当前 workspace 根作为安装目标，绝不能把 `kb/` 当目标；已有普通根 `AGENTS.md` 时，确认安装器只追加/更新带 marker 的受管区块并保留块外原文。目标是 symlink、类型冲突、marker 异常或已有受管区块漂移时停止解释，不能覆盖整文件或猜测修复。
-3. 先让安装器生成 Agent JSON 计划（它隐含 dry-run）。终端保持短预览并显示目标数、冲突数和 semantic plan digest；JSON 精确列出 action、scope、tools、source provenance、canonical distributable tree map/digest、按执行顺序排列的全部 targets、每项来源内容 digest 与目标前置状态、冲突、条件性 runtime 变化及可复现的 apply contract。除 Agent 明确指定的 JSON 计划文件外，这一步不写 workspace、HOME、runtime 或 Python cache。计划文件必须位于目标 workspace 与 HOME 之外。
-4. 核对计划中的 source commit 与 source tree digest 仍等于当前 checkout，目标只包含受管 `.agents/`、根规则文件、所选 Agent 接入和明确标出的条件性 `.venv` runtime tree。完成审阅后，Agent 自动计算这份最终计划文件的精确 byte SHA-256，替换 apply contract 中的 `COMPUTE_AFTER_REVIEW` 占位，再在用户已要求“安装”的授权范围内执行；用户不需要查看、复制或填写 digest。安装器会在解析 JSON 或触碰首个目标前，以 no-follow 方式读取同一个普通文件 inode，同时校验外部 byte SHA 与 semantic plan digest，再验证源码树和每个目标的前置状态。计划后出现空白、换行、键序、编码字节、未提交源码、来源身份或目标状态变化时整次操作零写失败。计划和应用都使用显式参数，非交互运行不读取 stdin。
-5. 安装后核对 manifest、15 个可发现 skill、bundle version、`kb help` 与全新临时目录中的 `kb init`；真实用户 workspace 与 legacy `kb/` 不参与验收。
-6. 不安装 Obsidian 插件、daemon、cron、watcher 或全局 Python 包；不 push、tag、publish，也不改 shell 配置。可选终端快捷入口只在用户明确要求时创建。
-
-这使“粘贴 GitHub 链接让 Agent 安装”成为受支持主路径；当前没有市场包，也不需要插件。
-
-在仓库根目录运行下面这条一次性引导命令：
+从可信的 Git checkout 运行：
 
 ```bash
 bash install.sh
 ```
 
-安装向导第一屏会明确列出四个动作：
+向导会选择：
 
-1. **首次安装**：给新的 workspace 接入 skills。
-2. **更新**：同步已有安装中的版本变化。
-3. **重装或修复**：重新铺设全部受管文件，用于修复缺失或损坏。
-4. **卸载**：移除 skills 接入，同时保留研究资料和本地运行环境。
+1. install、update、reinstall 或 uninstall；
+2. Claude Code、Codex 或两者；
+3. project 或 system scope；
+4. project workspace 根目录；
+5. 预览并确认受管范围。
 
-首次安装时，向导会继续询问以下事项，按回车即可接受推荐选项：
-
-1. 选择“首次安装”。
-2. 选择你使用的 AI 工具：Claude Code、Codex，或两者都用。
-3. 选择“仅当前或指定工作区”。推荐 project scope，不推荐 system scope。
-4. 确认 workspace 根目录；不要选择其中的 `kb/` 子目录。
-5. 选择是否创建终端 `kb` 快捷命令。选择创建后，向导会提示安装完成后先在终端运行 `kb help`，再运行 `kb init`。它只是额外便利，不影响在 AI 对话中使用 `kb`。
-
-如果选择“首次安装”后，目标 workspace 已有本安装器的有效安装记录，向导不会直接报错，也不会静默重装，而会在询问终端快捷命令之前改为询问：更新（推荐）、重装或修复，或取消。非交互或 CI 中重复执行首次安装仍会非零退出，避免自动化任务在没有确认时改变动作。
-
-确认页会列出安装目标和将发生的改动。安装完成后，打开刚才选择的 AI 工具，在对话中输入：
+推荐 project scope。安装完成后，在 Agent 对话中说：
 
 ```text
-kb init
+帮我在当前工作区初始化 Research Vault，并说明下一步。
 ```
 
-初始化会先让知识库可用，再提供“现在设置”（推荐）和“先跳过”。选择跳过不会追加或覆盖偏好，也不妨碍立即添加、检索或分析资料；之后可直接说“补充我的研究偏好”。初始化后可用 `kb status` 查看当前状态。此后不需要继续操作安装脚本；更新、重装和卸载由 Agent 或管理员按需处理，并保留已有研究资料。
+初始化是 `research-vault` 的运行行为，不属于 installer。安装本身不会创建研究语义文件。
 
-全新 dedicated workspace 的 `kb init` 会先做零写 collision preflight，再写入 byte-canonical `config/workspace-layout.yaml`，随后把 `units/`、`programs/`、`raw/` 等 canonical 目录直接建在 workspace 根。普通业务动词不能创建 marker；marker 缺失/异常、已有 Git repository、partial root tree、unknown sibling、symlink、special node 或 legacy `kb/` 都先拒绝。install/update/reinstall 不会自动迁移 legacy 数据；检测到旧布局时，让 Agent 按[迁移旧知识库到 workspace root](MIGRATE_KB_TO_WORKSPACE_ROOT.md)完成只读检查、当前消息授权与 receipt-bound 迁移，不要强行运行 root-layout init 或手工剪切目录。
+## 非交互安装
 
-## 管理员参考：推荐安装模型
-
-推荐把 bundle 以 project-scope copy 方式安装到外部 workspace 根：
-
-- `bash install.sh --all --project DIR` 把 manifest 声明的完整受管运行子集（含最小规则 `.agents/WORKSPACE_RULES.md`）复制到 `DIR`。
-- 安装器只把稳定加载指针写进 workspace 根 `DIR/AGENTS.md` 的 managed block，并配置所选 agent 工具；完整业务流程不复制到根文件。
-- `.agents/AGENTS.md` 与 `.agents/AGENT_GUIDE.md` 已退出当前 payload。若旧版本的 manifest 仍拥有它们，update/reinstall 只在 digest/type 仍匹配时安全删除；用户创建或修改的同名文件继续 fail closed 并保留。
-- 全新初始化的 workspace 数据直接放在 `DIR/` 的 canonical allowlist 下，受管 Python 环境放在 reserved `DIR/.venv/`；持久引用仍使用逻辑 `kb/...`。
-
-完整受管运行子集是受支持的安装单元；源码树中的测试、validator、开发评估工具和 checkout 说明不属于该子集。不要只复制单个 skill，也不要把 bundle 指向或安装进 `DIR/kb/`。system scope 与 symlink 模式只保留兼容性，不作为新安装建议。
-
-project copy workspace 不需要 `RESEARCH_SKILLS_HOME`。若当前 Python 缺运行依赖，正式安装末尾的 smoke check 或首次运行会把受管 venv 建在 `DIR/.venv`；依赖已满足时不会无条件创建。
-
-## 管理员参考：运行环境
-
-Python 3.9 或更高版本是安装器硬依赖。脚本首次运行通常会自动创建并使用项目内受管 `.venv`。核心运行时不是只有 PyYAML：硬 import 为 `yaml`、`markdownify`、`bs4`，对应 PyYAML、Markdownify、Beautiful Soup 4；默认 requirements 还包含可复现的轻量 PDF 深读后端。安全更新会保留已有受管 venv，因此 shipping runtime 同样保持 Python 3.9 兼容。
-
-高级用户仍可用 `RESEARCH_PYTHON` 覆盖解释器；也可用 `RESEARCH_VENV` 覆盖受管 venv 路径。设置 `RESEARCH_NO_MANAGED_VENV=1` 会关闭自动 venv，改用当前解释器，此时需要自备全部三个核心 import，而不只是 PyYAML。
-
-安装器会检查完整核心 runtime。当前 Python、既有受管 venv 和安全 PATH 候选都不满足时，业务动词会尝试自动准备；`kb help` 与 `kb doctor` 始终保留为只读救援面，不创建 venv、不运行 pip。无网络或没有可用镜像时，安装器会保留已经安装的工作区文件并明确报告 runtime 尚未就绪，而不是让安装和 `kb doctor` 互相要求重试。
-
-### 无网或受限网络恢复
-
-安装到普通工作区后，完整锁定位于 `.agents/requirements.txt`；源码 checkout 根目录的 `requirements.txt` 与它保持同一组精确版本。可让 Agent 在工作区根执行：
+常用维护命令：
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r .agents/requirements.txt
+bash install.sh install --codex --project /path/to/workspace --yes
+bash install.sh install --claude --project /path/to/workspace --yes
+bash install.sh install --all --project /path/to/workspace --yes
+bash install.sh update --project /path/to/workspace --yes
+bash install.sh reinstall --project /path/to/workspace --yes
+bash install.sh uninstall --project /path/to/workspace --yes
 ```
 
-使用企业或国内镜像时，先按组织策略配置 pip 镜像，再执行同一条 requirements 安装。完全离线时，可在一台联网且 Python/平台兼容的机器上预取 wheel：
+`--project` 的值必须是 workspace 根，不是某个研究子目录。目标 root、`.agents` 或 selected integration parent 是 symlink、special node 或类型冲突时，安装器 fail closed。
+
+`--dry-run` 只展示折叠后的受管变化，不写 workspace、HOME 或 runtime：
 
 ```bash
-python3 -m pip download -r .agents/requirements.txt -d wheelhouse
+bash install.sh install --dry-run --codex --project /path/to/workspace
 ```
 
-把 wheelhouse 带到目标机器后，在工作区根执行：
+## Agent exact plan
+
+Agent 可以生成零写、byte-bound JSON plan：
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install --no-index --find-links wheelhouse -r .agents/requirements.txt
+bash install.sh install \
+  --agent-plan-json /safe/path/install-plan.json \
+  --codex \
+  --project /path/to/workspace \
+  --yes
 ```
 
-准备完成后再运行 `kb doctor`；它会报告实际生效的运行环境与 Markdown/PDF 能力。不要把凭据写入 requirements 或工作区配置。
+Plan 绑定：
 
-## 管理员参考：命令行与自动化
+- action、scope、workspace、HOME 和 selected tools；
+- source checkout/origin/branch/full commit；
+- distributable tree digest 与每个 source byte digest；
+- exact target、operation、precondition 和 source content digest；
+- current manifest identity；
+- bound ready interpreter，或唯一 conditional workspace runtime tree；
+- apply argv、plan digest 与 plan-byte digest placeholder。
 
-以下命令供管理员、维护者和 CI 使用。普通用户完成上面的引导安装后不需要运行它们，也不需要把任何 flag 或内部 path 交给 Agent。
+应用前必须重新计算 plan file 的 byte digest，并保持 source commit、tree、target preconditions、runtime identity 与 manifest 未变化。任何 drift 都在第一笔写入前停止并要求重新生成/审阅 plan。
 
-在 bundle 仓库根目录运行，并把 `--project` 指向目标 workspace 根：
+Plan schema 4 不含旧 terminal shortcut option。
+
+## 五 skill 发布验证
+
+Post-install smoke 只读验证：
+
+- `metadata.yaml` 恰好列出五个 owner；
+- 五个 `SKILL.md` 全部存在；
+- vault、capture、analysis 的 mechanical entrypoint 可以显示 help；
+- runtime 可以加载必要依赖；
+- installed runtime 恰好只有 package marker、`v2_bootstrap`、read-only `legacy_detector` 和 installer `updater`，不包含旧 schema、migration、CLI 或 canonical-record helper；
+- smoke 不创建研究语义或 bytecode。
+
+唯一核心 Python dependency 是 PyYAML。缺少它且离线无法准备时，安装器保留已复制文件并明确报告 runtime 未就绪。安装者应使用可信 mirror 或 wheelhouse 按 `.agents/requirements.txt` 准备 workspace-local runtime，再重新运行 install/reinstall 检查。Converter dependency 不属于 installer。不要把 credential 写进 requirements 或 workspace Markdown。
+
+## Runtime 选择
+
+安装器按以下顺序选择兼容 runtime：
+
+1. 明确指定且完整可用的 Python；
+2. 当前完整可用的 Python；
+3. 既有安全、完整的 workspace managed venv；
+4. PATH 中 identity 稳定且完整可用的 Python；
+5. 在 workspace-local `.venv/` 准备隔离环境。
+
+普通运行不会向任意 shared interpreter 安装 package。Managed runtime 是用户本地运行状态，不进入 release bundle，update/reinstall/uninstall 默认保留。
+
+## Source provenance
+
+Project copy manifest 记录 source strategy、checkout、origin、branch 和 exact commit。Local checkout 安装继续绑定该 checkout；remote branch source 继续绑定该 origin/branch；detached source 绑定 exact commit，后续 update 前必须明确选择可验证 branch。
+
+Git worktree source 通过 tracked release allowlist 枚举。ZIP/snapshot 不能区分 tracked 与 untracked 文件，默认拒绝；维护者只有在明确接受风险时才使用 snapshot source，并仍受确定性 release roots、excluded paths 和五 skill allowlist 约束。
+
+## Update
+
+Update 只适用于已有 project copy manifest：
 
 ```bash
-bash install.sh
-bash install.sh --help
-bash install.sh --claude --project /path/to/workspace
+bash install.sh update --project /path/to/workspace --yes
 ```
 
-直接 `bash install.sh` 无参数会进入中文交互向导；支持数字选择，输入无效时会原地重问。显式 flag 和非交互/CI 用法保持不变；`NO_COLOR=1` 可关闭终端颜色。
+它原子更新 installer-owned files，删除 manifest-owned retired skill files，保留 drifted/user-owned paths 并给出统一 preservation warning。Source 不变且 bytes 已一致时是 no-op，manifest 保持稳定。
 
-先看 dry-run：
+`--force` 只允许覆盖已漂移的 installer-owned regular file，不扩大 target 或删除范围，也不触碰研究数据。
+
+## Reinstall
+
+Reinstall 从当前 source 重新铺设完整 managed set：
 
 ```bash
-bash install.sh --dry-run --claude --project /path/to/workspace
+bash install.sh reinstall --project /path/to/workspace --yes
 ```
 
-Agent 安装前的可审计计划把终端输出限制为短预览，并把每个最终目标写入显式 JSON 文件；确实可能需要依赖解析时，`.venv` 会被标成条件性、边界明确的 runtime tree，并写清 owner/cleanup 合同，不展开其平台相关内部依赖文件。除指定 JSON 文件外，它不会写 workspace、HOME、runtime 或 Python bytecode cache。计划文件应放在目标 workspace 与 HOME 之外：
+它适合修复缺失、损坏或不完整的产品文件，重新运行五 skill smoke，并保留所有研究 Markdown、hidden proof、Obsidian 配置和 workspace-local runtime。
+
+## Uninstall
 
 ```bash
-bash install.sh --agent-plan-json /tmp/workspace-oss-plan.json --claude --project /path/to/workspace --yes
+bash install.sh uninstall --project /path/to/workspace --yes
 ```
 
-schema 3 JSON 中的 `targets` 是完整、按执行顺序排列的精确清单，并为所有 copy/write/managed-block 目标保存来源内容 digest、为每个目标保存 `absent | regular | symlink | directory` 前置状态；`source.distributable_tree` 绑定受管 payload、安装器输入的相对路径、类型、mode、字节（或 symlink target）与总 digest；`conflicts` 列出会被保留或跳过的冲突；`conditional_runtime_changes` 单独暴露条件性运行环境树。若该数组为空且操作仍需 Python，`runtime_precondition` 会绑定实际选中的 canonical 解释器、完整文件 identity、core import probe 及选择来源；apply 在任何 workspace/HOME/runtime 写入前按同一选择规则重跑纯读 preflight，并要求当前选择与计划完全一致。PATH 不再包含原 current/later entry、解释器或显式 override 漂移都会要求自动重做计划，不能靠只对本次 apply 有效的绝对路径制造“安装成功、下次立即失败”。尚未机器绑定完整 invocation chain 的 ready managed venv 会保守保留条件性 runtime tree，但稳定 apply 不会因此改写已有 venv。`apply_contract` 携带计划路径、semantic plan digest、source tree digest、source commit 与无交互应用参数，并以 `COMPUTE_AFTER_REVIEW` 明示最终文件 byte SHA 必须在审阅后由 Agent 外部计算。该 byte SHA 不写回同一 JSON，避免伪造不可能成立的自引用文件哈希。Agent 必须核对这些字段、自动填入最终 byte SHA 后再执行应用合同，不能把计划模式换成网络下载或隐藏脚本执行；计划路径任一 leaf/ancestor symlink、非普通文件或超出有界大小都会在解析前被拒绝。
+Uninstall 只删除 manifest 中仍与安装记录 byte/type 相符的受管文件和 managed pointer block。已修改、retyped、symlinked 或不明 ownership 的目标会保留并告警。Research data、`.research/`、`.source/`、`.obsidian/` 和 `.venv/` 保留。
 
-同时配置 Claude 和 Codex：
+Retired CLI shortcuts 不属于 v2 installer 管理范围；uninstall 不猜测或删除任意 `bin/`、`~/.local/bin/` 用户文件。
 
-```bash
-bash install.sh --all --project /path/to/workspace
-```
+## System scope
 
-已有外部 project copy 安装可以显式选择更新、重装或卸载：
+System scope 只适合维护者为当前用户配置共享 skill integration。它仍只暴露五个 discoverable skill，并优先使用 symlink 到可信 checkout。Codex 的系统级 skill discovery 能力可能因宿主版本而不同，因此普通使用推荐 project scope。
 
-```bash
-bash install.sh update --project /path/to/workspace
-bash install.sh reinstall --project /path/to/workspace
-bash install.sh uninstall --project /path/to/workspace
-```
+System uninstall 只移除目标仍匹配本安装 source 的 managed symlink；foreign link、普通文件和不明 target 保留。
 
-可选把 `kb` 放到 PATH：
+## Legacy layout
 
-```bash
-bash install.sh --claude --project /path/to/workspace --kb-on-path
-```
+发现 legacy canonical layout 时，install/update/reinstall 不进行数据迁移。不要通过手工移动目录、修改 manifest 或关闭 preflight 绕过。
 
-选择创建终端快捷命令时，project scope 会写 `<workspace>/bin/kb`。安装完成时，如果快捷入口已经在当前 `PATH` 中，完成页会提示可直接运行 `kb help` 和 `kb init`；如果不在，完成页会提示把上方显示的目录加入 `PATH`，重新打开终端后运行 `kb help`。安装器只创建快捷入口，不会修改任何 shell 配置。AI 对话中的 `kb <verb>` 不受终端 `PATH` 影响。
+当前 v2 release 不提供兼容或 migration contract。需要导入旧资料时，应先建立独立设计、原子 Issue、显式 selection boundary、exact backup、dry-run plan、current-message authorization、rollback 和 clean-vault acceptance。
 
-## 管理员参考：Project Scope Copy
+## 验收建议
 
-Project scope 面向单个 workspace。推荐始终显式传入 workspace 根目录：
+对临时空 workspace 执行：
 
-```bash
-bash install.sh --all --project /path/to/workspace
-```
+1. project install；
+2. 检查 manifest 只含五 skill release surface；
+3. 用 installed `research-vault` 初始化；
+4. 确认 `Home.md`、可见目录和 `.research/` 分类；
+5. 重复 init 不覆盖 Preferences 或其他 user Markdown；
+6. rebuild index 不读取 `AGENTS.md` 为研究页面，不改 semantic pages；
+7. update/reinstall/uninstall 生命周期测试；
+8. 确认无真实用户 workspace、legacy data 或 `.obsidian/` 修改。
 
-### 仓库内开发模式
-
-如果你在 bundle 源仓库内开发，安装器不会 copy，也不会写 manifest。这个模式用于维护 bundle，不是面向普通 workspace 的推荐安装路径。Claude 使用：
-
-```text
-.claude/skills -> ../skills
-CLAUDE.md      # managed block 内使用 @AGENTS.md
-```
-
-Codex 直接读取仓库已有的 `AGENTS.md`（开发者工作流；`CLAUDE.md` 为其软链）。顶层 `skills/` 是普通产品源码，不会作为 workspace skill 自动发现；根 `/.agents/` 只保留维护者明确安装的本地自用工具，安装器也不会把它打包。
-
-### 推荐：外部 workspace copy
-
-如果 workspace 不是本仓库，安装器会先创建自包含拷贝：
-
-```text
-<workspace>/.agents/                      # 真实目录，整棵拷贝
-<workspace>/.agents/.install-manifest.json
-<workspace>/AGENTS.md                     # 保留用户原文，只维护本 bundle 的 marker 区块
-<workspace>/.claude/skills -> ../.agents/skills
-<workspace>/CLAUDE.md                     # managed block 内使用 @AGENTS.md
-```
-
-`AGENTS.md` 与普通文件形式的 `CLAUDE.md` 都只更新以下标记之间的内容，不会覆盖用户文件的其他部分：
-
-```text
-# >>> workspace-oss managed >>>
-# <<< workspace-oss managed <<<
-```
-
-### 从旧源码布局升级
-
-现有外部 workspace 的安装目标仍是 `.agents/**`。若旧版本的 `kb update` 因为无法识别新的 `skills/`、`runtime/` 源码布局而不能自助跨越这次源码结构迁移，请让 Agent 检出最新源码并对同一 workspace 执行一次 `reinstall`；安装器会沿用既有 manifest、原子替换受管文件，并逐字保留 legacy `kb/`。这只桥接产品源码/安装布局，不迁移数据布局；workspace-root runtime 会对未迁移 legacy workspace fail closed，不能把 reinstall 当 migration。
-
-如果目标 workspace 已有普通 `AGENTS.md` 且没有异常 marker，安装器会保留块外原文并加入本 bundle 区块；update/reinstall 也只维护该区块。`AGENTS.md` 是 symlink、非普通文件、marker 结构异常，或已有受管区块发生未授权漂移时会 fail closed，不跟随链接、不替换整文件。
-
-managed block 只含 `.agents/WORKSPACE_RULES.md` 的稳定加载指针。该规则文件必须是 `.agents` 真实目录中的普通、有界、身份稳定文件；缺失、空文件、symlink、FIFO/special node 或读取期间被替换时，runtime 在任何 journal/business write 前停止。此时只有只读 `kb help` 与 `kb doctor` 可用；请通过可信源码重新执行 install/update/reinstall 修复安装，不要手工复制旧规则全文到根文件来绕过门禁。
-
-每个 owner 的 `SKILL.md` 是短入口，operation-specific schema、恢复、私有 command catalog 与 variant workflow 位于入口直接链接的一跳 references。安装器按 manifest 一并分发这些受跟踪 reference；runtime 只加载当前 route 需要的文件，不再 eager 加载一份全局机制指南。
-
-`.install-manifest.json` 记录源仓、源 commit、安装时间、每个受管文件的 sha256，以及 `AGENTS.md` 的受管状态。它用于后续 update/uninstall 的精确同步和删除。
-
-外部 workspace 可以是独立 Git 仓；如果不想把安装产物纳入业务仓库，建议忽略：
-
-```gitignore
-.agents/
-AGENTS.md
-.claude/
-bin/kb
-```
-
-## 管理员参考：更新（update）
-
-外部 copy workspace 用显式 update 子命令：
-
-```bash
-bash install.sh update --project /path/to/workspace
-```
-
-`update` 只适用于外部 project copy 安装；bundle 源仓库内的开发模式请用版本控制更新。
-
-clean-sync 安全合同：
-
-- 只枚举和写入 `DIR/.agents` 子树与单个 `DIR/AGENTS.md`。
-- 永不把 canonical root entries、legacy `DIR/kb` 或 `DIR/.venv` 纳入安装 managed set；不通过 workspace-wide 扫描推导数据 targets。
-- 排除 `__pycache__/`、`*.pyc`、`*.pyo`、`.venv/`、`.DS_Store` 和 manifest 本身。
-- 删除只针对 manifest 里记录过、source 已不再提供、且仍在 `.agents` 下的文件；用户新增到 `.agents` 的文件会保留。
-- 每个删除目标在 unlink 前都会重新校验仍落在 `DIR/.agents` 内；不使用 `rm -rf` 或 `rsync --delete`。
-
-update 会打印 old commit -> new commit 和 added/changed/removed 差异。若发现 manifest 记录的 `.agents` 文件被本地改过，会阻断并退出；确认要覆盖托管漂移时再加：
-
-```bash
-bash install.sh update --project /path/to/workspace --force
-```
-
-`--force` 只绕过漂移门，不扩大删除范围，也不会触碰 canonical root data、legacy `kb/` 或 `.venv/`。源不变时重复 update 是 no-op，manifest 字节不变。
-
-也可以 dry-run：
-
-```bash
-bash install.sh update --project /path/to/workspace --dry-run
-```
-
-dry-run 打印真实差异、漂移和计划动作，但零写入。
-
-## 管理员参考：重装或修复（reinstall）
-
-外部 copy workspace 的受管文件缺失、损坏，或需要完整重新铺设时使用：
-
-```bash
-bash install.sh reinstall --project /path/to/workspace
-```
-
-`update` 与 `reinstall` 的区别是：
-
-- `update` 只同步源版本带来的 added/changed/removed 差异；若受管文件存在本地漂移，会默认阻断，适合日常升级。
-- `reinstall` 根据当前源重新铺设完整的受管文件集，并重新运行安装检查，适合恢复缺失、损坏或已漂移的受管文件；它不会删除 canonical root data、legacy `kb/`、`.venv/` 或受管范围外的用户文件，也不会迁移 data layout。
-
-两者都不会由重复 `install` 静默触发。若源中新出现的受管路径与用户本地文件冲突，重装会停止；只有明确接受覆盖该冲突时才使用 `--force`。
-
-## 管理员参考：卸载（uninstall）
-
-外部 copy workspace 用显式 uninstall 子命令：
-
-```bash
-bash install.sh uninstall --project /path/to/workspace
-```
-
-copy 安装的卸载会执行以下操作：
-
-- 对 manifest 记录的 `.agents/**` 受管文件，只有目标仍是普通文件且 sha256 与安装记录一致时才删除。内容已修改、类型已变化或已被替换成 symlink 的目标会保留并告警；安装器不会跟随 symlink。
-- 清理由这些受管 Python 模块运行生成的标准 `__pycache__/*.pyc`；只按 manifest 中的模块名匹配，无关 cache 和异常类型仍保留。
-- 对 workspace 根 `AGENTS.md`，受管区块 digest 未变化时只移除该区块，区块外的用户文本保留；digest 已变化时整份文件保留并告警。
-- 移除属于本安装器的 `.claude/skills` symlink 和 `CLAUDE.md` managed block。
-- 删除安装 manifest。因漂移而保留的文件从此成为用户自管文件；如果 `.agents/` 仍非空，目录也会保留。
-- 尝试清理终端 `kb` 快捷 symlink：project scope 对应 `<workspace>/bin/kb`，system scope 对应 `~/.local/bin/kb`。project、system 和旧版兼容卸载都会执行这一步；只有链接目标仍指向本安装时才删除，普通文件或指向其他目标的链接会保留并告警。
-
-canonical root data、legacy `DIR/kb`、`DIR/.venv` 和未写入 manifest 的用户文件永远保留。卸载后 workspace 只是变为 unmanaged，研究数据不受影响。
-
-旧版外部 symlink 安装仍可用兼容卸载：
-
-```bash
-bash install.sh --all --project /path/to/workspace --uninstall
-```
-
-如果目标有真实 `.agents` 但没有本安装器 manifest，安装器会拒绝删除 `.agents`，但仍会清理明确属于 workspace-oss 的 Claude managed block 和匹配的 symlink。
-
-旧版 system/symlink 安装只保留兼容卸载能力。卸载时不需要额外记得安装时是否选择过快捷命令，安装器都会安全尝试清理目标匹配的快捷 symlink。新 workspace 请使用 project-scope copy 安装，避免跨 workspace 共享路径和源仓依赖。
-
-## 管理员参考：环境变量
-
-| 变量 | 用途 |
-|---|---|
-| `RESEARCH_PYTHON` | 可选覆盖解释器；默认使用自动受管 `.venv`。 |
-| `RESEARCH_NO_MANAGED_VENV` | 设为 `1` 时关闭自动 venv，改用当前解释器，需自备 PyYAML。 |
-| `RESEARCH_VENV` | 覆盖受管 venv 路径。 |
-| `RESEARCH_SKILLS_HOME` | 仅 legacy system/symlink 模式需要；推荐的 project copy workspace 不需要。 |
-| `RESEARCH_PROJECT_ROOT` | 指向当前 KB workspace；等价于给脚本传 `--root <workspace>`。 |
-
-## 普通用户：首次运行 KB
-
-安装完成后，打开已配置的 Claude Code 或 Codex，在对话中输入：
-
-```text
-kb init
-```
-
-初始化完成后，可以继续输入：
-
-```text
-kb status
-```
-
-`kb init` 会先创建可立即使用的知识库布局，再由 AI 询问要“现在设置”还是“先跳过”。快速设置集中询问真实署名、语言与术语风格、研究方向、资源与重要约束，并展示版本记录、链接自动化档位和讨论风格的默认值。资源会保存到下游研究流程可直接读取的画像，约束会追加去重并保留已有项。跳过不产生额外偏好写入，后续说“补充我的研究偏好”即可继续；真实署名只会在第一次确认研究判断前再次要求。是否创建终端快捷命令不影响这条对话式主路径。
-
-从这里开始，普通用户的完整产品表面就是自然语言和 16 个 `kb <verb>` 伪 CLI。Agent 负责私下选择 owner、参数、解释器与内部路径；用户不需要回到本页复制管理员命令。
+开发仓库的完整门见根 [AGENTS.md](../AGENTS.md) 和 [CONTRIBUTING.md](../CONTRIBUTING.md)。

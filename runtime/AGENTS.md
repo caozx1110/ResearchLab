@@ -1,1 +1,1 @@
-Before any knowledge-base operation, load `.agents/WORKSPACE_RULES.md`. If it is missing or unreadable, do not write to the workspace; only use the read-only `kb help` or `kb doctor` rescue path until the installation is repaired.
+Before any Research Vault operation, load `.agents/WORKSPACE_RULES.md`. If it is missing or unreadable, do not write to the workspace; explain that the installation must be repaired.

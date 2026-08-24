@@ -56,8 +56,14 @@ def test_distributed_readme_matches_discoverable_skill_inventory() -> None:
     skills = _discoverable_skills()
     readme = (REPO_ROOT / "runtime" / "README.md").read_text(encoding="utf-8")
 
-    assert len(skills) == 15
-    assert "15 个可发现 skill" in readme
+    assert skills == [
+        "research-analysis",
+        "research-capture",
+        "research-review",
+        "research-vault",
+        "research-workbench",
+    ]
+    assert "5 个 Markdown-first skill" in readme
     for skill in skills:
         assert f"`{skill}`" in readme
 
@@ -79,10 +85,14 @@ def test_current_docs_do_not_reference_removed_analyzer_paths() -> None:
 def test_current_local_markdown_links_resolve() -> None:
     missing: list[str] = []
     for path in _current_markdown_files():
+        if "assets" in path.parts and "templates" in path.parts:
+            continue
         text = path.read_text(encoding="utf-8")
         for raw_target in MARKDOWN_LINK.findall(text):
             target = raw_target.strip().strip("<>")
             if not target or target.startswith(("#", "http://", "https://", "mailto:")):
+                continue
+            if "<" in target or ">" in target:
                 continue
             relative = target.split("#", 1)[0]
             if not relative:

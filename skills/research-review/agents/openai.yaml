@@ -1,4 +1,5 @@
 interface:
   display_name: Research Review
   short_description: Audit evidence and apply human review decisions safely
-  default_prompt: Use $research-review to audit a Markdown claim and its exact evidence, prepare a review packet, or apply an explicitly authorized human decision with a digest-bound receipt.
+  default_prompt: Use $research-review to audit a Markdown claim and its exact evidence, prepare a review packet, or apply
+    an explicitly authorized human decision with a digest-bound receipt.

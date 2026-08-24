@@ -334,22 +334,36 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     assert "evidence" not in root_agents.lower()
     assert not (workspace / ".agents" / "README.md").exists()
     assert ".agents/README.md" not in installed
-    assert (workspace / ".agents" / "skills" / "kb-cli" / "SKILL.md").is_file()
-    assert (workspace / ".agents" / "skills" / "research-monitor" / "SKILL.md").is_file()
-    assert (workspace / ".agents" / "lib" / "research" / "common.py").is_file()
-    for kind in ("paper", "repo", "dataset", "blog"):
-        canonical = f".agents/skills/unit-analyst/scripts/{kind}.py"
-        assert canonical in installed
-        assert (workspace / canonical).is_file()
-    for kind, owner in {
-        "paper": "paper-analyst",
-        "repo": "repo-analyst",
-        "dataset": "dataset-analyst",
-        "blog": "blog-analyst",
-    }.items():
-        legacy_path = f".agents/skills/{owner}/scripts/{kind}.py"
-        assert legacy_path not in installed
-        assert not (workspace / ".agents" / "skills" / owner).exists()
+    shipping = {
+        "research-analysis",
+        "research-capture",
+        "research-review",
+        "research-vault",
+        "research-workbench",
+    }
+    discovered = {
+        path.parent.name
+        for path in (workspace / ".agents" / "skills").glob("*/SKILL.md")
+    }
+    assert discovered == shipping
+    runtime_files = {
+        path.name
+        for path in (workspace / ".agents" / "lib" / "research").iterdir()
+        if path.is_file()
+    }
+    assert runtime_files == {
+        "__init__.py",
+        "legacy_detector.py",
+        "updater.py",
+        "v2_bootstrap.py",
+    }
+    assert all(
+        len(Path(relative).parts) < 4
+        or Path(relative).parts[2] in shipping
+        or relative == ".agents/skills/metadata.yaml"
+        for relative in installed
+        if relative.startswith(".agents/skills/")
+    )
     assert not (workspace / ".agents" / "lib" / "research" / "tests").exists()
     assert not (workspace / ".agents" / "skills" / "skill-evolution-advisor" / "scripts" / "eval_research_value.py").exists()
     assert not (workspace / "dev-docs").exists()
@@ -362,6 +376,35 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
     duplicate = _run_installer(workspace, "install", "--codex")
     assert duplicate.returncode == 1
     assert "更新”或“重装" in duplicate.stderr
+
+
+@pytest.mark.parametrize(
+    ("relative", "content"),
+    [
+        ("kb/sentinel.txt", "legacy kb\n"),
+        ("record.yaml", "schema: legacy\n"),
+        ("config/workspace-layout.yaml", "schema: research-workspace-layout/v1\n"),
+        ("obsidian/managed/sentinel.md", "legacy projection\n"),
+    ],
+)
+def test_install_detects_legacy_layout_without_touching_it(
+    tmp_path: Path,
+    relative: str,
+    content: str,
+) -> None:
+    workspace = tmp_path / "legacy-workspace"
+    target = workspace / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(content, encoding="utf-8")
+    before = target.read_bytes()
+
+    result = _run_installer(workspace, "install", "--codex")
+
+    assert result.returncode != 0
+    assert "本版本不提供旧格式迁移" in result.stderr
+    assert target.read_bytes() == before
+    assert not (workspace / ".agents").exists()
+    assert not (workspace / "AGENTS.md").exists()
 
 
 @pytest.mark.parametrize("action", ["update", "reinstall"])
@@ -434,94 +477,48 @@ def test_root_rule_bytes_outside_managed_block_survive_full_lifecycle(
     assert agents_path.read_bytes().startswith(original)
 
 
-def test_update_removes_legacy_analyzer_resource_directories(
-    tmp_path: Path,
-) -> None:
-    ws_sync = _load_ws_sync()
-    old_source = tmp_path / "old-source"
-    old_runtime = old_source / "runtime"
-    old_skills = old_source / "skills"
-    old_runtime.mkdir(parents=True)
-    old_skills.mkdir()
-    for relative_path in (
-        "runtime/AGENTS.md",
-        "runtime/WORKSPACE_RULES.md",
-        "runtime/VERSION",
-        "LICENSE",
-    ):
-        source = _project_root() / relative_path
-        destination = old_source / relative_path
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-
-    owners = {
-        "paper": "paper-analyst",
-        "repo": "repo-analyst",
-        "dataset": "dataset-analyst",
-        "blog": "blog-analyst",
-    }
-    for kind, owner in owners.items():
-        destination = old_skills / owner / "scripts" / f"{kind}.py"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(
-            _project_root() / "skills" / "unit-analyst" / "scripts" / f"{kind}.py",
-            destination,
-        )
-
-    workspace = tmp_path / "workspace-from-old-layout"
+def test_update_removes_manifest_owned_legacy_skill_directories(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-from-old-inventory"
     workspace.mkdir()
-    install_args = SimpleNamespace(
-        repo=str(_project_root()),
-        dir=str(workspace),
-        source=str(old_source),
-        agents="codex",
-        operation_time="2026-07-28T00:00:00Z",
-        expected_manifest_state="",
-        source_commit="pre-consolidation",
-        source_origin="local",
-        source_checkout=str(old_source),
-        source_branch="",
-        source_strategy="local-checkout",
-        force=False,
-        dry_run=False,
-        allow_snapshot_source=True,
-    )
-    assert ws_sync.install(install_args) == 0
-    old_manifest = json.loads(
-        (workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8")
-    )
-    assert not any("unit-analyst/scripts" in relative for relative in old_manifest["files"])
-    for kind, owner in owners.items():
-        assert f".agents/skills/{owner}/scripts/{kind}.py" in old_manifest["files"]
+    installed = _run_installer(workspace, "install", "--codex")
+    assert installed.returncode == 0, installed.stdout + installed.stderr
 
-    update_args = SimpleNamespace(
-        repo=str(_project_root()),
-        dir=str(workspace),
-        source="",
-        source_commit="post-consolidation",
-        source_origin="local",
-        source_checkout=str(_project_root()),
-        source_branch="",
-        source_strategy="local-checkout",
-        operation_time="2026-07-28T00:01:00Z",
-        force=False,
-        dry_run=False,
-        allow_snapshot_source=False,
-        expected_manifest_state="",
-    )
-    assert ws_sync.update(update_args) == 0
+    manifest_path = workspace / ".agents" / ".install-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    legacy_names = {
+        "discussion-archivist",
+        "experiment-workbench",
+        "idea-workbench",
+        "kb-cli",
+        "knowledge-base-manager",
+        "literature-search",
+        "literature-synthesizer",
+        "method-designer",
+        "report-author",
+        "research-config-manager",
+        "research-monitor",
+        "research-orchestrator",
+        "skill-evolution-advisor",
+        "source-intake",
+        "unit-analyst",
+    }
+    for name in legacy_names:
+        relative = f".agents/skills/{name}/legacy.txt"
+        content = f"legacy {name}\n".encode()
+        path = workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        manifest["files"][relative] = hashlib.sha256(content).hexdigest()
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
 
-    updated_manifest = json.loads(
-        (workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8")
+    updated = _run_installer(workspace, "update")
+    assert updated.returncode == 0, updated.stdout + updated.stderr
+    current = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert not any(
+        relative.startswith(tuple(f".agents/skills/{name}/" for name in legacy_names))
+        for relative in current["files"]
     )
-    for kind, owner in owners.items():
-        canonical = f".agents/skills/unit-analyst/scripts/{kind}.py"
-        legacy_path = f".agents/skills/{owner}/scripts/{kind}.py"
-        assert canonical in updated_manifest["files"]
-        assert legacy_path not in updated_manifest["files"]
-        source_canonical = _project_root() / "skills" / "unit-analyst" / "scripts" / f"{kind}.py"
-        assert (workspace / canonical).read_bytes() == source_canonical.read_bytes()
-        assert not (workspace / ".agents" / "skills" / owner).exists()
+    assert all(not (workspace / ".agents" / "skills" / name).exists() for name in legacy_names)
 
 
 def test_fresh_install_rejects_unverified_existing_managed_block(tmp_path: Path) -> None:
@@ -703,7 +700,7 @@ def test_clean_uninstall_removes_all_managed_files(tmp_path: Path) -> None:
     manifest = json.loads((workspace / ".agents" / ".install-manifest.json").read_text(encoding="utf-8"))
     cache_dir = workspace / ".agents" / "lib" / "research" / "__pycache__"
     cache_dir.mkdir(exist_ok=True)
-    core_source = workspace / ".agents" / "lib" / "research" / "core.py"
+    core_source = workspace / ".agents" / "lib" / "research" / "v2_bootstrap.py"
     core_cache = cache_dir / Path(importlib.util.cache_from_source(str(core_source))).name
     core_cache.write_bytes(b"generated bytecode\n")
 
@@ -738,7 +735,7 @@ def test_uninstall_preserves_drifted_and_retyped_managed_paths(tmp_path: Path) -
 
     cache_dir = workspace / ".agents" / "lib" / "research" / "__pycache__"
     cache_dir.mkdir(exist_ok=True)
-    core_source = workspace / ".agents" / "lib" / "research" / "core.py"
+    core_source = workspace / ".agents" / "lib" / "research" / "v2_bootstrap.py"
     managed_cache = cache_dir / Path(importlib.util.cache_from_source(str(core_source))).name
     managed_cache.write_bytes(b"generated bytecode\n")
     user_cache = cache_dir / "user_extension.cpython-test.pyc"
@@ -840,7 +837,7 @@ def test_uninstall_preserves_nonstandard_same_prefix_bytecode_name(tmp_path: Pat
     install = _run_installer(workspace, "install", "--codex")
     assert install.returncode == 0, install.stdout + install.stderr
 
-    core_source = workspace / ".agents" / "lib" / "research" / "core.py"
+    core_source = workspace / ".agents" / "lib" / "research" / "v2_bootstrap.py"
     cache_dir = core_source.parent / "__pycache__"
     cache_dir.mkdir(exist_ok=True)
     standard_cache = cache_dir / Path(importlib.util.cache_from_source(str(core_source))).name
@@ -862,20 +859,20 @@ def test_uninstall_removes_cross_abi_cpython_caches_but_preserves_changed_types(
     install = _run_installer(workspace, "install", "--codex")
     assert install.returncode == 0, install.stdout + install.stderr
 
-    core_source = workspace / ".agents" / "lib" / "research" / "core.py"
+    core_source = workspace / ".agents" / "lib" / "research" / "v2_bootstrap.py"
     cache_dir = core_source.parent / "__pycache__"
     cache_dir.mkdir(exist_ok=True)
-    other_abi = cache_dir / "core.cpython-999.pyc"
+    other_abi = cache_dir / "v2_bootstrap.cpython-999.pyc"
     other_abi.write_bytes(b"other abi\n")
-    other_abi_optimized = cache_dir / "core.cpython-999.opt-1.pyc"
+    other_abi_optimized = cache_dir / "v2_bootstrap.cpython-999.opt-1.pyc"
     other_abi_optimized.write_bytes(b"other abi optimized\n")
-    user_cache = cache_dir / "core.user-owned.pyc"
+    user_cache = cache_dir / "v2_bootstrap.user-owned.pyc"
     user_cache.write_bytes(b"user cache\n")
     external = tmp_path / "external-cache"
     external.write_bytes(b"external\n")
-    linked_cache = cache_dir / "core.cpython-998.pyc"
+    linked_cache = cache_dir / "v2_bootstrap.cpython-998.pyc"
     linked_cache.symlink_to(external)
-    retyped_cache = cache_dir / "core.cpython-997.opt-2.pyc"
+    retyped_cache = cache_dir / "v2_bootstrap.cpython-997.opt-2.pyc"
     retyped_cache.mkdir()
 
     uninstall = _run_installer(workspace, "uninstall")

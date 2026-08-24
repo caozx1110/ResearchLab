@@ -4,8 +4,18 @@ All notable changes to this project will be documented here. The format follows 
 
 ## [Unreleased]
 
+Current candidate: `0.2.0-rc.8` (unpublished and not a stable release; no Git tag or GitHub Release has been created).
+
 ### Changed
 
+- Replaced the 15-skill v1 product with five Markdown-first shipping owners: `research-vault`, `research-capture`, `research-analysis`, `research-workbench`, and `research-review`. Ordinary visible Markdown is now the sole human semantic truth; `.source/` and `.research/` contain only source proof, evidence bindings, receipts, derived indexes, cache, journals, logs, locks, experiment artifacts, and recovery state.
+- Obsidian now opens the workspace root with `Home.md` as the primary entry. Standard relative Markdown links are the portable core; `.obsidian/` is user-owned and Views/Bases remain optional rebuildable navigation.
+- Retired the v1 canonical record model, managed Obsidian projection, executable CLI skill, terminal shortcut, old owner aliases, and dual-read/dual-write compatibility surface. Legacy workspaces are detected and left untouched; this release does not migrate or delete them.
+- Source capture now saves exact bytes before conversion and exposes independent stage/health. Defuddle, Obsidian tools, PDF/repository adapters, and AnyDoc remain optional external interfaces and are not copied or counted in the shipping inventory.
+- Analysis, workbench, and review now keep claims, exact evidence, projects, experiments, decisions, review packets, and reports in visible Markdown. Independent current-message authorization and digest-bound receipts prevent AI self-signing and become stale when claim/evidence semantics change.
+- Installer discovery, metadata, exact-plan schema, read-only smoke, generated interfaces, preference registry, validator, documentation, and release tests now agree on exactly five skills. The installer no longer accepts or creates a terminal research shortcut.
+- Installed runtime delivery now uses an explicit four-file v2 allowlist (`v2_bootstrap`, `legacy_detector`, `updater`, and the package marker) and a PyYAML-only runtime lock. Retained v1 schema, migration, CLI, record, projection, PDF, and HTML helpers remain source-level history or regression material and are not installed; Defuddle, AnyDoc, PDF, and other converters manage their own optional dependencies outside the bundle.
+- Remaining older entries in this Unreleased section describe pre-cutover v1 source work and are superseded for shipping behavior by the v2 hard-cutover entries above.
 - Product sources now live in top-level `skills/` and `runtime/`, while repository-local `/.agents/` is ignored and reserved for maintainers' own tools. The installer preserves the external `.agents/**` layout through an explicit source-to-installed mapping, and local tools no longer affect product inventory, validation, rule budgets, release digests, or manifests.
 - Development collaboration is now GitHub-remote-complete: tracked design/ADR/schema contracts, Epic and Atomic Issues, pushed checkpoints, consolidated PRs, Actions evidence, and human review form the complete handoff chain. Ordinary changes use a lightweight path; frozen ownership, takeover approval, exact dependency binding, and release controls are added only when the risk requires them. Local workspaces, one-off prompts, tool memory, chats, stashes, and unpushed state are no longer workflow inputs or evidence.
 - Source comments and analyzer scaffold/note explanations no longer cite retired private design section numbers; current contracts are self-contained or point to tracked `docs/DESIGN.md` and `SCHEMAS.md` anchors, without changing the evidence or confirmation semantics.

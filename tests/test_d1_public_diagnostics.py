@@ -500,19 +500,16 @@ def test_d1_keeps_exactly_sixteen_public_verbs() -> None:
     assert "lint" not in subparsers.choices
 
 
-def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
+def test_d1_legacy_diagnostics_are_not_a_shipping_skill_after_v2_cutover() -> None:
     root = _project_root()
-    workspace_rules = (root / "runtime" / "WORKSPACE_RULES.md").read_text(encoding="utf-8")
-    diagnostic_contract = (
-        root / "skills" / "skill-evolution-advisor" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    readme = (root / "README.md").read_text(encoding="utf-8")
-    guide = (root / "docs" / "USER_GUIDE.md").read_text(encoding="utf-8")
-    design = (root / "docs" / "DESIGN.md").read_text(encoding="utf-8")
-    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    schema = (root / "runtime" / "lib" / "research" / "SCHEMAS.md").read_text(
-        encoding="utf-8"
-    )
+    assert not (root / "skills" / "skill-evolution-advisor" / "SKILL.md").exists()
+    metadata = (root / "skills" / "metadata.yaml").read_text(encoding="utf-8")
+    assert "skill-evolution-advisor:" not in metadata
+
+    runtime_readme = (root / "runtime" / "README.md").read_text(encoding="utf-8")
+    assert "5 个 Markdown-first skill" in runtime_readme
+    assert "non-discoverable internal material" in runtime_readme
+
     decision = (
         root
         / "docs"
@@ -521,31 +518,3 @@ def test_d1_agent_rules_and_docs_keep_optional_diagnostics_honest() -> None:
     ).read_text(encoding="utf-8")
     assert "- Status: Accepted" in decision
     assert "- Status: Proposed" not in decision
-
-    for mode in ("off", "errors-only", "developer"):
-        assert mode in diagnostic_contract
-        assert mode in guide
-        assert mode in design
-    for phrase in (
-        "开启开发者诊断",
-        "仅在出错时记录",
-        "关闭 unit-analyst 诊断",
-        "检查知识库健康",
-    ):
-        assert phrase in guide
-    assert "diagnostics" in workspace_rules
-    assert "excluded from export" in diagnostic_contract
-    assert "local-only" in readme
-    assert "后台 telemetry" in guide
-    assert "不增加 `lint` 或 `diagnostics` 入口" in guide
-    assert "不存在新的 `kb lint` 或 `kb diagnostics`" in design
-    assert "beta/scaffold" in readme
-    assert "beta/scaffold" in changelog
-    assert "do not auto-edit skills" in diagnostic_contract
-    assert "不能关闭 schema、evidence、confirmation" in guide
-    for document in (diagnostic_contract, guide, design, readme, changelog, schema, decision):
-        assert "local-detailed" in document
-        assert "redacted" in document
-    assert "diagnostics.detail_level" in schema
-    assert 'id="diagnostic-private-detail-yaml"' in schema
-    assert "run_diagnostic_retrospective" in schema

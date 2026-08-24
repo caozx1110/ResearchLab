@@ -7,9 +7,30 @@ import hashlib
 import json
 import re
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple, Union
+
+
+def _bootstrap_installed_runtime() -> None:
+    script = Path(__file__).resolve()
+    for ancestor in script.parents:
+        candidates = (ancestor / ".agents" / "lib", ancestor / "runtime" / "lib")
+        for library in candidates:
+            bootstrap = library / "research" / "v2_bootstrap.py"
+            if not bootstrap.is_file():
+                continue
+            sys.path.insert(0, str(library))
+            from research.v2_bootstrap import ensure_managed_runtime
+
+            ensure_managed_runtime(Path.cwd(), allow_provision=True)
+            return
+    raise SystemExit("Research Vault v2 runtime is missing; repair the installation.")
+
+
+if __name__ == "__main__":
+    _bootstrap_installed_runtime()
 
 import yaml
 

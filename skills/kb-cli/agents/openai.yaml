@@ -1,4 +1,0 @@
-interface:
-  display_name: kb CLI
-  short_description: 统一入口转发 core 研究系统的高频命令与查询请求
-  default_prompt: 使用 $kb-cli 运行 kb help/init/doctor/status/next/find/recall 等快捷命令，并把请求转发到对应 skill 脚本。

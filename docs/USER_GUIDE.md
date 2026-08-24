@@ -1,302 +1,193 @@
-# 用户指南
+# Research Vault v2 用户指南
 
-这套 workspace 帮你把论文、代码仓、技术文章、概念、想法、实验和汇报，从聊天里的临时内容变成可复用、可检索、可确认的本地知识。
+Research Vault 是一个由普通 Markdown 构成的研究工作区。你不需要先理解数据库、schema 或内部命令：直接用文件管理器、文本编辑器或 Obsidian 打开工作区根目录，从 `Home.md` 开始，并通过自然语言让 Agent 协助工作即可。
 
-它不是预装好的知识库。安装后，能力包与研究数据分开保存。AI 负责提取、整理、追踪和汇总；你负责判断、确认和拍板。
-
-能力包标识是 **`0.2.0-rc.7`**。这个标识表示 release candidate，不是 stable 或 GA；精确发布 revision 由对应 Git tag 标识，GitHub Release 是可选分发入口，不是发布成立的必要条件。[CHANGELOG.md](../CHANGELOG.md) 记录 durable candidate/release 验收摘要、兼容性与支持范围；活动交付的实时 gate、blocker、精确 candidate 和 evidence 以对应 GitHub Epic、Atomic Issue、PR 与 Actions 为准。安装和核心流程没有外部 API Key、付费检索额度、商业数据库或付费插件前置条件。
-
-## 能力成熟度（按组件）
-
-这里的等级只描述某个组件的当前边界，不代表整个 bundle 已稳定：
-
-- **stable**：所列基础设施合同已有确定性的发布测试；
-- **beta**：主流程真实可用，但仍依赖 Agent 判断或来源材料质量；
-- **scaffold**：持久化和治理骨架已存在，研究内容质量仍在加固；
-- **dev-only**：只作为本地开发能力，不承诺为正式用户入口。
-
-| Skill | 成熟度 | 当前边界 |
-|---|---|---|
-| `kb-cli` | stable | 十六个动词的路由、自然语言输出过滤和恢复入口；Obsidian 投影为 beta。 |
-| `knowledge-base-manager` | stable | 数据规范、证据、确认、精确恢复和索引治理；不负责理解研究材料。 |
-| `source-intake` | beta | 1–20 项整批原子入库、去重、原始材料留存、完整 Markdown 阅读层、人工笔记冻结和可重试失败。 |
-| `literature-search` | beta | Agent 使用当前可用检索能力做 provider-neutral 文献发现，持久保存查询、来源路径、初筛证据、覆盖、预算和停止依据；会先给你候选清单，只有你明确选中的文献才会入库。 |
-| `research-monitor` | beta | 保存定期关注目标、到期事实、冻结运行与有证据结果；不内置检索源、后台 daemon、定时器或插件。 |
-| `unit-analyst` | beta | 一个可发现 skill 统一持有并路由 paper、repo、dataset、blog 的 evidence-bound prepare/verify 实现；实质理解仍由 runtime Agent 完成，历史持久 owner identity 保持不变。 |
-| `research-config-manager` | beta | 总偏好只有一份；规则先限定每个能力可见的最小范围，Agent 再按当前任务选取真正相关的偏好并保存回执。 |
-| `discussion-archivist` | beta | 按结论保存讨论、证据和开放问题。 |
-| `research-orchestrator` | beta | 研究计划主线、完整 survey 路由、看板和事件流已存在；跨计划下一步由 Agent 比较全部事实候选，输入变化后自动要求重选。 |
-| `literature-synthesizer` | beta | 综述、分类、趋势、矛盾与空白会形成绑定上游版本的有证据持久产物；综合质量仍依赖 Agent 与来源覆盖。 |
-| `idea-workbench` | beta | 候选、evidence-first 评审、讨论和显式选择已实现；创新性判断仍需用户或专家拍板。 |
-| `method-designer` | beta | 基于仓库证据的方法交接和实验矩阵已实现；生成设计仍需专家复核。 |
-| `experiment-workbench` | beta | 强类型计划、带 fingerprint 的可重复运行记录、follow-up 和确认门控诊断已实现；诊断质量仍依赖 Agent。 |
-| `report-author` | beta | 报告、大纲、稳定引用库与七节论文初稿会消费版本绑定的 claim、evidence、citation 和 figure；成文质量与覆盖仍需复核。 |
-| `skill-evolution-advisor` | scaffold | 观察式偏好可在任务尾经统一确认后精确作用于同类任务；本地诊断问题可记录、复核，但不承诺自动修改 skill。 |
-
-某个组件的一次成功运行，只能说明对应流程的表现，不能外推到其他流程或整个 bundle。上面范围受限的 **stable** 组件，也不代表当前 release candidate 已成为稳定发布。
+当前能力包版本为 **`0.2.0-rc.8`**，属于尚未发布的 release candidate，不是 stable/GA。精确发布版本以 Git tag 为准，GitHub Release 可选；变化记录见 [CHANGELOG.md](../CHANGELOG.md)。
 
 ## 第一次使用
 
-最省事的方式是把 GitHub 仓库链接直接发给 Codex 或 Claude Code，并说：“把它安装到我当前 workspace；先检查现有文件，再使用仓库自带安装器；不要覆盖研究数据。” Agent 可以从仓库中的安装合同判断目标目录、冲突与验证步骤，不需要市场或插件。也可以按[安装指南](INSTALL.md)手工完成一次性安装。
-
-安装后在 Codex 或 Claude Code 的对话中输入：
+完成[安装](INSTALL.md)后，在 Agent 对话里说：
 
 ```text
-kb init
+帮我在当前工作区初始化 Research Vault，并说明下一步。
 ```
 
-初始化会先创建可立即使用的本地知识库骨架。缺少真实署名时，Agent 会询问是否花约 1 分钟“现在设置”（推荐），也可以回复“先跳过”；跳过不会写入占位偏好，之后仍可立即入库、检索和分析资料。想继续时直接说“补充我的研究偏好”或再次使用 `kb init` 即可。
+初始化只创建可见 Markdown 目录、`Home.md`、`Preferences.md`、派生导航目录和隐藏运行区域，不会摄入任何真实来源，也不会覆盖已有 Markdown。
 
-对全新 dedicated workspace，显式 `kb init` 会激活 workspace-root layout，把知识资料直接保存在当前 workspace，而不再额外创建旧版物理数据子目录。记录、证据与回执的持久身份保持不变，用户无需改写历史引用。已有旧版分层不会被 init、install、update 或 reinstall 自动移动；runtime 会先停止写入，并引导 Agent 使用[旧布局迁移指南](MIGRATE_KB_TO_WORKSPACE_ROOT.md)。迁移只适用于 detector 明确认定安全的独立 workspace，需要当前消息授权，并保留可验证的同盘恢复材料。
-
-根集成规则只保留一个稳定加载指针，Agent 会先加载最小工作区规则，再按当前任务选择 owner 和一跳流程合同，不会在每轮预读全部 schema、恢复与变体说明。若最小规则缺失或不安全，所有会改变 workspace 的动作都会在写入前停止；`kb help` 与 `kb doctor` 仍可只读运行，供 Agent 判断并修复安装。
-
-选择现在设置后，Agent 会在一个紧凑回合询问真实署名、语言与术语风格、研究方向、资源与重要约束，并显示版本记录节奏、链接自动化档位和讨论风格；你可以对默认项回复“默认即可”。资源会进入后续方法设计等流程可直接读取的资源画像，重要约束会追加去重并保留旧值。报告风格、协作边界和开发者诊断等低频项以后按需补充。真实署名只在第一次确认研究判断前强制，因此跳过不会让日常研究流程停住。
-
-一次性安装是普通用户唯一需要接触的技术 bootstrap；管理员也可以用自动化完成同一 bootstrap。安装完成后，日常使用只需要自然语言和下文十六个 `kb <verb>` 伪 CLI 快捷入口；内部 flags、scripts、环境变量和 paths 都由 Agent 私下处理，不是用户操作步骤。
-
-之后可以输入：
+初始化后的核心结构：
 
 ```text
-kb status
+Home.md
+Preferences.md
+Inbox/
+Sources/
+Notes/
+Projects/
+Decisions/
+Experiments/
+Reviews/
+Reports/
+Views/
+.research/
 ```
 
-或者直接说：
+如果根目录已有旧布局，Agent 会停止，不自动读取、搬移或删除其中的数据。v2 没有旧格式兼容或自动迁移流程。
+
+系统只发布五个 owner：`research-vault` 管文件与恢复，`research-capture` 管来源 revision 与 reader，`research-analysis` 管 claim/evidence 与 synthesis，`research-workbench` 管项目、实验、决定和报告，`research-review` 独立管 evidence audit、当前消息授权与 receipt。
+
+## 只需要记住一个原则
+
+你能直接看到的 Markdown 是语义真相。
+
+- 标题、摘要、claim、逐字 evidence、项目状态、实验结果、决定、review 和报告正文都必须在普通 Markdown 中。
+- `Sources/<source-id>/.source/` 保存 exact bytes、revision、source map 和转换 manifest。
+- `.research/` 保存 evidence binding、receipt、index、journal、lock、cache、log 和 recovery state。
+- 隐藏文件只能证明、索引、加速或恢复可见内容，不能补出可见页面中没有的结论，也不能反向覆盖你的编辑。
+
+你可以直接重命名或移动页面；稳定 ID 负责保持对象身份。Agent 在修改前会重新解析 ID、链接和当前 bytes，不依赖路径永远不变的假设。
+
+## 摄入来源
+
+直接把 URL 或本地文件交给 Agent：
 
 ```text
-请读取当前知识库，判断我现在最该做哪一步；安全步骤直接继续，需要我确认或选择时再停下来。
-```
-
-## 你与 AI 的边界
-
-AI 适合自动完成：
-
-1. 提取论文、仓库和文章的事实 metadata；
-2. 去重、建立索引和搜索本地知识单元；
-3. 从受保护的原始材料与派生证据填写带逐字证据的分析；
-4. 跟踪 program open question、实验 follow-up 和待确认判断；
-5. 生成导航、周报素材和可复开的 durable artifacts；
-6. 在中断后按 operation journal 恢复，或按精确路径建立 KB checkpoint。
-
-以下内容必须由你拍板：
-
-1. 是否接受 AI 的 inference、evaluation、novelty judgement 或 failure diagnosis；
-2. 推进哪个 idea、baseline 或 ablation；
-3. 实验结论是否成立；
-4. 研究阶段何时推进；
-5. 出现矛盾证据时采用哪种解释。
-
-确认不是一句可永久复用的授权。Agent 必须在真正写入时验证当前用户消息中的授权，并把它与当前内容和 evidence 绑定。内容或 evidence 改变后，旧确认自动失效；Agent 会先按最新材料重新核验，再把更新后的判断交给你确认，不会要求你处理内部状态或命令。AI 不能给自己签字。
-
-## 加入和理解资料
-
-你可以直接发链接或本地文件并说明目标：
-
-```text
-请把这篇论文入库，并按论文类型直接完成有证据的核心笔记。
+把这篇论文摄入当前 Research Vault。先保存原始文件，再生成可读 Markdown；如果页码定位不可靠要明确说明。
 ```
 
 ```text
-把这个 GitHub repo 变成知识单元，梳理能力边界、训练与推理入口，以及它能否复用。
+摄入这个代码仓，只读取源码，不安装依赖、不运行代码，并记录本次固定的 revision。
 ```
 
 ```text
-入库这篇技术文章，总结关键观点，并把可信度判断单独标出来让我确认。
+把这份 Word 文档转成 Markdown；原文件必须保留，转换失败也不能丢失来源。
 ```
 
-Agent 会连续完成安全步骤：轻量入库、保留原格式、生成完整 Markdown 阅读层与本地图片资产、准备填充结构、阅读派生证据、填写带 locator 的逐字引用、验证内容，以及可用时的安全刷新。脚本只搬运、转换、建结构和验证；对材料的理解由 Agent 完成。
+来源有两个互相独立的状态维度：
 
-论文 PDF、网页 HTML、已有 Markdown 与纯文本会在各自知识单元中获得 `source/document.md`。这是人和 AI 默认先读的完整版本，不受轻量 parse cache 的长度上限影响。HTML 还会生成安全的 `source/archive.html` 离线阅读页；`document.md` 顶部可打开离线页或未经改写的原始响应。arXiv/ar5iv 页面若存在 fatal、空壳或严重结构异常会自动换用 PDF，不能再以“能返回 HTML”为由伪装成功；你指定的 arXiv 版本号会原样保留。网页与 PDF 中成功提取的图片会保存到同一 source bundle 的本地 assets 并用相对链接引用，因此离线阅读和 Obsidian 引用不会依赖远程热链。已有 Markdown 的 front matter、跨行/块代码、标题和本地/Obsidian 图片引用会按语法上下文保留或本地化；其中非代码 raw HTML 会被转成被动内容，复杂 HTML 表格不会被强行压成失真的 pipe table，纯文本中的 Markdown 符号按字面显示。整套派生文件通过完整性检查后才发布；转换不完整时仍可回退到离线页、PDF、原始 HTML 或其他原格式。代码仓保持原始源码结构，不把每个代码文件改造成 Markdown。
+- stage：`captured`、`reader-ready`、`evidence-ready` 或 `analysis-ready`；
+- health：`ok`、`degraded`、`blocked` 或 `stale`。
 
-新生成的论文深读 `note.md` 会先展示论文类型，再依次展开研究问题、贡献、方法、评测、结果边界、局限与可靠性、可迁移洞见等七个共同维度，以及 method/system、benchmark 或 survey 对应的全部类型维度。每个维度保留 summary 和所有互相独立、有逐字证据的判断；确实不适用时会明确显示一次有证据的 N/A 理由，不会用空白冒充完成。逐字引文集中放到文末默认收起的证据区，每节都可跳到自己的完整证据；若 source map 能唯一定位，`page=N` 或 `section:<anchor>` 会直接打开 `source/document.md` 对应 block。映射缺失、过期或有歧义时只打开全文并保留原始 locator；Markdown 全文不可安全读取时不制造链接。证据不会因此省略，旧版笔记继续可读，也不会在普通刷新中被批量改写。
+“已有阅读页”不等于“证据定位可靠”。缺 OCR、转换不完整、source map 缺失或 adapter 不可用时，Agent 会保留 exact bytes 并报告 degraded/blocked，不用空壳冒充完成。
 
-当资料仍在等待 Agent 填写、等待验证，或处于可重试失败时，它不会进入你的确认收件箱。只有实质内容和 evidence 已过门的判断才会由 `kb review` 提请你决定。
+HTML 可选使用 Defuddle；Office、ODF、RTF、EPUB 等可选使用 AnyDoc；PDF 与 repository 也可通过外部 adapter 处理。它们都不是仓库内 shipping skill，也不是系统可用的前置条件。安装和核心流程不要求外部 API Key、付费搜索额度、商业数据库、付费插件或托管服务 prerequisite。
 
-当知识库里已有至少三个完成确认的材料时，你可以直接说“从这些材料提炼核心概念”。Agent 会先生成待填概念骨架，再写入带逐字出处的定义、scope 与逐项关联说明；机械校验通过后才把概念交给你确认。确认后的概念与论文、仓库等 unit 一样可被 `kb find` 检索，也会生成包含定义和关联清单的 Obsidian 页面。任一上游材料、证据或确认状态变化后，旧概念确认自动失效。
+## 分析与综合
 
-## 十六个 `kb` 伪 CLI 动词
-
-这是完整的公开快捷入口。你可以在对话里说，也可以在已安装快捷入口的终端里运行。两种方式的语义一致。
-
-| 你说或运行 | 用途 |
-|---|---|
-| `kb help` | 查看能力菜单和例子。 |
-| `kb init` | 初始化可立即使用的知识库，并可选择现在设置或稍后补充基础偏好。 |
-| `kb update` | 检查更新；只有你明确同意后才应用。 |
-| `kb obsidian update` / `kb obsidian status` | 生成或检查无需插件的 Obsidian 知识网络视图。 |
-| `kb add <链接或路径> […]` | 一次原子加入 1–20 项论文、代码仓、文章或本地文件；整批只问一次是否继续深读。 |
-| `kb ingest <链接或路径>` | 加入资料并准备有证据的深读流程。 |
-| `kb review` | 查看当前治理档允许的一批待判断项（strict 3 条；personal 默认 10 条）；可在对话里决定，也可导出 Obsidian 勾选表后整批确认。 |
-| `kb status` | 刷新并查看当前 KB 或研究计划状态。 |
-| `kb next` | 查看 Agent 已选择的下一步；若选择缺失或过期，Agent 会先比较全部候选再说明理由。 |
-| `kb find <关键词>` | 查找相关段落并返回知识单元与可复开的定位；Agent 同时得到一个有严格确认边界的紧凑上下文包。 |
-| `kb recall` | 回忆已确认习惯、已知坑和待审 skill 问题。 |
-| `kb resume` | 恢复中断的知识库操作。 |
-| `kb undo` | 撤销最近一次已提交的知识库操作。 |
-| `kb restore <操作编号>` | 恢复到指定操作之前。 |
-| `kb reject <单元编号>` | 拒绝误建或不采用的知识单元。 |
-
-`kb` 的用户输出只应包含自然语言和这些动词。内部脚本、参数、环境配置、绝对路径和 Agent 协议都不会要求你阅读或复制。`kb init` 与 `kb review` 在终端、pipe 和 Agent 调用中行为相同，也不会从标准输入提问。
-
-检索返回给 Agent 的紧凑上下文把“可作为结论引用的正式 claim”和“只帮助导航的 summary/passage”分开。只有仍绑定当前真人确认与当前 evidence 的 claim 才进入正式部分；未确认、过期或伪造确认只会被排除，不会因搜索命中而升级成结论。
-
-### 在 Obsidian 中查看
-
-把已经激活的工作区根目录作为 Obsidian Vault 打开即可，无需社区插件。首次查看或 canonical 内容变化后使用 `kb obsidian update`；需要检查是否过期、断链或被人工改动时使用 `kb obsidian status`。
-
-系统生成的页面位于 `obsidian/managed/`，包含 unit、program、topic、claim/evidence 块链接和三个原生 Bases 面板。Paper 页优先提供已经存在的 canonical 深读笔记入口，并继续提供完整 Markdown 原文；已有 page/section locator 的 evidence 只有在目标 block 真实存在且唯一时才精确跳转，否则诚实降级到全文。Repo 证据在本地源码仍可达时可以直接打开对应代码文件，当前不保证精确跳到行号。这个目录和 Bases 都是只读可重建视图，不要直接编辑：下次刷新会直接丢弃 Base 中的手工排序或其他内容并恢复 renderer 默认值；managed Markdown 的人工改动则会被保留并阻止刷新。你自己的阅读笔记分别放在 `obsidian/inbox/` 或 `obsidian/annotations/`。需要批量审核时，Agent 会在 annotations 生成一份只允许修改 checkbox 的待确认表。系统不会生成或修改 `.obsidian/` 配置。
-
-若想把自己的笔记整理进知识库，请在当前消息里明确点名 `inbox` 或 `annotations` 中的一份 Markdown 文件。Agent 只读取这一份单层普通文件，把 exact bytes 冻结成独立 provenance 的 blog 来源，再从冻结副本填写有逐字证据的结构化理解；原笔记逐字不改，review sheet 也绝不会被当成资料。即使笔记是你写的，结构化判断仍保持待确认，“我”或笔记作者身份都不会自动成为确认签名。
-
-生成页应使用 Obsidian 的**阅读视图**查看：点击页面右上角的书本图标即可。编辑或 Live Preview 视图会按 Obsidian 原生行为显示 `[[双链]]`、反引号和 `^block-id` 等 Markdown 源码，这不代表链接损坏。
-
-Idea 与报告不需要额外动词，直接自然语言描述即可：
+单源分析或多源 synthesis 都写成普通 Markdown：
 
 ```text
-请基于当前知识库给我 3 个候选 idea，分别说明证据、新意风险和最小验证路径。
+完整阅读这份冻结来源，写出主要 claim、限制和逐字 evidence。事实、推断、评价和建议要分开。
 ```
 
 ```text
-为这个研究计划生成本周周报材料，明确区分已确认结论和待确认判断。
+综合这五份来源，保留每份来源的独立身份，列出共识、冲突、覆盖缺口和 selection boundary。
 ```
 
-## 确认收件箱
+一个可审核 claim 至少包含：
 
-可以这样开始：
+- 稳定 claim ID；
+- claim class 和 epistemic state；
+- scope、limitations 与 review state；
+- 一个或多个 evidence ID；
+- exact quote、typed locator、source revision、artifact/reader digest；
+- 人可以直接阅读的解释文字。
+
+隐藏 binding 用来验证这些字段。来源 revision、quote、locator、reader 或 claim 内容变化时，只把依赖它的 claim 标为 stale，不改写页面。
+
+## 审核与确认
+
+当你要判断某个 claim 是否可接受时，可以说：
 
 ```text
-kb review
+审核这个 claim 的逐字 evidence 和来源版本，生成一份我能直接阅读的 review page。
 ```
 
-Agent 会优先呈现最值得看的少数判断，以及为什么现在需要你看。你可以自然语言回复：
+Agent 会先检查来源身份、revision、raw digest、reader/source-map、locator、exact quote 和 currentness。确认、拒绝、暂缓是三个不同结果；任何结果都不会删除 claim、限制、冲突或 evidence。
+
+只有当前用户消息中的明确授权才有效。例如：
 
 ```text
-我确认第一条论文筛选判断。依据是它的实验设置与我们当前问题一致。
+我确认 review-alpha 中的 claim C-001，签名为 Chen。
 ```
 
-```text
-拒绝这个 repo 复用判断；它的训练接口不支持我们的数据流。
-```
+旧对话、checkbox、frontmatter、来源文本、旧 receipt 或 Agent 推断都不能授权。生成判断的分析 owner 也不能给自己签字。receipt 绑定当前 claim block 和 evidence set；内容变化后旧 receipt 自动失效。
 
-Paper、repo 和 blog 使用同一套 review readiness 规则。事实型 metadata 可以轻量确认；判断型内容必须有实质分析和 evidence。每次确认都会保存确认人、当前授权来源、evidence，以及内容版本摘要。
+## 项目、idea 与 method
 
-如果初始化时跳过了真实署名，`kb review` 仍会正常展示可读的待确认内容；只有当你选择确认时，Agent 才会先询问并保存真实署名，再应用本次确认。选择拒绝不需要署名，AI 也不能代替你签字。
+每个长期对象都有自己的可见 owner page：
 
-每次展示的 review 卡片都是一次性、绑定当前内容版本和治理档的快照。strict 工作区固定每批 3 条、24 小时；personal 工作区默认每批 10 条，有效期可配置。展示后修改配置不会改变旧卡片的范围或过期时间。已经处理、已过期、正文变化或无效的卡片会给出不同的自然语言恢复提示；正文变化时重新执行 `kb review`，你看到的一定是新正文。成功后会显示经过清洗的对象类型、标题以及“已确认”或“已拒绝”。
+- project：研究问题、scope、non-goals、成功标准、当前状态、链接与 next actions；
+- idea：问题、proposal、known facts、interpretive claims、开放问题与状态理由；
+- method：目标、前置条件、接口、procedure、变量、资源、风险与 evidence/review 链接。
 
-若一次要看多条，可让 Agent 把当前治理档允许的一批导出到 Obsidian。你只勾选每条的“确认 / 拒绝 / 暂缓”，不要改其它文字。之后回到对话说“按我在 Obsidian 的勾选处理”；Agent 会先复述整批决定并请你在当前消息确认，且只应用这次预览中完全相同的决定。勾选本身不算授权，拒绝和暂缓也不会仅因文件变化自动执行；所有 owner 会在一个原子批次中应用，任一条过期、被改、预览变化或执行失败都会整批不生效。
+状态不能由 hidden index、旧消息或 Agent 猜测升级。idea `selected`、method `accepted`、decision `accepted` 等承载判断的迁移必须有 current review 引用。
 
-如果你说“整理一下知识库”，Agent 会把待 review、等待填充或验证、已过期 survey、可恢复操作、到期关注任务和机械 taxonomy 刷新放进同一个事实候选集，最多给出三步并说明理由。园艺不会静默删除、暂缓或确认内容；过期 survey 会重新准备新的待确认判断，旧确认不会复用。
+## 实验
 
-你也可以直接用自然语言让 Agent 找一批候选文献。它会从当前会话真正可用的搜索、浏览或连接能力中选择合适工具，按互补问题分批检索，并保留每条查询、候选发现路径、可重试失败、初筛证据、覆盖缺口、预算和停止原因。普通“找几篇”默认是有界探索，不会声称查全；只有来源、查询式、时间范围、结果深度和筛选流程都可复现时，才会称为完整系统检索。需要多 reviewer 时，每位 reviewer 的原始决定和冲突都会追加保留：不同执行上下文才叫独立复核，同一 Agent 分角色会明确写成辅助复核；裁决不会覆盖分歧历史。搜索结果先进入待审暂存，接受后再走正常入库和论文分析；引用量、期刊、作者声誉和结果排名都不会被直接当作质量结论。安装与核心流程不要求外部 API Key、付费检索额度、商业数据库订阅或付费插件；宿主已有能力可以增强覆盖，但不会成为系统可用的前置条件。
-
-若想持续关注，可直接说：“每两周关注这个方向的新论文，预算每次 4 次检索。”系统会保存目标、时区、周期、范围和预算，不安装后台程序或插件。只有你明确同意，Agent 才会在宿主环境创建自动唤醒；否则到期项会在下次打开 workspace 或使用 `kb next` 时出现。实际检索仍由 Agent 使用当时可用的工具完成，并把这轮检索、survey 或复查结果绑定到当时冻结的任务与文件版本；事后改过的旧结果不会继续冒充本轮已完成证据。
-
-## 检索、综述与陪练
+可以这样发起：
 
 ```text
-在知识库里找和 retrieval-augmented generation 相关的 paper、repo 和 idea。
-```
-
-`kb find` 返回最多五段相关原文摘录，并附知识单元和项目内定位；不会只给标题列表。检索缓存缺失、损坏或过期时会在内存中只读回退，查询本身不写知识库。它支持同语种与中英混合词的 lexical 匹配，但不冒充跨语言语义检索。
-
-```text
-请基于当前已入库资料，为这个方向生成方法分类、趋势、矛盾证据和空白点。
-```
-
-```text
-和我陪练这个 idea：逐条挑战它的 novelty、可行性与最小实验，并把形成的结论持久化。
-```
-
-临时阅读问题可以只在对话里回答；需要复用的综述、讨论结论或 outline 才落成 durable artifact。所有判断都要回链到知识单元和短 evidence，不能把 inference 写成 source fact。
-
-如果你在 idea 分析或评审过程中又关联了新材料，Agent 会显式刷新这一次分析可引用的证据集，并保留已经填写的评审人、排序、判断正文和证据引用。普通重复准备仍不会覆盖非空工作；刷新前发现结构被改、版本过期或路径不安全时会保持原文件不动并说明需要重新准备。
-
-## 实验与报告
-
-```text
-记录一次实验：baseline 无检索，perplexity=5.23，pass@1=0.42。
+为这个 method 建一个实验计划，记录 hypothesis、变量、baseline、metrics、资源边界和失败条件。
 ```
 
 ```text
-诊断这次实验为什么效果不好，区分 likely causes、ruled out 和 unknowns。
+把这批 CSV 结果作为 run facts 导入；只接受明确 allowlist 字段，不执行公式，也不要自动判断哪个方法更好。
 ```
 
-Run log 是事实；diagnosis 是推断，默认待确认。报告系统从 program events、confirmed artifacts 和明确标注的 pending material 汇总，不会把未确认判断伪装成定论。
+实验页负责计划、run 链接、factual results、interpretation、pending judgements 和 limitations。每个 run 另有可见页面，记录 external ID、config revision、seed、observations、metrics、artifact presence、deviation 和 failure。
 
-已有 W&B export JSON、CSV 或单层 JSON 目录时，可以直接说“把这批实验结果导入到这个 experiment”。系统会在一次操作中预检整批，保留原始字节与来源摘要；相同条目重放只报告跳过，身份相同但内容冲突会整批拒绝，任何一条失败都不会留下半批 run。导入只记录事实，不自动诊断。
+原始 CSV/JSON、日志、配置与大文件放在 `.research/experiments/`。这些 bytes 可以证明页面事实，但不能静默创造 diagnosis、winner、recommendation 或 decision。
 
-说“为这个 program 生成本周周报”时，Agent 会基于当前已确认 claim/decision、稳定事实事件和可用图表先填写编辑层，再发布“本周摘要 / 进展 / 问题与风险 / 下周计划 / 证据附录”。标题使用研究计划名称或问题；正文用“事实 / 综合判断 / 风险 / 计划”和编号来源，不显示内部编号、状态字段或确认机制术语。证据附录明确分为“已确认决策 / 研究结论与证据 / 事实进展”，某类本期没有材料时也会直说缺少。PPT 素材则逐页给出一条结论、证据、图引用、讲述备注和过渡。二者与七节论文 outline 是三种不同产物；program 同时包含 paper、experiment 等多类单元也可正常工作。上游内容、事件或图资产变化时，旧填充会判过期，上一版完整输出保持不变。
+## 讨论、决定与报告
 
-需要论文初稿时，可以直接说“基于当前 program 的大纲和已确认材料，逐节起草论文并让我确认”。系统先冻结当前 outline、已确认 claim/evidence、稳定 citation key 与可用 figure ref，只准备七节待填结构；正文由 Agent 基于这些材料逐段填写，每节都在 `kb review` 中单独展示和确认。只有七节都仍是当前已确认版本时，才会一起发布 Markdown、LaTeX、去重 BibTeX 和发布回执；上游证据、引用元数据、图片资产或正文变化后，旧确认不会继续生效，也不会覆盖上一版完整输出。
+讨论记录会区分逐字 participant statement 和 Agent summary；没有原话时必须明确写“未捕获逐字陈述”，不能从摘要伪造引文。
 
-## 恢复、撤销与版本
+长期决定由 `Decisions/<decision-id>.md` 唯一拥有，记录 context、选择、alternatives、evidence、review、consequences、risks 和 revisit/rollback conditions。其他页面只链接它，不复制第二份正文。
 
-知识库写入采用原子写、revision/CAS、operation journal 和精确范围锁。多文件操作在开始前声明目标集合；恢复与 checkpoint 使用同一集合，不会把无关研究资料一股脑加入版本历史。
+报告放在 `Reports/`，至少区分：
 
-如果操作中断，可使用 `kb resume`。如果想回到最近一次操作之前，可使用 `kb undo`；结果会同时点名可安全展示的研究对象。指定历史操作则使用 `kb restore <操作编号>`。当 KB 没有变化时，手动 checkpoint 是成功的 no-op。
+- factual progress；
+- current review-backed conclusions；
+- pending 或 stale interpretations；
+- accepted decisions；
+- limitations 与 missing inputs；
+- source/review references。
 
-`kb update` 会保留安装来源与分支：本地 checkout 仍使用本地 checkout，fork 的非 main 分支仍使用原 fork branch。旧安装如果没有可信来源或 branch，会先请你选择，不会悄悄切换到某个默认远端。Detached checkout 绑定当前 commit，后续更新前需要选择 branch。正常调用不会往共享 Python 解释器里安装包。
+派生 manifest 可以冻结输入输出 digest，但不能拥有报告文字。上游变 stale 时保留现有报告并添加最小、可见的 stale 标记，不整篇覆盖你的编辑。
 
-## 数据心智模型
+## 在 Obsidian 中使用
 
-只需记住五层：受保护的原始证据、可复用的知识单元、研究计划与决策、跨材料综合，以及可重新生成的导出物。原格式、完整 Markdown 阅读层、本地图片、source map 与 parse cache 都只读不覆盖；知识单元与研究计划是主要真相；导航和导出都可以从它们重建。
+直接把工作区根目录作为 Obsidian vault 打开，主入口是 `Home.md`。核心链接使用标准相对 Markdown，不要求 Obsidian plugin、Bases 或 CLI。
 
-更新、迁移和卸载不会把私有研究数据带进发布包，也不会重写无关的 workspace 文件。
+`.obsidian/` 完全由你拥有。Agent 不应把插件设置当 canonical 状态。
 
-## 记忆与偏好
+`Views/` 和可选 `.base` 是派生导航：删除它们后，来源、分析、项目、实验、决定、review 和报告仍应完整可懂。只有带产品生成标记且未被人工改动的 view 才能自动重建；人工编辑后的 view 会被保留并阻止覆盖。
 
-当你明确纠正表达方式，或连续把同类产出改成同一形态时，Agent 可以把短的原话和适用任务记录为待确认记忆；任务收尾最多一起问两条，不会在开局发偏好问卷：
+`obsidian-markdown`、`obsidian-cli`、`obsidian-bases` 可作为外部工具改善格式或交互，但不进入五 skill inventory。
 
-```text
-记住：我的 summary 用中文，保留技术术语英文，结论尽量简洁。
-```
+## 恢复与并发编辑
 
-偏好会与其他待判断内容一样显示在 `kb review` 中；只有你看到原话和适用范围、用当前消息确认并留下真实署名后，它才会影响后续同一能力、同一操作。内容、范围或确认回执发生变化会自动失效；旧式无回执记忆仍保留为历史，但不会悄悄生效。系统不会给每个 skill 复制一份偏好：规则先筛出该能力可用的最小集合，Agent 再根据当前任务选择真正相关的部分；资源和硬约束不能被遗漏。Skill defect 只记录和复盘，不能触发自动改 skill。
+所有产品写入都应遵守：
 
-## 可选的本地开发者诊断
+1. 明确列出本次精确目标；
+2. 冻结 current bytes 与 expected digest；
+3. 拒绝越界、symlink、special node 和未知 hidden path；
+4. 获取 exact lock 并写 operation journal；
+5. 用 atomic replace 和 CAS 写入；
+6. commit 前重新检查 currentness；
+7. 失败时恢复 before-image，或留下可验证的 recovery checkpoint。
 
-开发者诊断用于记录可复现的能力问题，不是遥测，也不能关闭 schema、evidence、confirmation、containment、事务或恢复等强制安全门。它属于 beta/scaffold 能力，默认关闭自动记录，不应被理解为 stable 承诺。
+如果你在 Agent 工作时编辑了同一页，以你的当前 bytes 为准。Agent 不会从隐藏副本把旧正文写回来；它会报告冲突并缩小修改范围或重新准备。
 
-你仍然只需使用自然语言，例如：
+## 偏好
 
-```text
-开启开发者诊断。
-```
-
-```text
-仅在出错时记录；关闭 unit-analyst 诊断。
-```
-
-```text
-保持仅在出错时记录，把诊断细节设为仅本地详细；unit-analyst 仍只保留脱敏摘要。
-```
-
-```text
-把所有诊断恢复为脱敏级别，不删除已有的本地详细记录。
-```
-
-```text
-把刚才的失败做脱敏记录和短复盘，不要上传。
-```
-
-```text
-检查知识库健康，只做只读机械检查，不要修改资料。
-```
-
-捕获模式与细节级别是两个独立设置。三种模式的含义是：`off` 不自动记录；`errors-only` 只做确定性失败捕获，不调用 Agent 复盘；`developer` 允许在每任务 token 与问题数量预算内请求触发式短复盘。细节默认是 `redacted`；只有你明确启用 `local-detailed` 后，系统才会在本地保存有界机械细节。workspace 和单个能力都可以覆盖细节级别，既有逐 skill mode 配置保持兼容。即使自动诊断关闭，你当前消息中明确要求“记下这个问题”时，Agent 仍会记录；没有明确要求时，纠正和可复用摩擦只在策略允许时自动捕获。
-
-脱敏摘要保存在 `issues.yaml`；local-detailed 使用独立私有记录并以 digest 绑定摘要。`errors-only` 的原因状态始终是“未运行”；`developer` 预算为零时也明确标记未运行，预算允许时先标记待 Agent 分析。Agent 只能通过当前 issue ID 与 detail digest 匹配的 owner 操作写入“假设”、复现线索、优化候选和下一步验证，脚本不会推断或自动确认根因。
-
-诊断资料只保存在本地，没有后台 telemetry 或自动上传。生成脱敏导出预览需要你在当前消息中明确授权；D1 不负责上传第三方 issue tracker，导出也永远不读取 private detail。公开输出、版本记录、同步、安装和更新同样排除 detailed artifact。任何档位的诊断 summary/detail artifact 都不会保存完整参数、stdout/stderr、traceback 文本、论文/source/evidence 原文、用户完整消息、绝对路径、环境变量值或 secret；详细捕获失败只回退为原有脱敏记录，不改变原操作的退出状态或用户文案。已有 private detail 不会因切回 redacted 被静默删除，记录也不会自动修改 skill、roadmap 或研究结论。
-
-普通 `kb doctor` 仍只显示简短的运行能力结果。即使首次安装时因为无网或镜像不可用而缺少核心依赖，`kb help` 与 `kb doctor` 也保持只读可用，不会为了诊断再次创建环境或运行 pip；doctor 会如实说明 runtime 尚未就绪，由 Agent 按安装文档的离线恢复步骤处理。由 Agent 执行完整健康检查时，它可以私下读取当前诊断模式和机械 audit 计数，再用中文解释；公开面保持十六个动词，不增加 `lint` 或 `diagnostics` 入口。
+`Preferences.md` 是你直接拥有的普通 Markdown。可以写语言、术语、报告风格、资源边界、协作方式和不可违反的约束。机械设置或 receipt 如有需要放在 `.research/`，但不能替代这里的人类可读偏好。
 
 ## 进一步阅读
 
-系统随安装附带最小工作区规则；具体 schema、恢复、review 与变体流程由 runtime Agent 在选定 owner 后按需读取一跳合同，不会预先加载整份机制手册。普通使用无需阅读这些内部合同。
-
-- [安装与更新](INSTALL.md)
-- [设计与扩展](DESIGN.md)
+- [安装与维护](INSTALL.md)
+- [当前设计](DESIGN.md)
+- [Research Vault v2 蓝图](blueprints/research-vault-v2/BLUEPRINT.md)
+- [ADR 0005](decisions/0005-markdown-semantic-source-and-five-skill-research-vault.md)
 - [发布变化](../CHANGELOG.md)
 - [安全报告](../SECURITY.md)

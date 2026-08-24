@@ -5,7 +5,7 @@ description: Maintain Markdown-first projects, ideas, methods, experiments, disc
 
 # Research Workbench
 
-<!-- protocol-reference-exempt: Research Vault v2 replaces the v1 SCHEMAS.md model; this skill's accepted Markdown contracts are linked below. -->
+<!-- protocol-reference-exempt: Research Vault v2 uses the local Markdown contracts linked below. -->
 
 把长期研究活动维护成用户直接拥有的普通 Markdown。页面正文与少量 `id`、`kind`、`status` frontmatter 是唯一语义真相；`.research/` 与对象 `.source/` 只提供来源、证据、授权或运行证明。
 

@@ -13,7 +13,7 @@
 |---|---|
 | 当前接受的设计、架构和边界 | `docs/DESIGN.md` |
 | 长期决策与取舍 | `docs/decisions/*.md` |
-| 当前实现与数据模型 | default branch 的代码、测试、`runtime/lib/research/SCHEMAS.md` |
+| 当前实现与文件合同 | default branch 的代码、测试、五个 shipping skill 的一跳 contract references |
 | 新蓝图的最终目标和 waves | GitHub Initiative/Epic |
 | 单项范围、方案、验收和接力状态 | GitHub Atomic Issue |
 | 候选、CI、review 与合并 | remote commits、PR、Actions |
@@ -29,18 +29,18 @@ Issue/PR 是公开记录，只写脱敏事实。漏洞、凭据暴露、治理�
 
 本仓库把三类内容物理分开：
 
-- `skills/` 是 15 个 shipping skill 的 tracked 产品源码；`runtime/` 是共享库和安装后规则的 tracked 产品源码。它们是普通代码，不是当前开发任务自动加载的执行规则。
+- `skills/` 的 discoverable product inventory 恰好是 `research-vault`、`research-capture`、`research-analysis`、`research-workbench`、`research-review`；`runtime/` 是安装后最小规则与显式 allowlist helper 的 tracked 产品源码。它们是普通代码，不是当前开发任务自动加载的执行规则。旧 skill 目录和 v1 runtime/schema 即使保留为源码级回归材料，也不是 shipping product、设计权威或兼容合同。
 - 根 `/.agents/` 已被 Git 忽略，只供维护者安装自用 skill 或本地工具。这里的工具可以按正常适用规则辅助开发，但它们不是产品、release input、设计依据或验收证据，也不得与 shipping inventory 混算。
 - 安装器把 shipping `skills/**` 与 shared runtime payload 映射到外部 workspace 的 `.agents/**`，并只用 `runtime/AGENTS.md` 维护 workspace 根 `AGENTS.md` 的稳定加载指针；安装后由该指针加载 `.agents/WORKSPACE_RULES.md`，再按任务加载 installed skills。
 
-不得调用 `skills/*/SKILL.md` 来决定其自身需求、设计或验收；可以把这些 `SKILL.md`、脚本和协议当普通代码阅读、检索和测试。只有明确的行为测试、全新上下文冷验收，或用户明确要求测试某个 shipping skill 时，才可在隔离临时目录调用；不得触碰真实用户知识库/工作区（包括 legacy `kb/` 与 workspace-root 布局），也不得把 skill 自述当独立证据。开发态服从本文件、tracked design/ADR/schema、当前 Epic/Atomic Issue、remote commit、PR 和 Actions。
+不得调用 `skills/*/SKILL.md` 来决定其自身需求、设计或验收；可以把这些 `SKILL.md`、脚本和协议当普通代码阅读、检索和测试。只有明确的行为测试、全新上下文冷验收，或用户明确要求测试某个 shipping skill 时，才可在隔离临时目录调用；不得触碰真实用户知识库/工作区（包括 legacy `kb/` 与 v2 vault），也不得把 skill 自述当独立证据。开发态服从本文件、tracked design/ADR/contracts、当前 Epic/Atomic Issue、remote commit、PR 和 Actions。
 
 ## 普通工作流
 
 ### 1. 同步并读设计
 
 - Fetch default branch，记录 exact baseline SHA。
-- 阅读 `docs/DESIGN.md`、相关 ADR、schema、代码和测试，区分 current fact 与 proposal。
+- 阅读 `docs/DESIGN.md`、相关 ADR、五个 owner contract、代码和测试，区分 current fact 与 proposal；旧 `SCHEMAS.md` 只可用于 v1 源码级回归，不可解释 v2。
 - 架构、兼容、安全、恢复或长期 ownership 变化要写 ADR；局部设计可与实现同 PR review，但合并前仍是 proposal。
 
 ### 2. 建立管理起点
@@ -118,8 +118,9 @@ GitHub 不可可靠读写时，普通施工、claim、handoff、push、PR 和 me
 ## 产品不变量
 
 - 理解来自 Agent；脚本只搬运、建结构、验证和过门。
-- 每条判断挂逐字 evidence；`raw/` 与全量 parse cache 是不可变派生证据。
+- 普通可见 Markdown 是唯一人类语义真相；exact source revisions 在对象 `.source/`，evidence binding、receipt、index、journal、lock、cache、log 和 recovery state 在 `.research/`，隐藏层不得补出或覆盖可见语义。
+- 每条判断挂逐字 evidence；原始 source revision 不可变，reader/cache 只在 locator 与 currentness 可验证时支撑 evidence readiness。
 - 确认门拒绝空壳、禁止自签，判断类必须有 evidence；ConfirmationReceipt 绑定内容/evidence digest，内容变化自动失效。
 - 入库后 Agent 一回合自动驱动，只在确认 AI 判断和用户抉择两个治理闸口停。
-- 用户可见输出只含自然语言与 `kb <verb>` 伪 CLI，不泄漏裸命令、flags、环境变量、内部路径或 TTY 前置。
+- 用户可见交互使用自然语言，不提供 executable CLI skill、兼容动词或 terminal shortcut，也不泄漏裸脚本、flags、环境变量、内部路径或 TTY 前置。
 - 恢复保持原子写、operation journal、锁、revision/CAS 和精确 checkpoint；绝不 `git add -A`。
