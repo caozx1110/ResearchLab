@@ -24,6 +24,32 @@ class DistributionMetadata:
 # dependency edges here makes the gate recursive: a pin for a direct dependency
 # is not enough when that distribution has a selected dependency of its own.
 DEV_CLOSURE_METADATA = {
+    "pymupdf4llm": DistributionMetadata(
+        version="0.0.27",
+        requires_python=">=3.9",
+        requires_dist=("pymupdf>=1.26.3",),
+    ),
+    "pymupdf": DistributionMetadata(version="1.26.5", requires_python=">=3.9"),
+    "markdownify": DistributionMetadata(
+        version="1.2.3",
+        requires_python=">=3.9",
+        requires_dist=("beautifulsoup4<5,>=4.9", "six<2,>=1.15"),
+    ),
+    "beautifulsoup4": DistributionMetadata(
+        version="4.15.0",
+        requires_python=">=3.9",
+        requires_dist=(
+            "soupsieve>=1.6.1",
+            "typing-extensions>=4.0.0",
+            "cchardet; extra == 'cchardet'",
+            "chardet; extra == 'chardet'",
+            "charset-normalizer; extra == 'charset-normalizer'",
+            "html5lib; extra == 'html5lib'",
+            "lxml; extra == 'lxml'",
+        ),
+    ),
+    "soupsieve": DistributionMetadata(version="2.8.4", requires_python=">=3.9"),
+    "six": DistributionMetadata(version="1.17.0", requires_python=">=3.9"),
     "pytest": DistributionMetadata(
         version="8.4.2",
         requires_python=">=3.9",
@@ -74,6 +100,12 @@ DEV_CLOSURE_METADATA = {
 }
 
 EXPECTED_LOCK_MARKERS = {
+    "pymupdf4llm": None,
+    "pymupdf": None,
+    "markdownify": None,
+    "beautifulsoup4": None,
+    "soupsieve": None,
+    "six": None,
     "pytest": None,
     "iniconfig": None,
     "packaging": None,
@@ -81,7 +113,7 @@ EXPECTED_LOCK_MARKERS = {
     "pygments": None,
     "exceptiongroup": 'python_version < "3.11"',
     "tomli": 'python_version < "3.11"',
-    "typing-extensions": 'python_version < "3.11"',
+    "typing-extensions": None,
     "colorama": 'sys_platform == "win32"',
     "tiktoken": None,
     "regex": None,
@@ -92,7 +124,7 @@ EXPECTED_LOCK_MARKERS = {
     "certifi": None,
 }
 
-DEV_ROOTS = ("pytest", "tiktoken")
+DEV_ROOTS = ("pymupdf4llm", "markdownify", "pytest", "tiktoken")
 
 TARGET_ENVIRONMENTS = tuple(
     (python_version, sys_platform)
