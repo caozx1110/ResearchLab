@@ -1,0 +1,16 @@
+{
+  "schema": "research-review-receipt/v1",
+  "receipt_id": "receipt-anydoc-c001-001",
+  "review_id": "review-anydoc-c001",
+  "subject": {
+    "path": "Notes/anydoc-adapter-assessment.md",
+    "claim_id": "C-001"
+  },
+  "claim_digest": "sha256:c4fc7605810c62b718cb986e9d40a5d9ead7eccbe85453445b5917c7a7241e7e",
+  "evidence_set_digest": "sha256:714534b1ce2a209aa0fe365fc523600bced37dbff76968f2c7bd751974e83271",
+  "decision": "confirm",
+  "actor_declaration": "Lin Chen",
+  "authorization_source": "current_user_message",
+  "interaction_ref": "fixture-message-001",
+  "issued_at": "2026-08-24T00:00:00Z"
+}
