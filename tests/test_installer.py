@@ -1751,6 +1751,29 @@ def test_offline_install_keeps_files_and_exposes_dependency_free_rescue(
         encoding="utf-8",
     )
     launcher_python.chmod(0o755)
+    tool_bin = tmp_path / "installer-tool-bin"
+    tool_bin.mkdir()
+    for command in (
+        "awk",
+        "bash",
+        "cmp",
+        "date",
+        "dirname",
+        "git",
+        "ln",
+        "mkdir",
+        "mktemp",
+        "pwd",
+        "readlink",
+        "rm",
+        "rmdir",
+        "sed",
+        "shasum",
+        "tr",
+    ):
+        located = shutil.which(command)
+        if located:
+            (tool_bin / command).symlink_to(located)
     workspace = tmp_path / "offline-workspace"
     workspace.mkdir()
     home = tmp_path / "home"
@@ -1760,7 +1783,10 @@ def test_offline_install_keeps_files_and_exposes_dependency_free_rescue(
         **os.environ,
         "HOME": str(home),
         "NO_COLOR": "1",
-        "PATH": os.pathsep.join((str(launcher_bin), "/usr/bin", "/bin")),
+        # Keep a PyYAML-ready system Python out of PATH discovery while still
+        # exposing the ordinary tools the installer needs. Ubuntu ships one
+        # in /usr/bin, so using the host PATH makes this test non-hermetic.
+        "PATH": os.pathsep.join((str(launcher_bin), str(tool_bin))),
         "PIP_NO_INDEX": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
