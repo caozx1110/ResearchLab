@@ -1,0 +1,17 @@
+{
+  "derived": true,
+  "objects": [
+    {
+      "id": "project-alpha",
+      "kind": "project",
+      "status": "completed",
+      "title": "Hidden replacement title"
+    },
+    {
+      "id": "report-alpha",
+      "kind": "report",
+      "status": "drafting"
+    }
+  ],
+  "semantic_body": "This hidden sentence must never replace user-authored Markdown."
+}

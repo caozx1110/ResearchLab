@@ -190,11 +190,12 @@ def test_literature_search_bundles_no_provider_client() -> None:
     assert "urlopen" not in script
     assert "requests" not in script
     assert "OpenAlex" not in script
-    skill = (ROOT / "skills" / "literature-search" / "SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    assert "当前会话真正可用" in skill
-    assert "固定 provider 路由表" in skill
+    assert not (ROOT / "skills" / "literature-search" / "SKILL.md").exists()
+    capture = (ROOT / "skills" / "research-capture" / "SKILL.md").read_text(encoding="utf-8")
+    assert "no subprocess" in capture
+    assert "network execution path" in capture
+    assert "DefuddleAdapter" in capture
+    assert "固定 provider 路由表" not in capture
 
 
 def test_agent_authored_search_stage_persists_queries_budget_and_provenance(tmp_path: Path) -> None:

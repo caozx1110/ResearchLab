@@ -31,25 +31,24 @@ ALLOWED_TARGET_OPERATIONS = SOURCE_BOUND_OPERATIONS | {
     "symlink",
 }
 CONDITIONAL_RUNTIME_OPERATION = "conditional-runtime-tree"
-CONDITIONAL_RUNTIME_SOURCE = "research.bootstrap.CORE_RUNTIME_MODULES / managed dependency resolver"
+CONDITIONAL_RUNTIME_SOURCE = "research.v2_bootstrap.CORE_RUNTIME_MODULES / managed dependency resolver"
 CONDITIONAL_RUNTIME_CONDITION = (
-    "only when managed runtime is enabled and the selected Python lacks yaml, markdownify, bs4, "
-    "or the pymupdf4llm PDF backend"
+    "only when managed runtime is enabled and the selected Python lacks yaml"
 )
 CONDITIONAL_RUNTIME_METADATA = {
     "owner": "workspace-oss project Python dependency resolver",
     "cleanup": "preserved by update, reinstall, and uninstall; remove only by explicit user request",
     "boundary": "project .venv root; resolver-managed descendants are intentionally not enumerated",
 }
-CORE_RUNTIME_MODULES = ["yaml", "markdownify", "bs4"]
-CORE_RUNTIME_PROBE = "import yaml, markdownify, bs4"
+CORE_RUNTIME_MODULES = ["yaml"]
+CORE_RUNTIME_PROBE = "import yaml"
 BOUND_RUNTIME_KIND = "bound-runtime-interpreter"
 BOUND_RUNTIME_SOURCES = {
     "current-python",
     "explicit-override",
     "path-discovery",
 }
-PLAN_SCHEMA = 3
+PLAN_SCHEMA = 4
 PLAN_DIGEST_PLACEHOLDER = "<PLAN_DIGEST>"
 PLAN_BYTE_SHA256_PLACEHOLDER = "COMPUTE_AFTER_REVIEW"
 MAX_PLAN_BYTES = 16 * 1024 * 1024
@@ -86,7 +85,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--current-runtime-root", default="")
     parser.add_argument("--current-operation-time", default="")
     parser.add_argument("--current-force", action="store_true")
-    parser.add_argument("--current-kb-on-path", action="store_true")
     parser.add_argument("--current-home", default="")
     parser.add_argument("--current-source-strategy", default="")
     parser.add_argument("--current-source-checkout", default="")
@@ -735,7 +733,7 @@ def verify_plan(args: argparse.Namespace) -> int:
     if actual_identity != expected_identity:
         raise ValueError("current install request differs from the reviewed Agent plan")
     options = payload.get("options")
-    if options != {"force": args.current_force, "kb_on_path": args.current_kb_on_path}:
+    if options != {"force": args.current_force}:
         raise ValueError("current install options differ from the reviewed Agent plan")
 
     planned_manifest = payload.get("workspace_manifest_precondition")
@@ -914,7 +912,6 @@ def generate_plan(args: argparse.Namespace) -> int:
         "workspace_manifest_precondition": manifest_precondition,
         "options": {
             "force": "--force" in args.apply_arg,
-            "kb_on_path": "--kb-on-path" in args.apply_arg,
         },
         "source": {
             "strategy": args.source_strategy,

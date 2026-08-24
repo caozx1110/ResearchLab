@@ -1,0 +1,11 @@
+{
+  "run_id": "run-001",
+  "metrics": {
+    "accuracy": 0.82,
+    "preserved_semantic_pages": 13
+  },
+  "artifact_present": true,
+  "command": "touch EXECUTED",
+  "diagnosis": "the candidate is universally safe",
+  "winner": "candidate"
+}

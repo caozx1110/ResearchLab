@@ -38,7 +38,7 @@ def _core_ready_python(tmp_path: Path) -> Path:
     wrapper = tmp_path / "core-ready-python"
     wrapper.write_text(
         f"""#!/bin/sh
-if [ "${{1:-}}" = "-c" ] && [ "${{2:-}}" = "import yaml, markdownify, bs4" ]; then
+if [ "${{1:-}}" = "-c" ] && [ "${{2:-}}" = "import yaml" ]; then
   exit 0
 fi
 exec {sys.executable!s} "$@"
@@ -87,7 +87,7 @@ if [ "${{1:-}}" = "-I" ] && [ "${{2:-}}" = "-c" ]; then
 elif [ "${{1:-}}" = "-c" ]; then
   probe=${{2:-}}
 fi
-if [ "$probe" = "import yaml, markdownify, bs4" ]; then
+if [ "$probe" = "import yaml" ]; then
   [ "${{R25_RUNTIME_CORE_READY:-1}}" = "1" ] && exit 0
   exit 1
 fi
@@ -232,8 +232,6 @@ def _verify(plan: dict[str, object]) -> subprocess.CompletedProcess[str]:
         argv.extend(["--current-tool", str(tool)])
     if options["force"]:
         argv.append("--current-force")
-    if options["kb_on_path"]:
-        argv.append("--current-kb-on-path")
     runtime_precondition = plan.get("runtime_precondition")
     if isinstance(runtime_precondition, dict):
         selection = runtime_precondition["selection"]
@@ -266,7 +264,7 @@ def test_agent_plan_rejects_missing_later_path_runtime_before_first_write(tmp_pa
 
     plan = _plan(workspace, tmp_path / "offline-plan.json", env)
 
-    assert plan["schema"] == 3
+    assert plan["schema"] == 4
     assert plan["conditional_runtime_changes"] == []
     runtime_precondition = plan["runtime_precondition"]
     assert isinstance(runtime_precondition, dict)
@@ -277,7 +275,7 @@ def test_agent_plan_rejects_missing_later_path_runtime_before_first_write(tmp_pa
         "source": "path-discovery",
     }
     assert runtime_precondition["core_runtime"] == {
-        "modules": ["yaml", "markdownify", "bs4"],
+        "modules": ["yaml"],
         "probe": "isolated-import",
         "ready": True,
     }
@@ -315,7 +313,12 @@ def test_agent_plan_stable_path_runtime_installs_without_managed_venv(tmp_path: 
     assert not (workspace / ".venv").exists()
 
     help_result = subprocess.run(
-        [str(workspace / ".agents/skills/kb-cli/scripts/kb"), "help"],
+        [
+            sys.executable,
+            "-B",
+            str(workspace / ".agents/skills/research-analysis/scripts/analysis.py"),
+            "--help",
+        ],
         cwd=workspace,
         env=env,
         stdin=subprocess.DEVNULL,
@@ -325,7 +328,7 @@ def test_agent_plan_stable_path_runtime_installs_without_managed_venv(tmp_path: 
         check=False,
     )
     assert help_result.returncode == 0, help_result.stdout + help_result.stderr
-    assert "kb help" in help_result.stdout
+    assert "prepare" in help_result.stdout
 
 
 def test_agent_plan_rejects_current_python_selection_drift_before_first_write(tmp_path: Path) -> None:
@@ -433,7 +436,7 @@ probe=""
 if [ "${{1:-}}" = "-c" ]; then
   probe=${{2:-}}
 fi
-if [ "$probe" = "import yaml, markdownify, bs4" ]; then
+if [ "$probe" = "import yaml" ]; then
   [ "$0" = "$VENV_INVOCATION" ] && exit 0
   exit 1
 fi
@@ -483,12 +486,12 @@ exec {sys.executable!s} "$@"
     env.pop("RESEARCH_PYTHON", None)
     env.pop("RESEARCH_NO_MANAGED_VENV", None)
     venv_probe = subprocess.run(
-        [str(managed_python), "-c", "import yaml, markdownify, bs4"],
+        [str(managed_python), "-c", "import yaml"],
         env=env,
         check=False,
     )
     base_probe = subprocess.run(
-        [str(external), "-c", "import yaml, markdownify, bs4"],
+        [str(external), "-c", "import yaml"],
         env=env,
         check=False,
     )

@@ -58,8 +58,8 @@ def _minimal_source(root: Path) -> None:
     _write(root / "requirements.txt", "PyYAML\n")
     _write(root / "install-lib" / "placeholder", "installer input\n")
     _write(root / "skills" / "metadata.yaml", "skills: {}\n")
-    _write(root / "skills" / "kb-cli" / "SKILL.md", "---\nname: kb-cli\n---\n")
-    _write(root / "skills" / "kb-cli" / "scripts" / "kb", "#!/usr/bin/env python3\n")
+    _write(root / "skills" / "research-capture" / "SKILL.md", "---\nname: research-capture\n---\n")
+    _write(root / "skills" / "research-capture" / "scripts" / "capture.py", "#!/usr/bin/env python3\n")
     _write(root / "runtime" / "AGENTS.md", "Load `.agents/WORKSPACE_RULES.md`.\n")
     _write(root / "runtime" / "WORKSPACE_RULES.md", "# WORKSPACE_RULES — test\n")
     _write(root / "runtime" / "VERSION", "0.2.0-test\n")
@@ -106,23 +106,29 @@ def test_repository_tracks_product_sources_but_not_local_agent_tools() -> None:
 
     assert tracked_local.stdout == ""
     assert ignored_local.returncode == 0
-    assert len(list((REPO_ROOT / "skills").glob("*/SKILL.md"))) == 15
+    assert len(list((REPO_ROOT / "skills").glob("*/SKILL.md"))) == 5
     assert (REPO_ROOT / "runtime" / "AGENTS.md").is_file()
 
 
 def test_release_mapping_is_explicit_and_excludes_developer_only_files() -> None:
     ws_sync = _load_ws_sync()
 
-    assert ws_sync.release_destination("skills/kb-cli/scripts/kb") == ".agents/skills/kb-cli/scripts/kb"
-    assert ws_sync.release_destination("runtime/lib/research/common.py") == ".agents/lib/research/common.py"
+    assert ws_sync.release_destination("skills/research-capture/scripts/capture.py") == ".agents/skills/research-capture/scripts/capture.py"
+    assert ws_sync.release_destination("runtime/lib/research/v2_bootstrap.py") == ".agents/lib/research/v2_bootstrap.py"
+    assert ws_sync.release_destination("runtime/lib/research/legacy_detector.py") == ".agents/lib/research/legacy_detector.py"
+    assert ws_sync.release_destination("runtime/lib/research/updater.py") == ".agents/lib/research/updater.py"
+    assert ws_sync.release_destination("runtime/lib/research/common.py") is None
     assert ws_sync.release_destination("runtime/AGENTS.md") is None
     assert ws_sync.release_destination("runtime/WORKSPACE_RULES.md") == ".agents/WORKSPACE_RULES.md"
     assert ws_sync.release_destination("runtime/VERSION") == ".agents/VERSION"
     assert ws_sync.release_destination("LICENSE") == ".agents/LICENSE"
     assert ws_sync.release_destination("runtime/README.md") is None
+    assert ws_sync.release_destination("runtime/lib/research/SCHEMAS.md") is None
+    assert ws_sync.release_destination("runtime/lib/research/legacy_migration.py") is None
     assert ws_sync.release_destination("runtime/lib/research/skill_validator.py") is None
     assert ws_sync.release_destination("skills/skill-evolution-advisor/scripts/eval_research_value.py") is None
-    assert ws_sync.release_destination(".agents/skills/kb-cli/scripts/kb") is None
+    assert ws_sync.release_destination("skills/legacy-skill/scripts/old.py") is None
+    assert ws_sync.release_destination(".agents/skills/research-capture/scripts/capture.py") is None
 
 
 def test_ignored_same_name_local_skill_cannot_change_release_or_plan_digest(tmp_path: Path) -> None:
@@ -171,7 +177,7 @@ def test_local_agent_churn_cannot_change_validator_or_rule_budget(tmp_path: Path
 
     assert validate_skills(source / "skills") == before_errors == []
     assert checker.measure_rule_bundles(source) == before_budget
-    assert before_budget["discoverable_skill_count"] == 15
+    assert before_budget["discoverable_skill_count"] == 5
 
 
 def test_skill_route_resolver_rejects_untrusted_or_escaping_routes(tmp_path: Path) -> None:

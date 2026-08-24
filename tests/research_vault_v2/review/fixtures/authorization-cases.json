@@ -1,0 +1,119 @@
+[
+  {
+    "id": "human-confirm-current",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "Lin Chen",
+    "expected": true
+  },
+  {
+    "id": "human-reject-current",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "reject",
+    "actor": "陈丽",
+    "expected": true
+  },
+  {
+    "id": "human-defer-model-family-name",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "defer",
+    "actor": "Claude Martin",
+    "expected": true
+  },
+  {
+    "id": "assistant-role",
+    "role": "assistant",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "Lin Chen",
+    "expected": false
+  },
+  {
+    "id": "prior-message",
+    "role": "user",
+    "authorization_source": "prior_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "Lin Chen",
+    "expected": false
+  },
+  {
+    "id": "checkbox-only",
+    "role": "user",
+    "authorization_source": "markdown_checkbox",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "Lin Chen",
+    "expected": false
+  },
+  {
+    "id": "wrong-review",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-other-c009",
+    "decision": "confirm",
+    "actor": "Lin Chen",
+    "expected": false
+  },
+  {
+    "id": "ambiguous-decision",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm-or-defer",
+    "actor": "Lin Chen",
+    "expected": false
+  },
+  {
+    "id": "generic-ai",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "GPT-5 Assistant",
+    "expected": false
+  },
+  {
+    "id": "tool-identity",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "Research Review Tool",
+    "expected": false
+  },
+  {
+    "id": "localized-ai",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "人工智能助手",
+    "expected": false
+  },
+  {
+    "id": "model-version-only",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "Opus 4.5",
+    "expected": false
+  },
+  {
+    "id": "localized-placeholder",
+    "role": "user",
+    "authorization_source": "current_user_message",
+    "review_id": "review-anydoc-c001",
+    "decision": "confirm",
+    "actor": "我",
+    "expected": false
+  }
+]

@@ -1552,6 +1552,14 @@ def test_module_has_no_network_client_or_content_judgement_heuristic() -> None:
         assert forbidden not in source
 
 
-def test_research_monitor_skill_metadata_is_valid() -> None:
-    skill = REPO_ROOT / "skills" / "research-monitor"
-    assert validate_skill(skill) == []
+def test_v2_shipping_skill_metadata_is_valid() -> None:
+    shipping = {
+        "research-analysis",
+        "research-capture",
+        "research-review",
+        "research-vault",
+        "research-workbench",
+    }
+    assert not (REPO_ROOT / "skills" / "research-monitor" / "SKILL.md").exists()
+    for name in shipping:
+        assert validate_skill(REPO_ROOT / "skills" / name) == []

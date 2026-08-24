@@ -1,5 +1,0 @@
-interface:
-  display_name: Method Designer
-  short_description: Design selected ideas into methods and experiment matrices
-  default_prompt: Use $method-designer to convert a selected idea unit into a concrete method note, repo-choice record, interface
-    contract, and expanded experiment matrix without starting execution yet.

@@ -41,14 +41,6 @@ EXPLICIT_ANCHOR_RE = re.compile(
     re.IGNORECASE,
 )
 HEADING_RE = re.compile(r"^#{1,6}\s+(?P<title>.+?)\s*$", re.MULTILINE)
-SCHEMA_REFERENCE_RE = re.compile(
-    r"(?:\.agents/lib/research/|runtime/lib/research/)?SCHEMAS\.md#"
-    r"(?P<anchor>[a-z0-9][a-z0-9-]*)"
-)
-INLINE_SCHEMA_ANCHOR_RE = re.compile(r"#(?P<anchor>[a-z0-9][a-z0-9-]*)")
-PROTOCOL_EXEMPTION_RE = re.compile(
-    r"<!--\s*protocol-reference-exempt:\s*[^>\s][^>]*-->", re.IGNORECASE
-)
 TOC_HEADING_RE = re.compile(
     r"^##\s+(?:目录|Table of Contents)\s*$", re.IGNORECASE | re.MULTILINE
 )
@@ -179,21 +171,6 @@ def _validate_long_reference(path: Path, text: str, errors: list[str]) -> None:
         )
 
 
-def _schema_source_path() -> Path:
-    return Path(__file__).resolve().with_name("SCHEMAS.md")
-
-
-def _schema_protocol_anchors(skill_text: str) -> list[str]:
-    """Collect the primary and abbreviated anchors on direct protocol lines."""
-
-    anchors: list[str] = []
-    for line in skill_text.splitlines():
-        if SCHEMA_REFERENCE_RE.search(line) is None:
-            continue
-        anchors.extend(match.group("anchor") for match in INLINE_SCHEMA_ANCHOR_RE.finditer(line))
-    return list(dict.fromkeys(anchors))
-
-
 def _validate_progressive_disclosure(
     skill_dir: Path,
     skill_text: str,
@@ -226,26 +203,6 @@ def _validate_progressive_disclosure(
             )
         _validate_markdown_links(reference, reference_text, skill_dir, errors)
         _validate_long_reference(reference, reference_text, errors)
-
-    schema_path = _schema_source_path()
-    try:
-        schema_text = schema_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        errors.append(f"{schema_path}: cannot read shared schema reference: {exc}")
-        schema_anchors: set[str] = set()
-    else:
-        schema_anchors = _markdown_anchors(schema_text)
-    protocol_anchors = _schema_protocol_anchors(skill_text)
-    if not protocol_anchors and PROTOCOL_EXEMPTION_RE.search(skill_text) is None:
-        errors.append(
-            f"{skill_md}: missing direct SCHEMAS.md protocol reference or explicit exemption"
-        )
-    for anchor in protocol_anchors:
-        if anchor not in schema_anchors:
-            errors.append(
-                f"{skill_md}: referenced SCHEMAS.md anchor does not exist: #{anchor}"
-            )
-
 
 def _required_string(
     mapping: dict[str, object], field: str, label: str, errors: list[str]
@@ -408,13 +365,6 @@ def skill_directories(skills_root: Path) -> list[Path]:
 
 def validate_skills(skills_root: Path) -> list[str]:
     errors: list[str] = []
-    schema_path = _schema_source_path()
-    try:
-        schema_text = schema_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        errors.append(f"{schema_path}: cannot read shared schema reference: {exc}")
-    else:
-        _validate_long_reference(schema_path, schema_text, errors)
     generated = generated_metadata_outputs(skills_root, errors)
     discoverable = {path.resolve() for path in skill_directories(skills_root)}
     for openai_yaml in sorted(skills_root.glob("*/agents/openai.yaml")):

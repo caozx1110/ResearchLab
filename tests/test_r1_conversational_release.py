@@ -50,13 +50,6 @@ FORBIDDEN_PUBLIC_TOKENS = (
 
 EXPECTED_RUNTIME_PINS = {
     "pyyaml": "6.0.3",
-    "pymupdf4llm": "0.0.27",
-    "pymupdf": "1.26.5",
-    "markdownify": "1.2.3",
-    "beautifulsoup4": "4.15.0",
-    "soupsieve": "2.8.4",
-    "six": "1.17.0",
-    "typing-extensions": "4.16.0",
 }
 CAPABILITY_MATURITY = {
     "kb-cli": "stable",
@@ -85,6 +78,10 @@ def _kb_script(root: Path | None = None) -> Path:
     if root is None:
         return _project_root() / "skills" / "kb-cli" / "scripts" / "kb"
     return root / ".agents" / "skills" / "kb-cli" / "scripts" / "kb"
+
+
+def _installed_script(root: Path, skill: str, script: str) -> Path:
+    return root / ".agents" / "skills" / skill / "scripts" / script
 
 
 def _load_kb_cli():
@@ -146,31 +143,33 @@ def _parse_exact_pins(lines: tuple[str, ...]) -> dict[str, str]:
     return pins
 
 
-def test_public_verb_registry_and_docs_match_exactly() -> None:
-    kb = _load_kb_cli()
-    parser = kb.build_parser()
-    subparsers = next(
-        action for action in parser._actions if isinstance(action, kb.argparse._SubParsersAction)
-    )
-
-    assert tuple(subparsers.choices) == PUBLIC_VERBS
-    assert len(kb.VERB_REGISTRARS) == len(PUBLIC_VERBS)
+def test_retired_public_verb_registry_is_absent_from_v2_docs_and_inventory() -> None:
+    root = _project_root()
+    assert not (root / "skills/kb-cli/SKILL.md").exists()
+    metadata = yaml.safe_load((root / "skills/metadata.yaml").read_text(encoding="utf-8"))
+    assert "kb-cli" not in metadata["skills"]
     for relative in ("README.md", "docs/USER_GUIDE.md"):
         text = source_path(relative).read_text(encoding="utf-8")
-        for verb in PUBLIC_VERBS:
-            assert f"`kb {verb}" in text, f"{relative} does not document kb {verb}"
+        assert "`kb " not in text
+        assert "natural language" in text.lower() or "自然语言" in text
 
 
-def test_docs_disclose_every_skill_maturity_without_bundle_overclaim() -> None:
+def test_docs_disclose_exact_five_skill_inventory_without_bundle_overclaim() -> None:
+    shipping = {
+        "research-analysis",
+        "research-capture",
+        "research-review",
+        "research-vault",
+        "research-workbench",
+    }
     for relative in ("README.md", "docs/USER_GUIDE.md"):
         text = source_path(relative).read_text(encoding="utf-8")
-        for label in ("stable", "beta", "scaffold", "dev-only"):
-            assert label in text, f"{relative} does not define {label}"
-        for skill, maturity in CAPABILITY_MATURITY.items():
-            row = rf"\|\s*`{re.escape(skill)}`\s*\|\s*{maturity}\s*\|"
-            assert re.search(row, text), f"{relative} does not mark {skill} as {maturity}"
-        assert "whole bundle" in text or "整个 bundle" in text
-        assert "paper" in text and "repo" in text and "dataset" in text and "blog" in text
+        for skill in shipping:
+            assert skill in text, f"{relative} does not document {skill}"
+        assert "release candidate" in text
+        assert "not a stable release" in text or "不是 stable/GA" in text
+        for retired in ("`kb-cli`", "`knowledge-base-manager`", "`research-orchestrator`"):
+            assert retired not in text
 
 
 def test_user_guide_does_not_expose_raw_execution_or_internal_paths() -> None:
@@ -355,32 +354,44 @@ def test_installed_copy_runs_help_without_creating_runtime_data(tmp_path: Path) 
     )
     assert install.returncode == 0, install.stdout + install.stderr
 
+    before = _tree_snapshot(workspace)
     help_results = [
         subprocess.run(
-            [sys.executable, "-B", str(_kb_script(workspace)), *argv],
+            [sys.executable, "-B", str(script), "--help"],
             cwd=workspace,
             env=_safe_runtime_env(),
             text=True,
             capture_output=True,
             check=False,
         )
-        for argv in (["help"], ["--help"], ["init", "--help"], ["review", "--help"])
+        for script in (
+            _installed_script(workspace, "research-vault", "vault.py"),
+            _installed_script(workspace, "research-capture", "capture.py"),
+            _installed_script(workspace, "research-analysis", "analysis.py"),
+        )
     ]
 
     for help_result in help_results:
         assert help_result.returncode == 0, help_result.stderr
-        assert "kb 动词（16 个）" in help_result.stdout
-        assert "positional arguments" not in help_result.stdout
-        assert "options:" not in help_result.stdout
         assert help_result.stderr == ""
-        for token in FORBIDDEN_PUBLIC_TOKENS:
-            assert token not in help_result.stdout
+    assert _tree_snapshot(workspace) == before
     assert not (workspace / "kb").exists()
+    assert not (workspace / "Home.md").exists()
     installed_rules = (workspace / "AGENTS.md").read_text(encoding="utf-8")
     assert ".agents/WORKSPACE_RULES.md" in installed_rules
-    assert "## Conversational contract" not in installed_rules
     assert (workspace / ".agents" / "WORKSPACE_RULES.md").is_file()
     assert not (workspace / ".agents" / "AGENT_GUIDE.md").exists()
+    discovered = {
+        path.parent.name
+        for path in (workspace / ".agents" / "skills").glob("*/SKILL.md")
+    }
+    assert discovered == {
+        "research-analysis",
+        "research-capture",
+        "research-review",
+        "research-vault",
+        "research-workbench",
+    }
 
 
 def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: Path) -> None:
@@ -404,73 +415,9 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     )
     assert install.returncode == 0, install.stdout + install.stderr
 
-    optional_setup = subprocess.run(
-        [sys.executable, "-B", str(_kb_script(workspace)), "init"],
-        cwd=workspace,
-        env=_safe_runtime_env(),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert optional_setup.returncode == 0, optional_setup.stdout + optional_setup.stderr
-    for expected_text in (
-        "现在可以开始使用",
-        "现在设置",
-        "先跳过",
-        "补充我的研究偏好",
-        "第一次确认研究判断前仍会询问真实署名",
-    ):
-        assert expected_text in optional_setup.stdout
-    for forbidden in ("还需要", "必填", "--", ".agents/", "NEXT FOR AGENT"):
-        assert forbidden not in optional_setup.stdout
-    before_defer = _tree_snapshot(workspace)
-
-    deferred = subprocess.run(
-        [sys.executable, "-B", str(_kb_script(workspace)), "init"],
-        cwd=workspace,
-        env=_safe_runtime_env(),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert deferred.returncode == 0, deferred.stdout + deferred.stderr
-    assert deferred.stdout == optional_setup.stdout
-    assert _tree_snapshot(workspace) == before_defer
-
-    profile_path = workspace / "config" / "user-profile.yaml"
-    profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-    profile["resources"] = {"gpu_count": 2, "machine": "local"}
-    profile["constraints"] = ["保留已有数据约束"]
-    profile_path.write_text(
-        yaml.safe_dump(profile, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
-
+    vault_script = _installed_script(workspace, "research-vault", "vault.py")
     first = subprocess.run(
-        [
-            sys.executable,
-            "-B",
-            str(_kb_script(workspace)),
-            "init",
-            "--name",
-            "Installed Researcher",
-            "--lang",
-            "en",
-            "--auto-commit",
-            "manual",
-            "--auto-ingest-mode",
-            "auto_deep_read",
-            "--persona-focus",
-            "VLA",
-            "--persona-term",
-            "bilingual",
-            "--quick-resource",
-            "4xH100 and a local robot",
-            "--quick-constraint",
-            "保留已有数据约束",
-            "--quick-constraint",
-            "不使用云服务",
-        ],
+        [sys.executable, "-B", str(vault_script), "init", str(workspace)],
         cwd=workspace,
         env=_safe_runtime_env(),
         text=True,
@@ -478,48 +425,17 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
         check=False,
     )
     assert first.returncode == 0, first.stdout + first.stderr
-    assert first.stdout == "知识库和基础偏好已准备好。\n"
+    assert (workspace / "Home.md").is_file()
+    assert (workspace / "Preferences.md").is_file()
+    assert (workspace / ".research/index").is_dir()
+    assert not (workspace / "kb").exists()
+    assert not (workspace / "record.yaml").exists()
 
-    snapshot = subprocess.run(
-        [
-            sys.executable,
-            "-B",
-            str(_kb_script(workspace)),
-            "--agent-protocol",
-            "installed-init-snapshot.json",
-            "init",
-        ],
-        cwd=workspace,
-        env=_safe_runtime_env(),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert snapshot.returncode == 0, snapshot.stdout + snapshot.stderr
-    installed_protocol = yaml.safe_load(
-        (workspace / ".runtime" / "installed-init-snapshot.json").read_text(encoding="utf-8")
-    )
-    installed_defaults = installed_protocol["details"]["preferences"]
-    assert installed_defaults["research_focus"] == "VLA"
-    assert installed_defaults["resource_statement"] == "4xH100 and a local robot"
-    assert installed_defaults["resources"] == {
-        "gpu_count": 2,
-        "machine": "local",
-        "quick_setup": "4xH100 and a local robot",
-    }
-    assert installed_defaults["constraints"] == ["保留已有数据约束", "不使用云服务"]
-
-    runtime_path = workspace / "config" / "runtime-preferences.yaml"
-    runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
-    runtime["autonomy"]["auto_execute_scope"] = ["ingest"]
-    runtime_path.write_text(
-        yaml.safe_dump(runtime, allow_unicode=True, sort_keys=False),
-        encoding="utf-8",
-    )
+    preferences = workspace / "Preferences.md"
+    preferences.write_text("# Preferences\n\nKeep my direct edit.\n", encoding="utf-8")
     before = _tree_snapshot(workspace)
-
     second = subprocess.run(
-        [sys.executable, "-B", str(_kb_script(workspace)), "init"],
+        [sys.executable, "-B", str(vault_script), "init", str(workspace)],
         cwd=workspace,
         env=_safe_runtime_env(),
         text=True,
@@ -528,31 +444,11 @@ def test_installed_copy_repeated_init_preserves_preferences_and_tree(tmp_path: P
     )
 
     assert second.returncode == 0, second.stdout + second.stderr
-    assert second.stdout == "知识库和基础偏好已准备好。\n"
-    for token in ("[ok]", "created", "initial_commit", "kb/", "grounded"):
-        assert token not in first.stdout + second.stdout
     assert _tree_snapshot(workspace) == before
-    runtime_after = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
-    profile_after = yaml.safe_load(
-        (workspace / "config" / "user-profile.yaml").read_text(encoding="utf-8")
-    )
-    assert runtime_after["identity"]["default_confirmed_by"] == "Installed Researcher"
-    assert "auto_screen_on_intake" not in runtime_after["paper"]
-    assert runtime_after["autonomy"]["link_autodrive"] == "auto_deep_read"
-    assert runtime_after["versioning"]["auto_commit_mode"] == "manual"
-    assert runtime_after["autonomy"]["auto_execute_scope"] == ["ingest"]
-    assert profile_after["preferences"]["language_preference"] == "en"
-    assert profile_after["personalization"]["research_focus"] == "VLA"
-    assert profile_after["personalization"]["term_style"] == "bilingual"
-    assert profile_after["resources"] == {
-        "gpu_count": 2,
-        "machine": "local",
-        "quick_setup": "4xH100 and a local robot",
-    }
-    assert profile_after["constraints"] == ["保留已有数据约束", "不使用云服务"]
+    assert preferences.read_text(encoding="utf-8") == "# Preferences\n\nKeep my direct edit.\n"
 
 
-def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path) -> None:
+def test_installed_copy_rebuild_index_preserves_semantic_markdown(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     install = subprocess.run(
@@ -572,8 +468,9 @@ def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path
         check=False,
     )
     assert install.returncode == 0, install.stdout + install.stderr
+    vault_script = _installed_script(workspace, "research-vault", "vault.py")
     initialized = subprocess.run(
-        [sys.executable, "-B", str(_kb_script(workspace)), "init"],
+        [sys.executable, "-B", str(vault_script), "init", str(workspace)],
         cwd=workspace,
         env=_safe_runtime_env(),
         text=True,
@@ -581,22 +478,36 @@ def test_installed_copy_next_is_byte_identical_on_fresh_workspace(tmp_path: Path
         check=False,
     )
     assert initialized.returncode == 0, initialized.stdout + initialized.stderr
-    before = _tree_snapshot(workspace)
-
-    next_result = subprocess.run(
-        [sys.executable, "-B", str(_kb_script(workspace)), "next"],
+    first_rebuild = subprocess.run(
+        [sys.executable, "-B", str(vault_script), "rebuild-index", str(workspace)],
         cwd=workspace,
         env=_safe_runtime_env(),
         text=True,
         capture_output=True,
         check=False,
     )
+    assert first_rebuild.returncode == 0, first_rebuild.stdout + first_rebuild.stderr
+    before = {
+        path.relative_to(workspace).as_posix(): path.read_bytes()
+        for path in workspace.rglob("*.md")
+        if path.relative_to(workspace).parts[0] not in {".agents", ".research", "Views"}
+    }
 
-    assert next_result.returncode == 0, next_result.stdout + next_result.stderr
-    assert "知识库还是空的" in next_result.stdout
-    for token in FORBIDDEN_PUBLIC_TOKENS:
-        assert token not in next_result.stdout
-    assert _tree_snapshot(workspace) == before
+    rebuilt = subprocess.run(
+        [sys.executable, "-B", str(vault_script), "rebuild-index", str(workspace)],
+        cwd=workspace,
+        env=_safe_runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rebuilt.returncode == 0, rebuilt.stdout + rebuilt.stderr
+    after = {
+        path.relative_to(workspace).as_posix(): path.read_bytes()
+        for path in workspace.rglob("*.md")
+        if path.relative_to(workspace).parts[0] not in {".agents", ".research", "Views"}
+    }
+    assert after == before
 
 
 def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
@@ -608,7 +519,7 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
     assert "## [Unreleased]" in changelog
     assert version in changelog
     assert "not a stable release" in changelog
-    assert re.search(rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$", changelog, re.MULTILINE)
+    assert "unpublished" in changelog
 
     security = (root / "SECURITY.md").read_text(encoding="utf-8")
     assert "private vulnerability reporting" in security
@@ -637,45 +548,44 @@ def test_release_metadata_is_honest_rc_and_ci_is_cross_platform() -> None:
     assert "test_r1_conversational_release.py" in ci
 
 
-def test_idea_skill_documents_link_refresh_and_fill_names() -> None:
-    owner = _project_root() / "skills" / "idea-workbench"
+def test_workbench_documents_idea_lifecycle_and_no_overwrite_boundary() -> None:
+    owner = _project_root() / "skills" / "research-workbench"
     entry = (owner / "SKILL.md").read_text(encoding="utf-8")
     text = entry + "\n" + "\n".join(
         path.read_text(encoding="utf-8") for path in sorted((owner / "references").glob("*.md"))
     )
     for token in (
-        "link --from-id <idea-id> --to-id <unit-id> --relation evidence-for",
-        "--refresh-corpus",
-        "analyze-fill.yaml",
-        "review-fill.yaml",
-        "discussion-fill.yaml",
-        "idea_context",
-        "只读",
+        "Notes/<idea-id>.md",
+        "captured",
+        "selected",
+        "research-review",
+        "never replace it with a fresh template",
+        "Known facts",
     ):
         assert token in text
-    assert "link --from-id" not in entry
+    assert not (_project_root() / "skills" / "idea-workbench" / "SKILL.md").exists()
 
 
-def test_experiment_and_report_skills_document_private_minimum_invocations() -> None:
-    root = _project_root() / "skills"
-    experiment_owner = root / "experiment-workbench"
-    report_owner = root / "report-author"
-    experiment_entry = (experiment_owner / "SKILL.md").read_text(encoding="utf-8")
-    report_entry = (report_owner / "SKILL.md").read_text(encoding="utf-8")
-    experiment = experiment_entry + "\n" + "\n".join(
+def test_workbench_documents_experiment_and_report_markdown_contracts() -> None:
+    owner = _project_root() / "skills" / "research-workbench"
+    text = (owner / "SKILL.md").read_text(encoding="utf-8") + "\n" + "\n".join(
         path.read_text(encoding="utf-8")
-        for path in sorted((experiment_owner / "references").glob("*.md"))
+        for path in sorted(
+            [*(owner / "references").glob("*.md"), *(owner / "assets/templates").glob("*.md")]
+        )
     )
-    report = report_entry + "\n" + "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted((report_owner / "references").glob("*.md"))
-    )
-    for token in ("plan --title", "--program-id", "--hypothesis", "log-run --experiment-id", "--config-revision", "--seed"):
-        assert token in experiment
-    for token in ("weekly-prepare --program-id", "reports/editorial/weekly", "fill.yaml", "weekly-verify --program-id", "text", "refs"):
-        assert token in report
-    assert "plan --title" not in experiment_entry
-    assert "weekly-prepare --program-id" not in report_entry
+    for token in (
+        "Experiments/<experiment-id>/index.md",
+        "runs/<run-id>.md",
+        "## Factual results",
+        "interpretations",
+        "Reports/",
+        "Current review-backed conclusions",
+        "never regenerate over user edits",
+    ):
+        assert token in text
+    assert not (_project_root() / "skills" / "experiment-workbench" / "SKILL.md").exists()
+    assert not (_project_root() / "skills" / "report-author" / "SKILL.md").exists()
 
 
 def test_runtime_and_test_dependencies_are_exactly_locked_in_both_ci_jobs() -> None:

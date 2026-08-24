@@ -1,7 +1,7 @@
 # Research Vault v2：Markdown-first / Obsidian-first 研究工作区蓝图
 
 > - Blueprint ID: `research-vault-v2`
-> - Status: maintainer-confirmed review candidate；只有经人类 review 合入目标分支后才成为 tracked accepted target
+> - Status: Accepted target；Wave 0 已由 PR #48 合入，后续实现状态由 Atomic Issues、候选 SHA、测试和 PR 证明
 > - Parent Epic: [#46](https://github.com/caozx1110/ResearchLab/issues/46)
 > - Wave 0 Atomic Issue: [#47](https://github.com/caozx1110/ResearchLab/issues/47)
 > - Baseline: `origin/codex/development@2c614e66c9e219c3d3216f3187af32b431aa4446`
@@ -9,7 +9,7 @@
 
 ## 1. 状态、权威与阅读边界
 
-本文件定义 Research Vault v2 的完整目标合同，而不是现有 v1 runtime 的行为说明。当前代码、测试和 schema 在 hard cutover 完成前仍描述 v1 实现；本文件合入后成为后续 waves 的 accepted target，不能被尚未迁移的旧代码反向解释。
+本文件定义 Research Vault v2 的完整目标合同。Wave 0 合入后它已是 accepted target；当前 hard-cutover 候选由五个 shipping skill、v2 tests、installer allowlist 和 `docs/DESIGN.md` 描述。源码树中保留的 v1 runtime、tests 与 `SCHEMAS.md` 只是非 shipping 回归材料，不能反向解释 v2。
 
 本蓝图固定以下承重决定：
 

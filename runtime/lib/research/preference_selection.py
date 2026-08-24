@@ -138,6 +138,11 @@ SKILL_ELIGIBILITY: dict[str, tuple[str, ...]] = {
     # Discoverable facade only. Runtime selection remains bound to the four
     # historical implementation identities below via explicit alias metadata.
     "unit-analyst": (),
+    "research-analysis": (),
+    "research-capture": (),
+    "research-review": (),
+    "research-vault": (),
+    "research-workbench": (),
     "research-monitor": (
         "profile.preferences.language_preference",
         "profile.personalization.research_focus",
@@ -171,6 +176,11 @@ SKILL_NEUTRALITY: dict[str, str] = {
     "discussion-archivist": "Transports caller-authored discussion content without rewriting its meaning.",
     "unit-analyst": "Discovery facade; preferences are consumed by its kind-specific historical implementation identity.",
     "skill-evolution-advisor": "Governance and redacted diagnostics owner, not a soft research consumer.",
+    "research-analysis": "Evidence-bound Markdown owner; task understanding remains Agent-authored.",
+    "research-capture": "Exact source and revision owner; converters do not consume soft research preferences.",
+    "research-review": "Independent governance owner; authorization is not a soft preference consumer.",
+    "research-vault": "Markdown/file/recovery foundation; mechanical storage does not consume soft preferences.",
+    "research-workbench": "Lifecycle page owner; user semantic choices remain visible Markdown and current-message governed.",
 }
 
 

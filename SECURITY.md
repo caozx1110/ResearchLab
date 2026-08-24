@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The current candidate identifier is `0.2.0-rc.7`. The identifier denotes a release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. Every release tag is gated on hosted Linux/macOS CI plus exact-candidate real-source and Obsidian acceptance. Installation and core workflows do not require an external API Key, paid search quota, commercial database subscription, or paid plugin. There is no stable supported release yet; security fixes target the current default branch and, when applicable, the current candidate line, while older snapshots may not receive backports.
+The current candidate identifier is `0.2.0-rc.8`. The identifier denotes an unpublished release candidate, not a stable or GA release; an exact published revision is identified by its Git tag, while a GitHub Release is optional. Every release tag is gated on hosted Linux/macOS CI plus exact-candidate real-source and Obsidian acceptance. Installation and core workflows do not require an external API Key, paid search quota, commercial database subscription, or paid plugin. There is no stable supported release yet; security fixes target the current default branch and, when applicable, the current candidate line, while older snapshots may not receive backports.
 
 ## Report a vulnerability privately
 
@@ -16,20 +16,16 @@ Include the affected commit or release candidate, operating system, minimal repr
 
 ## Security and governance invariants
 
-- AI cannot confirm its own judgement. Signer normalization rejects generic AI/tool identities, localized AI markers, and model-name/version-only compounds; this heuristic is defense in depth and does not replace current-message authorization.
-- Judgement confirmation requires substantive content, evidence, a non-AI signer, and authorization from the current user interaction.
-- Confirmation is bound to current content and evidence digests; mutation invalidates stale receipts.
-- Raw source and complete parse caches are immutable derived evidence.
-- Multi-file KB writes use explicit targets, journaling, locks, revision checks, and scoped checkpoints.
-- Canonical mutation requires the exact workspace-layout marker. Missing/unknown markers, legacy layout, outer Git, unknown root entries, symlink ancestors/leaves, and special nodes fail closed before business writes.
-- Legacy migration is never an installer/runtime side effect. Its read-only detector distinguishes root, eligible legacy, partial/ambiguous, outer Git, collision, dirty, incomplete journal, symlink, and special-node states before recovery or business writes.
-- Apply and rollback require independent authorization from the current user message plus exact plan/recovery receipts. Moves stay on one filesystem under an exclusive lock; commit-boundary drift stops, and incomplete recovery preserves one private sibling recovery set for human inspection.
-- Every public mutation and journal transaction also requires the installed `.agents/WORKSPACE_RULES.md` to be a bounded, stable ordinary file beneath a real `.agents` directory. Missing, empty, symlinked, special, or concurrently replaced rules fail before journal creation; only read-only `kb help` and `kb doctor` remain available for recovery.
-- Workspace-root ownership uses a canonical allowlist. `.agents`, `.git`, `.venv`, `.claude`, root agent-rule files, `bin`, and unknown siblings never become business, journal, strict-reader, or ordinary checkpoint targets merely because they share the root.
-- Persisted `kb/...` values are logical artifact identities; physical workspace-root mapping cannot silently rewrite evidence, receipts, history, or report/survey bindings.
-- Migration commits and rollback commits are ordinary descendants of the legacy HEAD. Hooks/signing are disabled for the bounded internal commit, literal pathspecs are used, and no history rewrite, outer-Git merge, force resolution, or automatic recovery-material deletion is allowed.
-- Update provenance preserves local checkouts and forks; unknown legacy provenance requires a user choice.
-- Install, update, migration, and uninstall do not treat canonical workspace data or legacy `kb/` as release content.
-- Repository-local `/.agents/` is ignored local tooling and is never enumerated, hashed, validated, or installed as product payload; only tracked `skills/` and `runtime/` feed the release mapping.
+- Ordinary visible Markdown is the only human semantic truth. Hidden JSON, YAML, SQLite, caches, receipts, and logs may prove or index it but cannot supply missing claims, decisions, status, or report prose.
+- Exact source bytes are saved before conversion and revisions are immutable. Optional converters are untrusted adapters; a successful conversion does not by itself make evidence ready.
+- AI cannot confirm its own judgement. Confirmation requires substantive visible content, exact evidence, a non-AI signer declaration, and explicit authorization from the current user message.
+- Receipts bind the current claim block and evidence set. Any semantic or evidence change makes the old receipt stale rather than silently preserving confirmation.
+- Every mutation freezes explicit target paths and expected bytes, rejects escapes/symlinks/special nodes, and uses exact locks, operation journals, atomic replacement, CAS/currentness checks, and precise checkpoints.
+- User Markdown wins over hidden proof. A conflict invalidates derived state; hidden state never overwrites the user's current page.
+- `.agents/`, `.git/`, `.venv/`, `.claude/`, `.obsidian/`, and root integration files are not research semantics and never become ordinary mutation or index targets merely because they share the vault root.
+- Legacy `kb/`, `record.yaml`, old root-layout markers, and `obsidian/managed/` are detected without reading their contents and stop v2 installation or mutation. v2 does not migrate, move, rewrite, or delete them.
+- The installed release exposes exactly five skill owners and an explicit four-file runtime allowlist. Retained v1 source modules, schemas, migration code, old CLI code, and developer-local `/.agents/` tools are not release payload.
+- Defuddle, AnyDoc, PDF/repository converters, and Obsidian tools remain external. The installer provisions only the minimal PyYAML runtime needed by a shipping script and never installs converter stacks into a shared interpreter.
+- Update provenance preserves exact source identity and manifest preconditions. Install, update, reinstall, and uninstall touch only manifest-owned integration files and preserve Research Vault content and workspace-local runtime.
 
 If a report could weaken one of these invariants, treat it as security-sensitive even when it is not a conventional remote-code-execution issue.

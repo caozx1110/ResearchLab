@@ -1,4 +1,0 @@
-interface:
-  display_name: Source Intake
-  short_description: 负责 source search staging、去重与轻量 canonical 入库
-  default_prompt: 使用 $source-intake 先把 paper / repo / dataset / blog 的外部候选结果写进 staging，再做去重、raw 备份和轻量 record 入库。

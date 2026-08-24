@@ -8,20 +8,12 @@ from repo_paths import REPO_ROOT
 
 
 SKILL_SCRIPTS = {
-    "discussion-archivist": "archive.py",
-    "experiment-workbench": "experiment.py",
-    "idea-workbench": "idea.py",
-    "knowledge-base-manager": "kb.py",
-    "method-designer": "method.py",
-    "research-config-manager": "config.py",
-    "research-orchestrator": "orchestrate.py",
-    "skill-evolution-advisor": "create_retrospective.py",
+    "research-analysis": "analysis.py",
+    "research-capture": "capture.py",
+    "research-vault": "vault.py",
 }
 
-IMPLEMENTATION_DOCS = {
-    "unit-analyst": ("dataset.py", "unit-analyst"),
-    "unit-analyst-paper": ("paper.py", "unit-analyst"),
-}
+IMPLEMENTATION_DOCS: dict[str, tuple[str, str]] = {}
 
 
 def _project_root() -> Path:

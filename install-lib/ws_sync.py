@@ -92,9 +92,32 @@ RELEASE_PREFIX_MAP = (
     ("skills/", ".agents/skills/"),
     ("runtime/lib/research/", ".agents/lib/research/"),
 )
+SHIPPING_SKILL_NAMES = frozenset(
+    {
+        "research-analysis",
+        "research-capture",
+        "research-review",
+        "research-vault",
+        "research-workbench",
+    }
+)
+SHIPPING_RUNTIME_FILES = frozenset(
+    {
+        "runtime/lib/research/__init__.py",
+        "runtime/lib/research/legacy_detector.py",
+        "runtime/lib/research/updater.py",
+        "runtime/lib/research/v2_bootstrap.py",
+    }
+)
 EXCLUDED_DIRS = {"__pycache__", ".venv", "tests"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
-EXCLUDED_NAMES = {".DS_Store", MANIFEST_NAME, "eval_research_value.py", "skill_validator.py"}
+EXCLUDED_NAMES = {
+    ".DS_Store",
+    MANIFEST_NAME,
+    "SCHEMAS.md",
+    "eval_research_value.py",
+    "skill_validator.py",
+}
 # Snapshot enumeration must additionally prune VCS internals that git-based
 # enumeration never sees.
 SNAPSHOT_EXCLUDED_DIRS = EXCLUDED_DIRS | {".git"}
@@ -176,7 +199,7 @@ def refuse_legacy_workspace(repo: Path, dst_root: Path, *, action: str) -> None:
     if inserted:
         sys.path.insert(0, runtime_text)
     try:
-        from research.legacy_migration import (  # type: ignore[import-not-found]
+        from research.legacy_detector import (  # type: ignore[import-not-found]
             LEGACY_MIGRATION_GUIDANCE,
             LegacyLayoutState,
             detect_legacy_layout,
@@ -191,11 +214,8 @@ def refuse_legacy_workspace(repo: Path, dst_root: Path, *, action: str) -> None:
                 sys.path.remove(runtime_text)
             except ValueError:
                 pass
-    if detection.state not in {
-        LegacyLayoutState.ACTIVE_ROOT,
-        LegacyLayoutState.NO_LAYOUT,
-    }:
-        die(f"{LEGACY_MIGRATION_GUIDANCE} 安装器的 {action} 操作不会自动迁移数据。")
+    if detection.state is not LegacyLayoutState.NO_LAYOUT:
+        die(f"{LEGACY_MIGRATION_GUIDANCE} 安装器的 {action} 操作不会读取或迁移旧数据。")
 
 
 def sha256_file(path: Path) -> str:
@@ -263,6 +283,14 @@ def _snapshot_release_files(source_root: Path) -> list[str]:
             )
             for name in sorted(files):
                 relative = (current / name).relative_to(source_root)
+                if relative.parts[0] == "skills":
+                    if len(relative.parts) == 2 and relative.name == "metadata.yaml":
+                        pass
+                    elif len(relative.parts) < 2 or relative.parts[1] not in SHIPPING_SKILL_NAMES:
+                        continue
+                if relative.parts[:3] == ("runtime", "lib", "research"):
+                    if relative.as_posix() not in SHIPPING_RUNTIME_FILES:
+                        continue
                 if should_exclude(relative):
                     continue
                 names.append(relative.as_posix())
@@ -283,6 +311,19 @@ def tracked_release_files(source_root: Path, *, allow_snapshot: bool = False) ->
                 f"{NOT_GIT_WORKTREE_GUIDANCE}"
             )
         tracked = sorted(path.decode("utf-8") for path in result.stdout.split(b"\0") if path)
+        tracked = [
+            relative
+            for relative in tracked
+            if not relative.startswith("skills/")
+            or relative == "skills/metadata.yaml"
+            or any(relative.startswith(f"skills/{name}/") for name in SHIPPING_SKILL_NAMES)
+        ]
+        tracked = [
+            relative
+            for relative in tracked
+            if not relative.startswith("runtime/lib/research/")
+            or relative in SHIPPING_RUNTIME_FILES
+        ]
         if any(rel == "skills" or rel.startswith("skills/") for rel in tracked) and any(
             rel == "runtime" or rel.startswith("runtime/") for rel in tracked
         ):
@@ -305,6 +346,13 @@ def release_destination(rel: str) -> str | None:
     if mapped is not None:
         return mapped
     path = Path(rel)
+    if path.parts[:1] == ("skills",):
+        if len(path.parts) < 2 or (
+            path.parts[1] != "metadata.yaml" and path.parts[1] not in SHIPPING_SKILL_NAMES
+        ):
+            return None
+    if rel.startswith("runtime/lib/research/") and rel not in SHIPPING_RUNTIME_FILES:
+        return None
     if should_exclude(path):
         return None
     for source_prefix, destination_prefix in RELEASE_PREFIX_MAP:
