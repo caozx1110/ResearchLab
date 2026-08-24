@@ -1,0 +1,4 @@
+interface:
+  display_name: Research Vault
+  short_description: Maintain Markdown-first vault layout and recovery
+  default_prompt: Use $research-vault to initialize, inspect, index, or safely recover a Markdown-first research vault.
