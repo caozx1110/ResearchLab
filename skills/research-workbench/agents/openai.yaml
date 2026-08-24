@@ -1,0 +1,5 @@
+interface:
+  display_name: Research Workbench
+  short_description: Manage Markdown projects, experiments, decisions, and reports
+  default_prompt: Use $research-workbench to maintain visible Markdown lifecycle pages, keep facts separate from interpretations,
+    and preserve user edits across derived-view rebuilds.
