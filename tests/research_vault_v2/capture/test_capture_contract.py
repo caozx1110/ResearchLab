@@ -209,7 +209,7 @@ def test_adapter_without_map_is_reader_ready_but_not_evidence_ready(tmp_path: Pa
 
 
 def test_optional_adapter_receives_published_exact_bytes_and_can_bind_a_map(tmp_path: Path) -> None:
-    exact = b"docx bytes are opaque to capture"
+    exact = b"Adapter reader line."
     observed: dict[str, object] = {}
 
     def converter(payload: bytes, **context: object) -> object:
@@ -226,7 +226,7 @@ def test_optional_adapter_receives_published_exact_bytes_and_can_bind_a_map(tmp_
                         "quote": "Adapter reader line.",
                         "reader_line_start": 1,
                         "reader_line_end": 1,
-                        "locator": {"type": "slide", "slide": 1},
+                        "locator": {"type": "byte-range", "byte_start": 0, "byte_end": len(exact)},
                     }
                 ]
             },

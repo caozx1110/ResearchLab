@@ -10,6 +10,7 @@ ownership of source revisions or visible research meaning.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import hashlib
 import html
@@ -20,16 +21,24 @@ import os
 import re
 import stat
 import tempfile
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 
 SCHEMA = "research-capture/v2"
 SOURCE_MAP_SCHEMA = "research-capture-source-map/v2"
+TRANSACTION_SCHEMA = "research-capture-transaction/v2"
 STAGES = ("captured", "reader-ready", "evidence-ready", "analysis-ready")
 HEALTH = ("ok", "degraded", "blocked", "stale")
 STAGE_RANK = {stage: index for index, stage in enumerate(STAGES)}
@@ -37,12 +46,21 @@ MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_TREE_FILES = 10_000
 MAX_TREE_BYTES = 256 * 1024 * 1024
 MAX_READER_BYTES = 32 * 1024 * 1024
+MAX_TRANSACTION_JOURNAL_BYTES = 256 * 1024 * 1024
 MAX_HTML_BLOCKS = 20_000
 MAX_CSV_ROWS = 10_000
 MAX_CSV_COLUMNS = 1_000
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$")
 SAFE_ASSET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$")
+LEGACY_MARKERS = (
+    ("kb",),
+    ("record.yaml",),
+    ("config", "workspace-layout.yaml"),
+    ("obsidian", "managed"),
+)
+_PROCESS_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
 
 KIND_ALIASES = {
     "web": "web-html",
@@ -106,6 +124,10 @@ class CaptureError(Exception):
 
 class UnsafeInputError(CaptureError):
     """The explicitly selected input violates a no-follow safety boundary."""
+
+
+class LegacyWorkspaceError(CaptureError):
+    """A v1 workspace marker requires an explicit out-of-band migration."""
 
 
 class ImmutableRevisionError(CaptureError):
@@ -214,6 +236,105 @@ def _read_optional_regular(path: Path, max_bytes: int) -> Optional[bytes]:
     except OSError as exc:
         raise UnsafeInputError(f"cannot inspect capture file: {path}") from exc
     return _read_regular_file(path, max_bytes)
+
+
+def _legacy_marker_present(root: Path, parts: Sequence[str]) -> bool:
+    current = root
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise UnsafeInputError(f"cannot inspect legacy workspace marker: {'/'.join(parts)}") from exc
+        if index < len(parts) - 1 and (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)):
+            return True
+    return True
+
+
+def _assert_no_legacy_workspace(root: Path) -> None:
+    try:
+        root_info = root.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise UnsafeInputError(f"cannot inspect workspace root: {root}") from exc
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise UnsafeInputError("capture workspace root must be a real directory")
+    found = ["/".join(parts) for parts in LEGACY_MARKERS if _legacy_marker_present(root, parts)]
+    if found:
+        raise LegacyWorkspaceError(f"legacy workspace markers require explicit migration: {found}")
+
+
+def _directory_open_flags() -> int:
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise UnsafeInputError("capture requires no-follow directory descriptors")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    return flags
+
+
+def _open_or_create_directory_at(parent_fd: int, name: str) -> int:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise UnsafeInputError(f"cannot create capture directory: {name}") from exc
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise UnsafeInputError(f"capture path is not a real directory: {name}")
+        return os.open(name, _directory_open_flags(), dir_fd=parent_fd)
+    except UnsafeInputError:
+        raise
+    except OSError as exc:
+        raise UnsafeInputError(f"cannot open capture directory without following links: {name}") from exc
+
+
+@contextmanager
+def _object_capture_lock(vault_root: Path, source_id: str) -> Iterator[None]:
+    if fcntl is None:
+        raise UnsafeInputError("capture requires a no-follow file-lock implementation")
+    lock_key = (os.path.abspath(os.fspath(vault_root)), source_id)
+    with _PROCESS_LOCKS_GUARD:
+        process_lock = _PROCESS_LOCKS.setdefault(lock_key, threading.Lock())
+    process_lock.acquire()
+    descriptors: list[int] = []
+    lock_fd: Optional[int] = None
+    try:
+        _ensure_directory(vault_root)
+        try:
+            root_fd = os.open(vault_root, _directory_open_flags())
+        except OSError as exc:
+            raise UnsafeInputError("cannot open capture workspace without following links") from exc
+        descriptors.append(root_fd)
+        _assert_no_legacy_workspace(vault_root)
+        for component in ("Sources", source_id, ".source"):
+            descriptors.append(_open_or_create_directory_at(descriptors[-1], component))
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        try:
+            lock_fd = os.open("capture.lock", flags, 0o600, dir_fd=descriptors[-1])
+        except OSError as exc:
+            raise UnsafeInputError("capture object lock must be a regular non-symlink file") from exc
+        lock_info = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_info.st_mode):
+            raise UnsafeInputError("capture object lock must be a regular non-symlink file")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        process_lock.release()
 
 
 def _safe_asset_name(name: str) -> str:
@@ -419,11 +540,115 @@ def _source_map(
     }
 
 
+def _replay_locator_quote(
+    locator: Mapping[str, Any],
+    quote: str,
+    *,
+    source_kind: str,
+    raw_files: Mapping[str, bytes],
+    raw_name: str,
+) -> Optional[str]:
+    locator_type = locator.get("type")
+    if not isinstance(locator_type, str) or not locator_type:
+        return "locator type is missing"
+    if locator_type == "byte-range":
+        relative = locator.get("path", locator.get("file"))
+        if len(raw_files) == 1 and relative in {None, raw_name}:
+            data = next(iter(raw_files.values()))
+        elif isinstance(relative, str) and relative in raw_files:
+            data = raw_files[relative]
+        else:
+            return "byte-range locator does not identify a captured raw object"
+        start = locator.get("byte_start")
+        end = locator.get("byte_end")
+        if (
+            not isinstance(start, int)
+            or isinstance(start, bool)
+            or not isinstance(end, int)
+            or isinstance(end, bool)
+            or start < 0
+            or end <= start
+            or end > len(data)
+        ):
+            return "byte-range locator is outside the captured raw object"
+        try:
+            replayed = data[start:end].decode("utf-8")
+        except UnicodeDecodeError:
+            return "byte-range locator does not identify UTF-8 evidence bytes"
+        if replayed != quote:
+            return "byte-range locator does not replay the exact reader quote"
+        return None
+    if len(raw_files) == 1:
+        single_data = next(iter(raw_files.values()))
+    else:
+        single_data = b""
+    if source_kind in {"markdown", "text"} and locator_type == source_kind:
+        line_number = locator.get("line")
+        if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
+            return "text locator line is invalid"
+        text, _ = _decode_text(single_data)
+        if source_kind == "markdown":
+            text = _passivate_markdown(text)
+        lines = text.splitlines()
+        if line_number > len(lines) or lines[line_number - 1] != quote:
+            return "text locator does not replay the exact source line"
+        return None
+    if source_kind == "web-html" and locator_type == "html":
+        try:
+            _, replay_blocks, _ = _passive_html(single_data)
+        except CaptureError:
+            return "HTML locator cannot be replayed from the captured response"
+        for replay_block in replay_blocks:
+            replay_locator = replay_block.get("locator", {})
+            if replay_block.get("quote") != quote:
+                continue
+            if locator.get("fragment") and replay_locator.get("fragment") != locator.get("fragment"):
+                continue
+            return None
+        return "HTML locator cannot replay the exact source quote"
+    if source_kind == "csv" and locator_type == "csv":
+        if locator.get("file") != raw_name:
+            return "CSV locator file does not match the captured object"
+        row_number = locator.get("row")
+        if not isinstance(row_number, int) or isinstance(row_number, bool) or row_number < 1:
+            return "CSV locator row is invalid"
+        text, _ = _decode_text(single_data)
+        try:
+            rows = list(csv.reader(io.StringIO(text)))
+        except csv.Error:
+            return "CSV locator cannot be replayed from the captured object"
+        if row_number > len(rows) or ",".join(rows[row_number - 1]) != quote:
+            return "CSV locator cannot replay the exact source row"
+        return None
+    if source_kind == "repo" and locator_type == "repo":
+        relative = locator.get("path")
+        if not isinstance(relative, str) or relative not in raw_files:
+            return "repository locator path is not in the captured tree"
+        data = raw_files[relative]
+        expected = f"- `{relative}` — {len(data)} bytes — `{sha256_bytes(data)}`"
+        if quote != expected:
+            return "repository locator cannot replay the exact indexed member"
+        return None
+    if source_kind == "dataset" and locator_type == "dataset":
+        relative = locator.get("file")
+        if not isinstance(relative, str) or relative not in raw_files:
+            return "dataset locator file is not in the captured selection"
+        data = raw_files[relative]
+        expected = f"- `{relative}` — {len(data)} bytes — `{sha256_bytes(data)}`"
+        if quote != expected:
+            return "dataset locator cannot replay the exact indexed member"
+        return None
+    return "locator cannot be replayed from the captured raw object"
+
+
 def validate_source_map(
     source_map: Mapping[str, Any],
     *,
     raw_digest: str,
     reader_bytes: bytes,
+    source_kind: str,
+    raw_files: Mapping[str, bytes],
+    raw_name: str,
     source_id: Optional[str] = None,
     revision_id: Optional[str] = None,
 ) -> list[str]:
@@ -441,7 +666,10 @@ def validate_source_map(
     blocks = source_map.get("blocks")
     if not isinstance(blocks, list):
         return errors + ["source map blocks must be a list"]
-    lines = reader_bytes.decode("utf-8", errors="replace").splitlines()
+    if not blocks:
+        return errors + ["source map must contain at least one replayable block"]
+    reader_text = reader_bytes.decode("utf-8", errors="replace")
+    lines = reader_text.splitlines()
     for index, block in enumerate(blocks):
         if not isinstance(block, Mapping):
             errors.append(f"source map block {index} is not a mapping")
@@ -449,14 +677,25 @@ def validate_source_map(
         quote = block.get("quote")
         if not isinstance(quote, str) or not quote:
             errors.append(f"source map block {index} has no exact quote")
-        elif quote not in reader_bytes.decode("utf-8", errors="replace"):
-            errors.append(f"source map block {index} quote is absent from reader")
         start = block.get("reader_line_start")
         end = block.get("reader_line_end")
         if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start or end > len(lines):
             errors.append(f"source map block {index} has invalid reader line range")
-        if not isinstance(block.get("locator"), Mapping):
+        elif isinstance(quote, str) and quote not in "\n".join(lines[start - 1 : end]):
+            errors.append(f"source map block {index} quote is absent from its reader line range")
+        locator = block.get("locator")
+        if not isinstance(locator, Mapping):
             errors.append(f"source map block {index} has no typed locator")
+        elif isinstance(quote, str) and quote:
+            replay_error = _replay_locator_quote(
+                locator,
+                quote,
+                source_kind=source_kind,
+                raw_files=raw_files,
+                raw_name=raw_name,
+            )
+            if replay_error:
+                errors.append(f"source map block {index} {replay_error}")
     return errors
 
 
@@ -750,8 +989,170 @@ def _write_atomic(path: Path, data: bytes) -> None:
             os.unlink(temporary_name)
 
 
-def _load_manifest(path: Path, source_id: str, source_kind: Optional[str] = None) -> dict[str, Any]:
-    raw_payload = _read_optional_regular(path, 16 * 1024 * 1024)
+@dataclass(frozen=True)
+class _FileMutation:
+    target: str
+    before: Optional[bytes]
+    after: Optional[bytes]
+
+
+def _transaction_target(source_root: Path, target: str) -> Path:
+    targets = {
+        "reader.md": source_root / "reader.md",
+        "index.md": source_root / "index.md",
+        ".source/manifest.json": source_root / ".source" / "manifest.json",
+    }
+    try:
+        return targets[target]
+    except KeyError as exc:
+        raise ImmutableRevisionError(f"capture transaction target is not allowed: {target}") from exc
+
+
+def _transaction_target_limit(target: str) -> int:
+    return 16 * 1024 * 1024 if target == ".source/manifest.json" else MAX_READER_BYTES
+
+
+def _encoded_state(data: Optional[bytes]) -> dict[str, Any]:
+    if data is None:
+        return {"exists": False, "sha256": None, "base64": None}
+    return {
+        "exists": True,
+        "sha256": sha256_bytes(data),
+        "base64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def _decoded_state(payload: Any, target: str) -> Optional[bytes]:
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("exists"), bool):
+        raise ImmutableRevisionError("capture transaction state is invalid")
+    if payload["exists"] is False:
+        if payload.get("sha256") is not None or payload.get("base64") is not None:
+            raise ImmutableRevisionError("capture transaction absent state is invalid")
+        return None
+    encoded = payload.get("base64")
+    if not isinstance(encoded, str):
+        raise ImmutableRevisionError("capture transaction state bytes are missing")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ImmutableRevisionError("capture transaction state bytes are invalid") from exc
+    if len(data) > _transaction_target_limit(target) or payload.get("sha256") != sha256_bytes(data):
+        raise ImmutableRevisionError("capture transaction state digest is invalid")
+    return data
+
+
+def _mutation_payload(mutation: _FileMutation) -> dict[str, Any]:
+    return {
+        "target": mutation.target,
+        "before": _encoded_state(mutation.before),
+        "after": _encoded_state(mutation.after),
+    }
+
+
+def _mutation_from_payload(payload: Any) -> _FileMutation:
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("target"), str):
+        raise ImmutableRevisionError("capture transaction mutation is invalid")
+    target = str(payload["target"])
+    _transaction_target(Path("."), target)
+    return _FileMutation(
+        target=target,
+        before=_decoded_state(payload.get("before"), target),
+        after=_decoded_state(payload.get("after"), target),
+    )
+
+
+def _apply_mutation_state(source_root: Path, mutation: _FileMutation, expected: Optional[bytes], desired: Optional[bytes]) -> None:
+    path = _transaction_target(source_root, mutation.target)
+    current = _read_optional_regular(path, _transaction_target_limit(mutation.target))
+    if current == desired:
+        return
+    if current != expected:
+        raise ImmutableRevisionError(f"capture transaction CAS conflict: {mutation.target}")
+    if desired is None:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise UnsafeInputError(f"capture transaction target is unsafe: {mutation.target}")
+        path.unlink()
+    else:
+        _write_atomic(path, desired)
+
+
+def _remove_transaction_journal(journal_path: Path) -> None:
+    try:
+        info = journal_path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise UnsafeInputError("capture transaction journal is not a regular file")
+    journal_path.unlink()
+
+
+def _recover_capture_transaction(source_root: Path) -> None:
+    journal_path = source_root / ".source" / "transaction.json"
+    raw_journal = _read_optional_regular(journal_path, MAX_TRANSACTION_JOURNAL_BYTES)
+    if raw_journal is None:
+        return
+    try:
+        payload = json.loads(raw_journal.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ImmutableRevisionError("capture transaction journal is unreadable") from exc
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema") != TRANSACTION_SCHEMA
+        or payload.get("source_id") != source_root.name
+        or not isinstance(payload.get("mutations"), list)
+    ):
+        raise ImmutableRevisionError("capture transaction journal identity is invalid")
+    mutations = [_mutation_from_payload(item) for item in payload["mutations"]]
+    if [mutation.target for mutation in mutations] != ["reader.md", "index.md", ".source/manifest.json"]:
+        raise ImmutableRevisionError("capture transaction target order is invalid")
+    for mutation in mutations:
+        _apply_mutation_state(source_root, mutation, mutation.before, mutation.after)
+    _remove_transaction_journal(journal_path)
+
+
+def _commit_capture_transaction(source_root: Path, mutations: Sequence[_FileMutation]) -> None:
+    expected_targets = ["reader.md", "index.md", ".source/manifest.json"]
+    if [mutation.target for mutation in mutations] != expected_targets:
+        raise ImmutableRevisionError("capture transaction is incomplete or out of order")
+    journal_path = source_root / ".source" / "transaction.json"
+    if _read_optional_regular(journal_path, MAX_TRANSACTION_JOURNAL_BYTES) is not None:
+        raise ImmutableRevisionError("capture transaction recovery is required before commit")
+    payload = {
+        "schema": TRANSACTION_SCHEMA,
+        "source_id": source_root.name,
+        "created_at": _utc_now(),
+        "mutations": [_mutation_payload(mutation) for mutation in mutations],
+    }
+    _write_atomic(journal_path, _json_bytes(payload))
+    try:
+        for mutation in mutations:
+            _apply_mutation_state(source_root, mutation, mutation.before, mutation.after)
+    except BaseException:
+        rollback_error: Optional[BaseException] = None
+        for mutation in reversed(mutations):
+            try:
+                _apply_mutation_state(source_root, mutation, mutation.after, mutation.before)
+            except BaseException as exc:
+                rollback_error = exc
+                break
+        if rollback_error is None:
+            _remove_transaction_journal(journal_path)
+        else:
+            raise ImmutableRevisionError("capture transaction rollback requires recovery") from rollback_error
+        raise
+    _remove_transaction_journal(journal_path)
+
+
+def _manifest_from_bytes(
+    raw_payload: Optional[bytes],
+    path: Path,
+    source_id: str,
+    source_kind: Optional[str] = None,
+) -> dict[str, Any]:
     if raw_payload is None:
         payload: dict[str, Any] = {"schema": SCHEMA, "source_id": source_id, "revisions": []}
         if source_kind:
@@ -772,8 +1173,13 @@ def _load_manifest(path: Path, source_id: str, source_kind: Optional[str] = None
     return payload
 
 
-def _write_manifest(path: Path, payload: Mapping[str, Any]) -> None:
-    _write_atomic(path, _json_bytes(payload))
+def _load_manifest_snapshot(
+    path: Path,
+    source_id: str,
+    source_kind: Optional[str] = None,
+) -> tuple[dict[str, Any], Optional[bytes]]:
+    raw_payload = _read_optional_regular(path, 16 * 1024 * 1024)
+    return _manifest_from_bytes(raw_payload, path, source_id, source_kind), raw_payload
 
 
 def _reader_document(source_id: str, filename: str, revision_id: str, text: str) -> bytes:
@@ -804,6 +1210,25 @@ def _find_revision(manifest: Mapping[str, Any], raw_digest: str) -> Optional[Map
         if isinstance(revision, Mapping) and revision.get("raw", {}).get("sha256") == raw_digest:
             return revision
     return None
+
+
+def _load_unpublished_revision(path: Path, revision_id: str, raw_digest: str) -> Optional[dict[str, Any]]:
+    raw_payload = _read_optional_regular(path, 16 * 1024 * 1024)
+    if raw_payload is None:
+        return None
+    try:
+        payload = json.loads(raw_payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ImmutableRevisionError("unpublished revision record is unreadable") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("revision_id") != revision_id
+        or not isinstance(payload.get("raw"), Mapping)
+        or payload["raw"].get("sha256") != raw_digest
+        or not isinstance(payload.get("processing"), Mapping)
+    ):
+        raise ImmutableRevisionError("unpublished revision identity is invalid")
+    return payload
 
 
 def _verify_revision_raw(vault_root: Path, revision: Mapping[str, Any], raw_files: Mapping[str, bytes], tree_snapshot: bool) -> None:
@@ -885,6 +1310,42 @@ def _capture_revision(
     if total_bytes > MAX_TREE_BYTES:
         raise CaptureError("source snapshot exceeds byte budget")
     raw_name = _safe_filename(raw_name, "original.bin")
+    vault_root = Path(vault_root)
+    _assert_no_legacy_workspace(vault_root)
+    with _object_capture_lock(vault_root, source_id):
+        _assert_no_legacy_workspace(vault_root)
+        source_root = vault_root / "Sources" / source_id
+        _recover_capture_transaction(source_root)
+        return _capture_revision_locked(
+            vault_root,
+            source_id,
+            kind,
+            raw_files,
+            raw_name=raw_name,
+            requested_uri=requested_uri,
+            final_uri=final_uri,
+            external_identity=external_identity,
+            media_type=media_type,
+            adapter=adapter,
+            ocr_available=ocr_available,
+        )
+
+
+def _capture_revision_locked(
+    vault_root: Path,
+    source_id: str,
+    kind: str,
+    raw_files: Mapping[str, bytes],
+    *,
+    raw_name: str,
+    requested_uri: Optional[str],
+    final_uri: Optional[str],
+    external_identity: Optional[str],
+    media_type: Optional[str],
+    adapter: Optional[OptionalAdapter],
+    ocr_available: Optional[bool],
+) -> CaptureResult:
+    total_bytes = sum(len(data) for data in raw_files.values())
     tree_snapshot = kind in TREE_KINDS
     if len(raw_files) == 1 and not tree_snapshot:
         single_data = next(iter(raw_files.values()))
@@ -901,231 +1362,275 @@ def _capture_revision(
     revision_root = hidden_root / "revisions" / revision_id
     manifest_path = hidden_root / "manifest.json"
     index_path = source_root / "index.md"
-    manifest = _load_manifest(manifest_path, source_id, kind)
+    manifest, manifest_before = _load_manifest_snapshot(manifest_path, source_id, kind)
     previous = _find_revision(manifest, raw_digest)
-    if previous is not None:
-        _verify_revision_raw(vault_root, previous, raw_files, tree_snapshot)
-        events = list(previous.get("capture_events", []))
-        event = {"captured_at": _utc_now()}
-        if requested_uri:
-            event["requested_uri"] = requested_uri
-        if final_uri:
-            event["final_uri"] = final_uri
-        if external_identity:
-            event["external_identity"] = external_identity
-        events.append(event)
-        for item in manifest["revisions"]:
-            if isinstance(item, dict) and item.get("revision_id") == previous.get("revision_id"):
-                item["capture_events"] = events
-        manifest["current_revision_id"] = previous["revision_id"]
-        _write_manifest(manifest_path, manifest)
-        return _result_from_revision(vault_root, source_id, kind, source_root, manifest_path, index_path, previous, same_bytes=True)
-
-    raw_paths: dict[str, str] = {}
-    if len(raw_files) == 1 and not tree_snapshot:
-        original_path = revision_root / raw_name
-        _write_immutable(original_path, next(iter(raw_files.values())))
-        raw_paths[raw_name] = original_path.relative_to(vault_root).as_posix()
-    else:
-        for relative, data in sorted(raw_files.items()):
-            safe_relative = _safe_relative_path(relative)
-            target = revision_root / "tree" / safe_relative
-            _write_immutable(target, data)
-            raw_paths[safe_relative] = target.relative_to(vault_root).as_posix()
-
-    raw_record: dict[str, Any] = {
-        "path": next(iter(raw_paths.values())) if len(raw_paths) == 1 and not tree_snapshot else f"Sources/{source_id}/.source/revisions/{revision_id}/tree",
-        "filename": raw_name,
-        "bytes": total_bytes,
-        "sha256": raw_digest,
-        "media_type": _media_type(raw_name, media_type),
-    }
-    if tree_snapshot:
-        raw_record["entries"] = [
-            {"path": path, "raw_path": raw_paths[path], "bytes": len(raw_files[path]), "sha256": sha256_bytes(raw_files[path])}
-            for path in sorted(raw_files)
-        ]
-    if external_identity:
-        raw_record["external_identity"] = external_identity
-    diagnostics: list[str] = []
-    output: Optional[AdapterOutput] = None
-    try:
-        if kind == "repo":
-            if adapter is not None and adapter.converter is not None:
-                output = adapter.convert(raw_files, source_id=source_id, revision_id=revision_id, raw_digest=raw_digest, raw_paths=raw_paths)
-            else:
-                output = _built_in_output(kind, b"", raw_name, raw_files)
-        elif kind == "dataset":
-            if adapter is not None and adapter.converter is not None:
-                output = adapter.convert(raw_files, source_id=source_id, revision_id=revision_id, raw_digest=raw_digest, raw_paths=raw_paths)
-            else:
-                output = _built_in_output(kind, b"", raw_name, raw_files)
-        elif kind in {"markdown", "text", "web-html", "csv"}:
-            data = next(iter(raw_files.values()))
-            if kind == "web-html" and adapter is not None and adapter.converter is not None:
-                output = adapter.convert(data, source_id=source_id, revision_id=revision_id, filename=raw_name, raw_digest=raw_digest, raw_paths=raw_paths)
-            else:
-                output = _built_in_output(kind, data, raw_name)
-                if kind == "web-html" and adapter is not None and adapter.converter is None:
-                    diagnostics.append("optional Defuddle adapter unavailable; used passive HTML reader")
-        else:
-            selected = next(iter(raw_files.values()))
-            selected_adapter = _adapter_for(kind, adapter)
-            output = selected_adapter.convert(selected, source_id=source_id, revision_id=revision_id, filename=raw_name, raw_digest=raw_digest, raw_paths=raw_paths)
-    except AdapterUnavailable as exc:
-        diagnostics.append(str(exc))
-        output = None
-    except (AdapterFailure, CaptureError) as exc:
-        diagnostics.append(str(exc))
-        output = None
-    if ocr_available is False and kind == "pdf":
-        diagnostics.append("OCR adapter unavailable; image-only pages are not readable")
-    if output is not None:
-        diagnostics.extend(str(item) for item in output.diagnostics)
-    stage = "captured"
-    health = "ok"
-    reader_path: Optional[Path] = None
-    source_map_path: Optional[Path] = None
-    reader_modified = False
-    reader_digest = ""
-    map_digest = ""
-    normalized_relative = ""
-    if output is None or not output.markdown or not output.markdown.strip():
-        stage = "captured"
-        health = "degraded"
-        diagnostics.append("stored-unparsed")
-    else:
-        candidate_text = _passivate_markdown(_normalize_newlines(output.markdown))
-        if len(candidate_text.encode("utf-8")) > MAX_READER_BYTES:
-            stage = "captured"
-            health = "degraded"
-            diagnostics.append("candidate reader exceeds byte budget; stored-unparsed")
-        else:
-            reader_candidate = _reader_document(source_id, raw_name, revision_id, candidate_text)
-            candidate_line_count = len(candidate_text.splitlines())
-            reader_line_offset = len(reader_candidate.decode("utf-8").splitlines()) - candidate_line_count
-            map_payload: Optional[dict[str, Any]] = None
-            if output.source_map is not None:
-                raw_map = dict(output.source_map)
-                raw_blocks = raw_map.get("blocks")
-                if isinstance(raw_blocks, list):
-                    shifted_blocks: list[dict[str, Any]] = []
-                    for raw_block in raw_blocks:
-                        if not isinstance(raw_block, Mapping):
-                            shifted_blocks.append({"invalid": True})
-                            continue
-                        shifted = dict(raw_block)
-                        for field_name in ("reader_line_start", "reader_line_end"):
-                            if isinstance(shifted.get(field_name), int):
-                                shifted[field_name] = int(shifted[field_name]) + reader_line_offset
-                        shifted_blocks.append(shifted)
-                    map_payload = _source_map(source_id, revision_id, kind, raw_digest, reader_candidate, shifted_blocks)
-                    map_errors = validate_source_map(
-                        map_payload,
-                        raw_digest=raw_digest,
-                        reader_bytes=reader_candidate,
-                        source_id=source_id,
-                        revision_id=revision_id,
-                    )
-                    if map_errors:
-                        diagnostics.extend(f"invalid source map: {error}" for error in map_errors)
-                        map_payload = None
-                else:
-                    diagnostics.append("invalid source map: blocks must be a list")
-            normalized_path = revision_root / "normalized.md"
-            _write_immutable(normalized_path, reader_candidate)
-            normalized_relative = normalized_path.relative_to(vault_root).as_posix()
-            if map_payload is not None:
-                map_path = revision_root / "source-map.json"
-                _write_immutable(map_path, _json_bytes(map_payload))
-                source_map_path = map_path
-                map_digest = sha256_bytes(_json_bytes(map_payload))
-                stage = "evidence-ready"
-            else:
-                stage = "reader-ready"
-                diagnostics.append("missing-source-map")
-            if output.status != "ok":
-                health = "degraded"
-            if diagnostics:
-                health = "degraded"
-            if ocr_available is False and kind == "pdf":
-                health = "degraded"
-            reader_path = source_root / "reader.md"
-            existing_reader = _read_optional_regular(reader_path, MAX_READER_BYTES)
-            prior_reader_digest = manifest.get("current_reader_sha256")
-            if existing_reader is not None and (prior_reader_digest is None or sha256_bytes(existing_reader) != prior_reader_digest):
-                reader_modified = True
-                health = "stale"
-                diagnostics.append("reader.md has user edits; generated candidate was preserved in revision normalized.md")
-                reader_digest = sha256_bytes(existing_reader)
-            else:
-                _write_atomic(reader_path, reader_candidate)
-                reader_digest = sha256_bytes(reader_candidate)
-    asset_paths: list[str] = []
-    if output is not None:
-        for name, data in sorted(output.assets.items()):
-            asset_path = revision_root / "assets" / _safe_asset_name(name)
-            _write_immutable(asset_path, data)
-            asset_paths.append(asset_path.relative_to(vault_root).as_posix())
-    index_raw_target = "tree" if tree_snapshot else raw_name
-    index_candidate = _index_document(source_id, kind, revision_id, stage, health, index_raw_target, reader_path is not None)
-    existing_index = _read_optional_regular(index_path, MAX_READER_BYTES)
-    prior_index_digest = manifest.get("current_index_sha256")
-    if existing_index is None:
-        _write_immutable(index_path, index_candidate)
-        index_digest = sha256_bytes(index_candidate)
-    elif prior_index_digest is not None and sha256_bytes(existing_index) == prior_index_digest:
-        _write_atomic(index_path, index_candidate)
-        index_digest = sha256_bytes(index_candidate)
-    else:
-        index_digest = sha256_bytes(existing_index)
-        health = "stale"
-        diagnostics.append("index.md has user edits; generated provenance page was preserved")
-    processing: dict[str, Any] = {
-        "adapter": output.converter if output is not None else "none",
-        "adapter_version": output.version if output is not None else "unknown",
-        "status": output.status if output is not None else "unparsed",
-        "stage": stage,
-        "health": health,
-        "diagnostics": list(dict.fromkeys(diagnostics)),
-        "normalized_path": normalized_relative or None,
-        "reader_path": reader_path.relative_to(vault_root).as_posix() if reader_path else None,
-        "source_map_path": source_map_path.relative_to(vault_root).as_posix() if source_map_path else None,
-        "reader_sha256": reader_digest or None,
-        "source_map_sha256": map_digest or None,
-        "asset_paths": asset_paths,
-        "reader_modified": reader_modified,
-    }
+    unpublished = None if previous is not None else _load_unpublished_revision(revision_root / "revision.json", revision_id, raw_digest)
     capture_event: dict[str, Any] = {"captured_at": _utc_now()}
     for key, value in (("requested_uri", requested_uri), ("final_uri", final_uri), ("external_identity", external_identity)):
         if value:
             capture_event[key] = value
-    revision: dict[str, Any] = {
-        "revision_id": revision_id,
-        "capture_events": [capture_event],
-        "raw": raw_record,
-        "processing": processing,
-        "currency": "current",
-    }
-    _write_immutable(revision_root / "revision.json", _json_bytes(revision))
-    previous_current = manifest.get("current_revision_id")
+    if previous is not None or unpublished is not None:
+        prior_revision = previous if previous is not None else unpublished
+        if prior_revision is None:
+            raise ImmutableRevisionError("capture revision recovery state is invalid")
+        _verify_revision_raw(vault_root, prior_revision, raw_files, tree_snapshot)
+        revision = dict(prior_revision)
+        revision["capture_events"] = [*list(prior_revision.get("capture_events", [])), capture_event]
+        revision["processing"] = dict(prior_revision.get("processing", {}))
+        revision["raw"] = dict(prior_revision.get("raw", {}))
+        same_bytes = True
+    else:
+        raw_paths: dict[str, str] = {}
+        if len(raw_files) == 1 and not tree_snapshot:
+            original_path = revision_root / raw_name
+            _write_immutable(original_path, next(iter(raw_files.values())))
+            raw_paths[raw_name] = original_path.relative_to(vault_root).as_posix()
+        else:
+            for relative, data in sorted(raw_files.items()):
+                safe_relative = _safe_relative_path(relative)
+                target = revision_root / "tree" / safe_relative
+                _write_immutable(target, data)
+                raw_paths[safe_relative] = target.relative_to(vault_root).as_posix()
+        raw_record: dict[str, Any] = {
+            "path": next(iter(raw_paths.values())) if len(raw_paths) == 1 and not tree_snapshot else f"Sources/{source_id}/.source/revisions/{revision_id}/tree",
+            "filename": raw_name,
+            "bytes": total_bytes,
+            "sha256": raw_digest,
+            "media_type": _media_type(raw_name, media_type),
+        }
+        if tree_snapshot:
+            raw_record["entries"] = [
+                {"path": path, "raw_path": raw_paths[path], "bytes": len(raw_files[path]), "sha256": sha256_bytes(raw_files[path])}
+                for path in sorted(raw_files)
+            ]
+        if external_identity:
+            raw_record["external_identity"] = external_identity
+        diagnostics: list[str] = []
+        output: Optional[AdapterOutput] = None
+        try:
+            if kind == "repo":
+                if adapter is not None and adapter.converter is not None:
+                    output = adapter.convert(raw_files, source_id=source_id, revision_id=revision_id, raw_digest=raw_digest, raw_paths=raw_paths)
+                else:
+                    output = _built_in_output(kind, b"", raw_name, raw_files)
+            elif kind == "dataset":
+                if adapter is not None and adapter.converter is not None:
+                    output = adapter.convert(raw_files, source_id=source_id, revision_id=revision_id, raw_digest=raw_digest, raw_paths=raw_paths)
+                else:
+                    output = _built_in_output(kind, b"", raw_name, raw_files)
+            elif kind in {"markdown", "text", "web-html", "csv"}:
+                data = next(iter(raw_files.values()))
+                if kind == "web-html" and adapter is not None and adapter.converter is not None:
+                    output = adapter.convert(data, source_id=source_id, revision_id=revision_id, filename=raw_name, raw_digest=raw_digest, raw_paths=raw_paths)
+                else:
+                    output = _built_in_output(kind, data, raw_name)
+                    if kind == "web-html" and adapter is not None and adapter.converter is None:
+                        diagnostics.append("optional Defuddle adapter unavailable; used passive HTML reader")
+            else:
+                selected = next(iter(raw_files.values()))
+                selected_adapter = _adapter_for(kind, adapter)
+                output = selected_adapter.convert(selected, source_id=source_id, revision_id=revision_id, filename=raw_name, raw_digest=raw_digest, raw_paths=raw_paths)
+        except AdapterUnavailable as exc:
+            diagnostics.append(str(exc))
+            output = None
+        except (AdapterFailure, CaptureError) as exc:
+            diagnostics.append(str(exc))
+            output = None
+        if ocr_available is False and kind == "pdf":
+            diagnostics.append("OCR adapter unavailable; image-only pages are not readable")
+        if output is not None:
+            diagnostics.extend(str(item) for item in output.diagnostics)
+        stage = "captured"
+        health = "ok"
+        source_map_path: Optional[Path] = None
+        map_digest = ""
+        normalized_relative = ""
+        if output is None or not output.markdown or not output.markdown.strip():
+            health = "degraded"
+            diagnostics.append("stored-unparsed")
+        else:
+            candidate_text = _passivate_markdown(_normalize_newlines(output.markdown))
+            if len(candidate_text.encode("utf-8")) > MAX_READER_BYTES:
+                health = "degraded"
+                diagnostics.append("candidate reader exceeds byte budget; stored-unparsed")
+            else:
+                reader_candidate = _reader_document(source_id, raw_name, revision_id, candidate_text)
+                candidate_line_count = len(candidate_text.splitlines())
+                reader_line_offset = len(reader_candidate.decode("utf-8").splitlines()) - candidate_line_count
+                map_payload: Optional[dict[str, Any]] = None
+                if output.source_map is not None:
+                    raw_map = dict(output.source_map)
+                    raw_blocks = raw_map.get("blocks")
+                    if isinstance(raw_blocks, list):
+                        shifted_blocks: list[dict[str, Any]] = []
+                        for raw_block in raw_blocks:
+                            if not isinstance(raw_block, Mapping):
+                                shifted_blocks.append({"invalid": True})
+                                continue
+                            shifted = dict(raw_block)
+                            for field_name in ("reader_line_start", "reader_line_end"):
+                                if isinstance(shifted.get(field_name), int):
+                                    shifted[field_name] = int(shifted[field_name]) + reader_line_offset
+                            shifted_blocks.append(shifted)
+                        map_payload = _source_map(source_id, revision_id, kind, raw_digest, reader_candidate, shifted_blocks)
+                        map_errors = validate_source_map(
+                            map_payload,
+                            raw_digest=raw_digest,
+                            reader_bytes=reader_candidate,
+                            source_kind=kind,
+                            raw_files=raw_files,
+                            raw_name=raw_name,
+                            source_id=source_id,
+                            revision_id=revision_id,
+                        )
+                        if map_errors:
+                            diagnostics.extend(f"invalid source map: {error}" for error in map_errors)
+                            map_payload = None
+                    else:
+                        diagnostics.append("invalid source map: blocks must be a list")
+                normalized_path = revision_root / "normalized.md"
+                _write_immutable(normalized_path, reader_candidate)
+                normalized_relative = normalized_path.relative_to(vault_root).as_posix()
+                if map_payload is not None:
+                    map_path = revision_root / "source-map.json"
+                    map_bytes = _json_bytes(map_payload)
+                    _write_immutable(map_path, map_bytes)
+                    source_map_path = map_path
+                    map_digest = sha256_bytes(map_bytes)
+                    stage = "evidence-ready"
+                else:
+                    stage = "reader-ready"
+                    diagnostics.append("missing-source-map")
+                if output.status != "ok" or diagnostics or (ocr_available is False and kind == "pdf"):
+                    health = "degraded"
+        asset_paths: list[str] = []
+        if output is not None:
+            for name, data in sorted(output.assets.items()):
+                asset_path = revision_root / "assets" / _safe_asset_name(name)
+                _write_immutable(asset_path, data)
+                asset_paths.append(asset_path.relative_to(vault_root).as_posix())
+        processing = {
+            "adapter": output.converter if output is not None else "none",
+            "adapter_version": output.version if output is not None else "unknown",
+            "status": output.status if output is not None else "unparsed",
+            "stage": stage,
+            "health": health,
+            "diagnostics": list(dict.fromkeys(diagnostics)),
+            "normalized_path": normalized_relative or None,
+            "reader_path": None,
+            "source_map_path": source_map_path.relative_to(vault_root).as_posix() if source_map_path else None,
+            "reader_sha256": None,
+            "source_map_sha256": map_digest or None,
+            "asset_paths": asset_paths,
+            "reader_modified": False,
+        }
+        revision = {
+            "revision_id": revision_id,
+            "capture_events": [capture_event],
+            "raw": raw_record,
+            "processing": processing,
+            "currency": "current",
+        }
+        same_bytes = False
+
+    processing = dict(revision.get("processing", {}))
+    diagnostics = [str(item) for item in processing.get("diagnostics", [])]
+    health = str(processing.get("health", "degraded"))
+    stage = str(processing.get("stage", "captured"))
+    normalized_relative = processing.get("normalized_path")
+    reader_candidate: Optional[bytes] = None
+    if isinstance(normalized_relative, str) and normalized_relative:
+        reader_candidate = _read_regular_file(vault_root / normalized_relative, MAX_READER_BYTES)
+    reader_path = source_root / "reader.md"
+    reader_before = _read_optional_regular(reader_path, MAX_READER_BYTES)
+    prior_reader_digest = manifest.get("current_reader_sha256")
+    reader_modified = False
+    if reader_candidate is not None:
+        if reader_before is not None and (not isinstance(prior_reader_digest, str) or sha256_bytes(reader_before) != prior_reader_digest):
+            reader_after = reader_before
+            reader_modified = True
+            health = "stale"
+            diagnostics.append("reader.md has user edits; generated candidate was preserved in revision normalized.md")
+        else:
+            reader_after = reader_candidate
+    elif reader_before is not None and (not isinstance(prior_reader_digest, str) or sha256_bytes(reader_before) != prior_reader_digest):
+        reader_after = reader_before
+        reader_modified = True
+        health = "stale"
+        diagnostics.append("reader.md has user edits; no generated reader was substituted")
+    else:
+        reader_after = None
+    reader_digest = sha256_bytes(reader_after) if reader_after is not None else None
+    processing["health"] = health
+    processing["diagnostics"] = list(dict.fromkeys(diagnostics))
+    processing["reader_path"] = reader_path.relative_to(vault_root).as_posix() if reader_after is not None else None
+    processing["reader_sha256"] = reader_digest
+    processing["reader_modified"] = reader_modified
+
+    raw_record = revision.get("raw", {})
+    index_raw_target = "tree" if tree_snapshot else str(raw_record.get("filename", raw_name))
+    index_candidate = _index_document(source_id, kind, revision_id, stage, health, index_raw_target, reader_after is not None)
+    index_before = _read_optional_regular(index_path, MAX_READER_BYTES)
+    prior_index_digest = manifest.get("current_index_sha256")
+    if index_before is not None and (not isinstance(prior_index_digest, str) or sha256_bytes(index_before) != prior_index_digest):
+        index_after = index_before
+        health = "stale"
+        diagnostics.append("index.md has user edits; generated provenance page was preserved")
+        processing["health"] = health
+        processing["diagnostics"] = list(dict.fromkeys(diagnostics))
+    else:
+        index_after = index_candidate
+    index_digest = sha256_bytes(index_after)
+    revision["processing"] = processing
+    revision["currency"] = "current"
+    if not same_bytes:
+        _write_immutable(revision_root / "revision.json", _json_bytes(revision))
+
+    revisions: list[dict[str, Any]] = []
+    replaced = False
     for item in manifest.get("revisions", []):
-        if isinstance(item, dict) and item.get("revision_id") == previous_current:
-            item["currency"] = "stale"
+        if not isinstance(item, Mapping):
+            raise ImmutableRevisionError("source manifest revision entry is invalid")
+        if item.get("revision_id") == revision_id:
+            current_item = dict(revision)
+            replaced = True
+        else:
+            current_item = dict(item)
+        current_item["currency"] = "current" if current_item.get("revision_id") == revision_id else "stale"
+        revisions.append(current_item)
+    if not replaced:
+        revisions.append(dict(revision))
+    manifest["revisions"] = revisions
     manifest["current_revision_id"] = revision_id
-    manifest["revisions"].append(revision)
     if requested_uri:
         manifest["requested_uri"] = requested_uri
     if final_uri:
         manifest["final_uri"] = final_uri
     if external_identity:
         manifest["external_identity"] = external_identity
-    manifest["current_reader_sha256"] = reader_digest or None
+    manifest["current_reader_sha256"] = reader_digest
     manifest["current_index_sha256"] = index_digest
     manifest["updated_at"] = _utc_now()
-    _write_manifest(manifest_path, manifest)
-    result = _result_from_revision(vault_root, source_id, kind, source_root, manifest_path, index_path, revision, same_bytes=False)
-    return result
+    manifest_after = _json_bytes(manifest)
+    _commit_capture_transaction(
+        source_root,
+        (
+            _FileMutation("reader.md", reader_before, reader_after),
+            _FileMutation("index.md", index_before, index_after),
+            _FileMutation(".source/manifest.json", manifest_before, manifest_after),
+        ),
+    )
+    committed_revision = next(item for item in revisions if item.get("revision_id") == revision_id)
+    return _result_from_revision(
+        vault_root,
+        source_id,
+        kind,
+        source_root,
+        manifest_path,
+        index_path,
+        committed_revision,
+        same_bytes=same_bytes,
+    )
 
 
 def capture_bytes(
