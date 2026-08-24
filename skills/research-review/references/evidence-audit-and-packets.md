@@ -40,7 +40,7 @@ limitations
 1. 可见 Markdown 有非空逐字 quote、source link、人类可读 locator、source ID/revision 和 evidence ID。
 2. 隐藏 binding 的 subject path、claim ID、claim digest、evidence ID 和 evidence-block digest 与当前 Markdown 一致。
 3. Binding 指向不可变 raw artifact，并且 raw path/digest、reader digest、source-map digest 与该 revision manifest 一致。
-4. Typed locator 与来源类型相容；精度不足时只能显式使用 `whole-document`，不得猜 page、line、cell 或 bbox。
+4. Typed locator 与来源类型相容，并且与 `research-capture-source-map/v2` 中同一逐字 quote 的 block 一致；精度不足时只能显式使用 `whole-document`，不得猜 page、line、cell 或 bbox。
 5. Exact quote 在绑定 revision 的可信 artifact 中逐字成立；visible quote、binding proof copy 和 quote digest 一致。
 6. Evidence integrity 为 `verified`。缺原件、digest mismatch、无法定位或 quote mismatch 均为 `invalid`。
 7. Evidence currency 单独检查。出现更新 revision 不销毁旧 integrity，但将需要当前来源的审查标为 `stale`。

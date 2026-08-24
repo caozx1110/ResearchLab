@@ -134,7 +134,7 @@ Frontmatter 只用于 identity/routing/status summary，不能变成塞满研究
 
 ### `research-review`
 
-独立拥有 evidence audit、review packet、current-message authorization、confirm/reject/defer application 和 receipt validation。它不生成或美化待审 claim，且禁止 AI/tool/model signer。
+独立拥有 evidence audit、review packet、current-message authorization、confirm/reject/defer application 和 receipt validation。生产审查器直接消费 `research-analysis/evidence-binding/v2`，逐项复核 capture source map，并通过 `research-vault` 的 exact-target journal 同步提交 subject、review 与 receipt。它不生成或美化待审 claim，且禁止 AI/tool/model signer。
 
 Composition 保持 owner boundary。例如“摄入论文并推进项目”依次调用 capture、analysis、review/workbench；不建立一个拥有所有写权限的 orchestrator。
 

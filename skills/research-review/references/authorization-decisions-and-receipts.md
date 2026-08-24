@@ -44,7 +44,7 @@ Receipt 位于 `.research/receipts/<receipt-id>.json`，是不可变授权 proof
 
 ```json
 {
-  "schema": "research-review-receipt/v1",
+  "schema": "research-review/confirmation-receipt/v2",
   "receipt_id": "receipt-review-example-c001-001",
   "review_id": "review-example-c001",
   "subject": {"path": "Notes/example.md", "claim_id": "C-001"},
@@ -68,7 +68,7 @@ Receipt 不保存独占 claim text、summary、decision rationale、project stat
 2. 按稳定顺序锁定目标；
 3. 在 subject claim 与 review packet 写入一致、可见的决定和用户备注；
 4. 创建新 receipt，目标已存在时拒绝覆盖；
-5. 原子提交或完整回滚；checkpoint 只含本操作 targets。
+5. 通过 `research-vault` 的 exact-target journal 原子提交或完整回滚；checkpoint 只含本操作 targets。
 
 不得先写可见 `confirmed` 再补 receipt，也不得先写 receipt 再留下旧可见状态。任何冲突都保持旧完整状态或可恢复 journal。
 

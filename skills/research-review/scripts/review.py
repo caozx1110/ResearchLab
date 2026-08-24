@@ -6,10 +6,10 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
-import secrets
 import stat
 import sys
 import unicodedata
@@ -23,6 +23,7 @@ import yaml
 
 BINDING_SCHEMA = "research-analysis/evidence-binding/v2"
 CAPTURE_SCHEMA = "research-capture/v2"
+SOURCE_MAP_SCHEMA = "research-capture-source-map/v2"
 RECEIPT_SCHEMA = "research-review/confirmation-receipt/v2"
 EVIDENCE_SET_SCHEMA = "research-review/evidence-set/v2"
 DECISIONS = frozenset({"confirm", "reject", "defer"})
@@ -106,8 +107,6 @@ class ClaimRecord:
             "text": self.text,
             "class": self.claim_class,
             "epistemic_state": self.epistemic_state,
-            "review_state": self.review_state,
-            "evidence_ids": list(self.evidence_ids),
             "limitations": self.limitations,
         }
 
@@ -207,6 +206,27 @@ class ReceiptValidation:
     valid: bool
     state: str
     reasons: tuple[str, ...]
+
+
+_VAULT_RUNTIME: Any = None
+
+
+def _load_vault_runtime() -> Any:
+    global _VAULT_RUNTIME
+    if _VAULT_RUNTIME is not None:
+        return _VAULT_RUNTIME
+    script = Path(__file__).resolve().parents[2] / "research-vault" / "scripts" / "vault.py"
+    spec = importlib.util.spec_from_file_location("research_review_vault_runtime", script)
+    if spec is None or spec.loader is None:
+        raise ReviewContractError("research-vault transaction runtime is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (ImportError, OSError) as exc:
+        raise ReviewContractError("research-vault transaction runtime is unavailable") from exc
+    _VAULT_RUNTIME = module
+    return module
 
 
 def sha256_digest(value: str | bytes) -> str:
@@ -353,61 +373,14 @@ def _read_json(workspace: Path, relative: str, *, label: str) -> Mapping[str, An
 
 
 def _optional_bytes(workspace: Path, relative: str, *, max_bytes: int, label: str) -> Optional[bytes]:
-    try:
-        return read_workspace_bytes(workspace, relative, max_bytes=max_bytes, label=label)
-    except ReviewContractError as exc:
-        if "No such file or directory" in str(exc):
-            return None
-        raise
-
-
-def _current_child(parent_fd: int, name: str, max_bytes: int) -> Optional[bytes]:
-    try:
-        return _read_child(parent_fd, name, max_bytes, "atomic target")
-    except ReviewContractError as exc:
-        if "No such file or directory" in str(exc):
-            return None
-        raise
-
-
-def _atomic_write(
-    workspace: Path,
-    relative: str,
-    payload: bytes,
-    *,
-    expected_digest: Optional[str],
-    max_existing_bytes: int,
-    mode: int,
-) -> None:
-    with _parent_directory(workspace, relative, create=True) as (parent_fd, name):
-        current = _current_child(parent_fd, name, max_existing_bytes)
-        if expected_digest is None:
-            if current is not None:
-                raise ReviewConflictError(f"atomic target already exists: {relative}")
-        elif current is None or sha256_digest(current) != expected_digest:
-            raise ReviewConflictError(f"atomic target changed: {relative}")
-        temporary = f".{name}.tmp-{secrets.token_hex(8)}"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(temporary, flags, mode, dir_fd=parent_fd)
+    with _parent_directory(workspace, relative) as (parent_fd, name):
         try:
-            view = memoryview(payload)
-            while view:
-                written = os.write(fd, view)
-                view = view[written:]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        try:
-            os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-            os.fsync(parent_fd)
-        except BaseException:
-            try:
-                os.unlink(temporary, dir_fd=parent_fd)
-            except OSError:
-                pass
-            raise
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ReviewContractError(f"cannot inspect {label}: {exc}") from exc
+        return _read_child(parent_fd, name, max_bytes, label)
 
 
 @contextlib.contextmanager
@@ -627,6 +600,36 @@ def _verify_raw_record(workspace: Path, raw: Mapping[str, Any]) -> tuple[str, li
     return "sha256:" + actual_digest, findings
 
 
+def _normalized_locator(locator: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(locator)
+    locator_type = normalized.pop("type", None)
+    if locator_type is not None:
+        if "kind" in normalized and normalized["kind"] != locator_type:
+            raise ReviewContractError("source-map locator type and kind disagree")
+        normalized["kind"] = locator_type
+    return normalized
+
+
+def _source_map_matches_evidence(
+    source_map: Mapping[str, Any],
+    evidence: EvidenceRecord,
+) -> bool:
+    blocks = source_map.get("blocks")
+    if not isinstance(blocks, list):
+        return False
+    expected_locator = _normalized_locator(evidence.locator)
+    for block in blocks:
+        if not isinstance(block, Mapping) or block.get("quote") != evidence.exact_quote:
+            continue
+        locator = block.get("locator")
+        if not isinstance(locator, Mapping):
+            continue
+        actual_locator = _normalized_locator(locator)
+        if all(actual_locator.get(key) == value for key, value in expected_locator.items()):
+            return True
+    return False
+
+
 def _source_facts(workspace: Path, evidence: EvidenceRecord) -> tuple[dict[str, Any], list[str], list[str]]:
     invalid: list[str] = []
     stale: list[str] = []
@@ -727,17 +730,52 @@ def _source_facts(workspace: Path, evidence: EvidenceRecord) -> tuple[dict[str, 
         invalid.append(f"{evidence.evidence_id}: artifact path is not owned by the bound revision")
     source_map_path = processing.get("source_map_path")
     if isinstance(source_map_path, str) and source_map_path:
-        source_map = read_workspace_bytes(
+        source_map_bytes = read_workspace_bytes(
             workspace,
             _safe_relative_path(source_map_path, "source map path"),
             max_bytes=MAX_JSON_BYTES,
             label="source map",
         )
-        source_map_digest = sha256_digest(source_map)
+        source_map_digest = sha256_digest(source_map_bytes)
         facts["source_map_digest"] = source_map_digest
         expected_map = processing.get("source_map_sha256")
         if expected_map not in {source_map_digest, source_map_digest.removeprefix("sha256:")}:
             invalid.append(f"{evidence.evidence_id}: source map digest changed")
+        try:
+            source_map = json.loads(source_map_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            source_map = None
+        if not isinstance(source_map, Mapping):
+            invalid.append(f"{evidence.evidence_id}: source map is not a JSON object")
+        else:
+            expected_raw = facts.get("raw_source_digest")
+            if source_map.get("schema") != SOURCE_MAP_SCHEMA:
+                invalid.append(f"{evidence.evidence_id}: source map schema is invalid")
+            if source_map.get("source_id") != evidence.source_id:
+                invalid.append(f"{evidence.evidence_id}: source map source identity changed")
+            if source_map.get("revision_id") != evidence.source_revision:
+                invalid.append(f"{evidence.evidence_id}: source map revision identity changed")
+            if source_map.get("raw_sha256") not in {
+                expected_raw,
+                str(expected_raw or "").removeprefix("sha256:"),
+            }:
+                invalid.append(f"{evidence.evidence_id}: source map raw digest changed")
+            if source_map.get("reader_sha256") not in {
+                evidence.reader_digest,
+                evidence.reader_digest.removeprefix("sha256:"),
+            }:
+                invalid.append(f"{evidence.evidence_id}: source map reader digest changed")
+            try:
+                locator_matches = _source_map_matches_evidence(source_map, evidence)
+            except ReviewContractError as exc:
+                invalid.append(f"{evidence.evidence_id}: {exc}")
+            else:
+                if not locator_matches:
+                    invalid.append(
+                        f"{evidence.evidence_id}: exact quote and typed locator are absent from source map"
+                    )
+    else:
+        invalid.append(f"{evidence.evidence_id}: source revision has no source map")
     return facts, invalid, stale
 
 
@@ -762,7 +800,6 @@ def audit_claim(
             label="subject Markdown",
         )
         claim, evidence, _analysis_id = _parse_subject(subject_text, claim_id)
-        binding = _read_json(workspace, binding_path, label="analysis evidence binding")
     except ReviewContractError as exc:
         return AuditResult(
             "blocked",
@@ -777,9 +814,15 @@ def audit_claim(
             (str(exc),),
         )
 
+    blocked: list[str] = []
     invalid: list[str] = []
     stale: list[str] = []
     binding_digest: Optional[str] = None
+    try:
+        binding = _read_json(workspace, binding_path, label="analysis evidence binding")
+    except ReviewContractError as exc:
+        binding = {}
+        blocked.append(str(exc))
     if binding.get("schema") != BINDING_SCHEMA:
         invalid.append("binding schema is not research-analysis/evidence-binding/v2")
     if binding.get("subject_markdown") != subject_path:
@@ -865,8 +908,10 @@ def audit_claim(
             "items": sorted(evidence_items, key=lambda row: row["evidence_id"]),
         }
     )
-    findings = tuple(dict.fromkeys(invalid + stale))
-    if invalid:
+    findings = tuple(dict.fromkeys(blocked + invalid + stale))
+    if blocked:
+        outcome = "blocked"
+    elif invalid:
         outcome = "invalid"
     elif stale:
         outcome = "stale"
@@ -975,14 +1020,22 @@ def write_review_packet(
     with _review_lock(workspace, review_id, claim_id):
         if expected_review_digest is not None:
             expected_review_digest = _digest(expected_review_digest, "expected review digest")
-        _atomic_write(
-            workspace,
-            review_path,
-            packet,
-            expected_digest=expected_review_digest,
-            max_existing_bytes=MAX_MARKDOWN_BYTES,
-            mode=0o644,
-        )
+        try:
+            vault = _load_vault_runtime()
+            vault.atomic_write(
+                workspace / review_path,
+                packet,
+                expected_digest=(
+                    None
+                    if expected_review_digest is None
+                    else expected_review_digest.removeprefix("sha256:")
+                ),
+                root=workspace,
+            )
+        except ReviewContractError:
+            raise
+        except Exception as exc:
+            raise ReviewConflictError("review packet transaction failed") from exc
     return audit
 
 
@@ -1112,6 +1165,40 @@ def _decision_markdown(review_markdown: str, authorization: Authorization, recei
     return _frontmatter(frontmatter) + body[: section_match.start()] + replacement + body[end:]
 
 
+def _decision_subject_markdown(subject_markdown: str, claim_id: str, decision: str) -> str:
+    _split_frontmatter(subject_markdown, "subject Markdown")
+    matches = list(HEADING_RE.finditer(subject_markdown))
+    selected: list[tuple[re.Match[str], int]] = []
+    for index, match in enumerate(matches):
+        if len(match.group("marks")) != 3 or not match.group("title").casefold().startswith("claim "):
+            continue
+        if _heading_id(match.group("title"), "claim") == claim_id:
+            selected.append((match, index))
+    if len(selected) != 1:
+        raise ReviewContractError(f"subject claim identity is ambiguous: {claim_id}")
+    claim_heading, heading_index = selected[0]
+    end = len(subject_markdown)
+    for following in matches[heading_index + 1 :]:
+        if len(following.group("marks")) <= 3:
+            end = following.start()
+            break
+    block = subject_markdown[claim_heading.end() : end]
+    state_matches = list(
+        re.finditer(
+            r"^(?P<prefix>\s*-\s+Review state:\s*)(?P<state>[^\r\n]*?)\s*$",
+            block,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+    )
+    if len(state_matches) != 1:
+        raise ReviewContractError("subject claim must contain one visible Review state field")
+    state_match = state_matches[0]
+    visible_state = VISIBLE_STATES[decision]
+    replacement = state_match.group("prefix") + f"`{visible_state}`"
+    updated_block = block[: state_match.start()] + replacement + block[state_match.end() :]
+    return subject_markdown[: claim_heading.end()] + updated_block + subject_markdown[end:]
+
+
 def _receipt_id(authorization: Authorization) -> str:
     suffix = authorization.authorization_digest.removeprefix("sha256:")[:20]
     return f"receipt-{authorization.review_id}-{authorization.claim_id}-{suffix}"
@@ -1140,6 +1227,8 @@ def apply_decision(
     interaction_ref: Optional[str] = None,
     issued_at: Optional[str] = None,
 ) -> DecisionResult:
+    subject_path = _safe_relative_path(subject_path, "subject path")
+    binding_path = _safe_relative_path(binding_path, "binding path")
     review_path = _safe_relative_path(review_path, "review path")
     authorization = parse_current_user_authorization(
         current_user_message,
@@ -1164,6 +1253,12 @@ def apply_decision(
             raise ReviewContractError("current claim/evidence set cannot be bound to a decision")
         if authorization.decision == "confirm" and not audit.confirm_eligible:
             raise ReviewContractError("confirm requires a current, integrity-verified evidence set")
+        subject_bytes = read_workspace_bytes(
+            workspace,
+            subject_path,
+            max_bytes=MAX_MARKDOWN_BYTES,
+            label="subject Markdown",
+        )
         review_bytes = read_workspace_bytes(
             workspace,
             review_path,
@@ -1174,8 +1269,16 @@ def apply_decision(
         frontmatter, fields = _review_identity(review_text)
         if frontmatter.get("id") != review_id or frontmatter.get("kind") != "review":
             raise ReviewContractError("review packet identity changed")
-        if frontmatter.get("status") not in {"awaiting-decision", "pass", "pass-with-limitations", "stale", "invalid"}:
-            raise ReviewContractError("review packet already contains a decision; replay rejected")
+        if frontmatter.get("status") not in {
+            "awaiting-decision",
+            "pass",
+            "pass-with-limitations",
+            "blocked",
+            "stale",
+            "invalid",
+            *VISIBLE_STATES.values(),
+        }:
+            raise ReviewContractError("review packet status is unsupported")
         expected_fields = {
             "subject path": subject_path,
             "claim id": claim_id,
@@ -1201,6 +1304,11 @@ def apply_decision(
             "issued_at": issued_at or _utc_now(),
         }
         receipt_bytes = (json.dumps(receipt, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        decided_subject = _decision_subject_markdown(
+            subject_bytes.decode("utf-8"),
+            claim_id,
+            authorization.decision,
+        ).encode("utf-8")
         decided_review = _decision_markdown(review_text, authorization, receipt_id).encode("utf-8")
         existing_receipt = _optional_bytes(
             workspace,
@@ -1212,40 +1320,40 @@ def apply_decision(
             if existing_receipt != receipt_bytes:
                 raise ReviewConflictError("deterministic receipt target already contains different bytes")
             raise ReviewContractError("current user message was already consumed; replay rejected")
-        _atomic_write(
-            workspace,
-            receipt_path,
-            receipt_bytes,
-            expected_digest=None,
-            max_existing_bytes=MAX_JSON_BYTES,
-            mode=0o600,
-        )
         try:
-            _atomic_write(
+            vault = _load_vault_runtime()
+            operation = vault.begin_operation(
                 workspace,
-                review_path,
-                decided_review,
-                expected_digest=sha256_digest(review_bytes),
-                max_existing_bytes=MAX_MARKDOWN_BYTES,
-                mode=0o644,
+                "review-decision",
+                [subject_path, review_path, receipt_path],
+                expected_digests={
+                    subject_path: sha256_digest(subject_bytes).removeprefix("sha256:"),
+                    review_path: sha256_digest(review_bytes).removeprefix("sha256:"),
+                    receipt_path: None,
+                },
             )
-        except BaseException:
-            with _parent_directory(workspace, receipt_path) as (parent_fd, name):
-                try:
-                    current = _read_child(parent_fd, name, MAX_JSON_BYTES, "confirmation receipt")
-                    if current == receipt_bytes:
-                        os.unlink(name, dir_fd=parent_fd)
-                        os.fsync(parent_fd)
-                except OSError:
-                    pass
+        except ReviewContractError:
             raise
+        except Exception as exc:
+            raise ReviewConflictError("review decision transaction preflight failed") from exc
+        try:
+            operation.write(subject_path, decided_subject)
+            operation.write(review_path, decided_review)
+            operation.write(receipt_path, receipt_bytes)
+            operation.commit()
+        except Exception as exc:
+            if not operation.closed:
+                operation.abort()
+            if isinstance(exc, ReviewContractError):
+                raise
+            raise ReviewConflictError("review decision transaction failed") from exc
     return DecisionResult(
         authorization.decision,
         VISIBLE_STATES[authorization.decision],
         review_path,
         receipt_path,
         receipt_id,
-        (review_path, receipt_path, lock_path),
+        (subject_path, review_path, receipt_path, lock_path),
     )
 
 
@@ -1260,6 +1368,10 @@ def validate_receipt(
     claim_id: str,
 ) -> ReceiptValidation:
     reasons: list[str] = []
+    subject_path = _safe_relative_path(subject_path, "subject path")
+    binding_path = _safe_relative_path(binding_path, "binding path")
+    review_path = _safe_relative_path(review_path, "review path")
+    receipt_path = _safe_relative_path(receipt_path, "receipt path")
     audit = audit_claim(
         workspace,
         subject_path=subject_path,
@@ -1267,13 +1379,11 @@ def validate_receipt(
         claim_id=claim_id,
         review_id=review_id,
     )
-    if audit.outcome not in {"pass", "pass-with-limitations"}:
-        reasons.append(f"current audit is {audit.outcome}")
     try:
-        receipt = _read_json(workspace, _safe_relative_path(receipt_path, "receipt path"), label="confirmation receipt")
+        receipt = _read_json(workspace, receipt_path, label="confirmation receipt")
         review_text = _read_text(
             workspace,
-            _safe_relative_path(review_path, "review path"),
+            review_path,
             max_bytes=MAX_MARKDOWN_BYTES,
             label="review packet",
         )
@@ -1289,8 +1399,13 @@ def validate_receipt(
         reasons.append("receipt subject identity changed")
     if decision not in DECISIONS:
         reasons.append("receipt decision is invalid")
-    elif frontmatter.get("status") != VISIBLE_STATES[decision]:
-        reasons.append("visible review decision disagrees with receipt")
+    else:
+        if decision == "confirm" and audit.outcome not in {"pass", "pass-with-limitations"}:
+            reasons.append(f"confirmed evidence audit is now {audit.outcome}")
+        if frontmatter.get("status") != VISIBLE_STATES[decision]:
+            reasons.append("visible review decision disagrees with receipt")
+        if audit.claim is None or audit.claim.review_state != VISIBLE_STATES[decision]:
+            reasons.append("visible subject decision disagrees with receipt")
     if fields.get("claim digest") != audit.claim_digest or receipt.get("claim_digest") != audit.claim_digest:
         reasons.append("current claim block digest changed")
     if fields.get("evidence-set digest") != audit.evidence_set_digest or receipt.get("evidence_set_digest") != audit.evidence_set_digest:

@@ -346,6 +346,17 @@ def test_clean_install_ships_only_runtime_allowlist(tmp_path: Path) -> None:
         for path in (workspace / ".agents" / "skills").glob("*/SKILL.md")
     }
     assert discovered == shipping
+    installed_review = workspace / ".agents" / "skills" / "research-review" / "scripts" / "review.py"
+    assert installed_review.is_file()
+    review_help = subprocess.run(
+        [sys.executable, str(installed_review), "--help"],
+        cwd=workspace,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=_installer_env(),
+    )
+    assert review_help.returncode == 0, review_help.stdout + review_help.stderr
     runtime_files = {
         path.name
         for path in (workspace / ".agents" / "lib" / "research").iterdir()

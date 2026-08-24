@@ -279,14 +279,20 @@ def test_claim_classes_separate_factual_interpretive_and_uncertain(
         evidence_ids=("evidence-1",),
     )
     assert uncertain.epistemic_state == "uncertain"
+    governed = analysis.Claim(
+        claim_id="claim-confirmed",
+        text="An Agent cannot confirm this claim.",
+        claim_class="observation",
+        epistemic_state="factual",
+        evidence_ids=("evidence-1",),
+        review_state="confirmed",
+    )
     with pytest.raises(analysis.AnalysisContractError, match="self-authorize"):
-        analysis.Claim(
-            claim_id="claim-confirmed",
-            text="An Agent cannot confirm this claim.",
-            claim_class="observation",
-            epistemic_state="factual",
-            evidence_ids=("evidence-1",),
-            review_state="confirmed",
+        analysis.render_analysis(
+            analysis_id="analysis-confirmed",
+            subject="Governed state",
+            kind="single-source",
+            claims=(governed,),
         )
 
 

@@ -75,7 +75,10 @@ CLAIM_CLASSES = frozenset(
     }
 )
 EPISTEMIC_STATES = frozenset({"factual", "interpretive", "uncertain"})
-REVIEW_STATES = frozenset({"draft", "pending", "stale", "deferred", "rejected"})
+REVIEW_STATES = frozenset(
+    {"draft", "pending", "stale", "confirmed", "deferred", "rejected"}
+)
+AUTHORABLE_REVIEW_STATES = frozenset({"draft", "pending", "stale"})
 LOCATOR_KINDS = frozenset(
     {
         "binary",
@@ -204,9 +207,10 @@ def _validate_locator(locator: Mapping[str, Any]) -> dict[str, Any]:
             "heading",
             "fragment",
             "paragraph",
-            "page",
-            "path",
-            "line_start",
+                "page",
+                "path",
+                "line",
+                "line_start",
             "sheet",
             "cell",
             "row_key",
@@ -434,8 +438,6 @@ class Claim:
             "text": self.text,
             "class": self.claim_class,
             "epistemic_state": self.epistemic_state,
-            "review_state": self.review_state,
-            "evidence_ids": list(self.evidence_ids),
             "limitations": self.limitations,
         }
 
@@ -838,6 +840,15 @@ def render_analysis(
         raise AnalysisContractError("analysis kind must be single-source or synthesis")
     if not isinstance(subject, str) or not subject.strip():
         raise AnalysisContractError("analysis subject must be non-empty")
+    governed = sorted(
+        claim.claim_id
+        for claim in claims
+        if claim.review_state not in AUTHORABLE_REVIEW_STATES
+    )
+    if governed:
+        raise AnalysisContractError(
+            "analysis cannot self-authorize governed review states: " + ", ".join(governed)
+        )
     payload = {
         "id": _page_identifier(analysis_id, "analysis_id"),
         "kind": kind,
