@@ -10,6 +10,8 @@ import pytest
 
 
 MODULE_PATH = Path(__file__).parents[3] / "skills" / "research-vault" / "scripts" / "vault.py"
+SKILL_PATH = MODULE_PATH.parents[1] / "SKILL.md"
+CONTRACT_PATH = MODULE_PATH.parents[1] / "references" / "v2-contract.md"
 SPEC = importlib.util.spec_from_file_location("research_vault_foundation", MODULE_PATH)
 assert SPEC and SPEC.loader
 vault = importlib.util.module_from_spec(SPEC)
@@ -21,6 +23,15 @@ SPEC.loader.exec_module(vault)
 def fresh_vault(tmp_path: Path) -> Path:
     vault.initialize_vault(tmp_path)
     return tmp_path
+
+
+def test_skill_uses_only_the_local_v2_contract_reference() -> None:
+    skill_text = SKILL_PATH.read_text(encoding="utf-8")
+    contract_text = CONTRACT_PATH.read_text(encoding="utf-8")
+    assert "(references/v2-contract.md)" in skill_text
+    assert "SCHEMAS.md" not in skill_text
+    assert "SCHEMAS.md" not in contract_text
+    assert "Visible ordinary Markdown is the only human semantic truth." in contract_text
 
 
 def test_fresh_vault_has_root_layout_and_plain_markdown_home(fresh_vault: Path) -> None:

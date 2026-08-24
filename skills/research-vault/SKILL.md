@@ -10,8 +10,9 @@ workspace. The visible Markdown files are the only semantic source of truth;
 `.source/` preserves source proof and `.research/` stores evidence bindings,
 receipts, derived indexes, journals, locks, caches, logs, and recovery state.
 
-The contract follows `.agents/lib/research/SCHEMAS.md#ownership` and the v2
-Markdown-first boundary:
+<!-- protocol-reference-exempt: self-contained Research Vault v2 contract -->
+
+Follow the local [Research Vault v2 contract](references/v2-contract.md):
 
 - Initialize the workspace root with `Home.md`, ordinary Markdown page areas,
   `Views/` fallbacks, and classified `.research/` directories.
