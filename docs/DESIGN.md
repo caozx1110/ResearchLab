@@ -4,6 +4,12 @@
 
 拟议变更先进入 GitHub Epic/Atomic Issue；会影响长期架构、兼容、安全、恢复或 ownership 的取舍还须形成 tracked ADR。只有经人类 review 合入 default branch 的设计/ADR 才是 accepted contract，未合并分支上的内容仍是 proposal。活动范围、接力状态、候选 SHA、证据与 review 只存在于 GitHub Issue/PR/remote commits/Actions，不能由本机文件或聊天上下文补全；普通交付、按需增强控制与恢复规则见 [GitHub-only 开发工作流](DEVELOPMENT_WORKFLOW.md)。
 
+## Research Vault v2 目标与当前实现边界
+
+维护者已经确认以 [Research Vault v2 蓝图](blueprints/research-vault-v2/BLUEPRINT.md) 和 [ADR 0005](decisions/0005-markdown-semantic-source-and-five-skill-research-vault.md) 作为不兼容的下一代目标：普通 Markdown 是唯一人类语义真相，隐藏 `.source/`/`.research/` 只承担来源保真、证据/授权证明和运行恢复；Obsidian 直接打开工作区根；shipping inventory 最终从 15 个收敛为 5 个。该目标只有在对应文档经人类 review 合入后才成为 accepted target。
+
+Target acceptance 不等于 runtime 已经切换。后续 Atomic Issues 完成 vault、capture、analysis/review、workbench 和 hard cutover 之前，当前代码、测试、schema、15 个 shipping skill、`record.yaml` canonical 和逻辑 `kb/...` 仍是 v1 implementation fact。除非章节明确标注 v2 target，本文以下内容继续描述当前 v1 实现；不得用未实现的蓝图覆盖诊断、验收或用户行为事实。
+
 ## 目标与非目标
 
 Open Research Workspace Skills 是 knowledge-unit-first 的 research operating system。聊天是交互界面，不是状态存储：

@@ -2,6 +2,10 @@
 
 本目录保存 Architecture Decision Record（ADR），解释长期设计选择“为什么这样做”。当前系统“是什么”仍以 [DESIGN.md](../DESIGN.md)、schema、代码和测试为准；GitHub Issue/PR 负责提案、讨论与交付状态，远端接力与按需增强控制见 [GitHub-only 开发工作流](../DEVELOPMENT_WORKFLOW.md)。
 
+## 当前 target transition
+
+[ADR 0005](0005-markdown-semantic-source-and-five-skill-research-vault.md) 定义 Research Vault v2 的 Markdown 唯一语义真相和五技能 target，并以 scoped 方式 supersede ADR 0004 的 v1 canonical data model。它合入后只表示目标已接受；当前实现仍以代码、测试、schema 和 [DESIGN.md](../DESIGN.md) 标明的 rollout 边界为准，直到后续 waves 完成 hard cutover。
+
 ## 何时需要 ADR
 
 以下变化应新增 ADR：架构或 canonical ownership、schema/兼容策略、安全与恢复不变量、不可逆外部依赖，或存在多个合理方案且取舍会影响后续交付波次。局部实现细节不需要 ADR，但仍须写入 Atomic Issue。
