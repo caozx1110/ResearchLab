@@ -56,11 +56,11 @@ verifiable.
 | --- | --- | --- | --- |
 | Web/HTML | response bytes and requested/final URI | passive HTML reader; optional Defuddle | fragment or text quote |
 | Markdown/text | exact named bytes | normalized direct text | heading, paragraph, line/byte span |
-| PDF | exact PDF bytes | optional PDF adapter | page/bbox only when returned |
+| PDF | exact PDF bytes | optional PDF adapter | replayable exact binding; page/bbox labels alone are insufficient |
 | Repository/source tree | checked regular-file tree and commit/archive identity | passive file index and text files; optional repo adapter | commit, relative path, line |
 | Dataset | explicit selected file/member bytes and identity | passive manifest/sample; optional adapter | file, row, column, cell/range |
 | Binary/media | exact bytes and media type | metadata only unless adapter returns content | artifact member, timestamp/frame, or whole artifact |
-| Office/ODF/RTF/EPUB/CSV | exact bytes | CSV is passive; others need optional AnyDoc | adapter-provided locator only |
+| Office/ODF/RTF/EPUB/CSV | exact bytes | CSV is passive; others need optional AnyDoc | adapter locator plus replayable exact binding |
 
 CSV values are rendered as data, never evaluated as spreadsheet formulas.
 Repositories, archives, macros, and embedded files are not executed or
@@ -75,7 +75,12 @@ Markdown plus optional assets, diagnostics, and a source map. The adapters are
 interfaces, not dependencies: absent or failing implementations are valid
 outcomes. The capture owner validates non-empty text, safe asset names,
 source-map quotes, raw digest, reader digest, and locators before publishing
-derived artifacts.
+derived artifacts. A locator is evidence-capable only when capture can replay
+the exact quoted bytes from the bound raw object or deterministically rebuild
+the same quote from that snapshot. Adapter labels such as a PDF page, slide,
+sheet, or artifact member are not proof by themselves. Unsupported locator
+types, out-of-range coordinates, and quotes that cannot be replayed keep the
+reader available but downgrade the revision to `reader-ready + degraded`.
 
 The capture owner never calls a subprocess or downloads a converter. A host
 that supplies a callable adapter remains responsible for its sandbox, while
@@ -87,6 +92,24 @@ Identifiers and relative paths reject absolute paths, traversal, backslashes,
 symlinks, special files, and unknown tree entries. File and tree budgets are
 bounded before publication. Exact snapshots use exclusive creation and compare
 existing bytes on an idempotent retry; a different collision fails closed.
+
+Before creating `Sources/`, `.source/`, a lock, or a transaction journal,
+capture performs a read-only legacy-layout check. A workspace containing
+`kb/`, root `record.yaml`, `config/workspace-layout.yaml`, or
+`obsidian/managed/` is rejected without modifying the workspace. Capture does
+not migrate, delete, or reinterpret those markers.
+
+Each source object has one no-follow lock. The lock covers manifest loading,
+raw publication, adapter validation, revision activation, and the final visible
+commit. `reader.md`, `index.md`, and `manifest.json` are one ordered CAS
+transaction with exact before/after images in a recoverable hidden journal;
+the manifest is committed last. A normal failure rolls all three targets back,
+and an interrupted transaction is completed idempotently before another
+capture starts. Re-capturing an older digest, including `A → B → A`, activates
+that revision, marks every other revision stale, and republishes the matching
+reader and index in the same transaction. Concurrent captures of different
+bytes serialize at this object boundary, so both immutable revisions remain in
+the manifest even though only one is current.
 
 Generated visible pages are never silently overwritten after a user edit.
 The raw revision, candidate normalized text, map, and manifest are sufficient
