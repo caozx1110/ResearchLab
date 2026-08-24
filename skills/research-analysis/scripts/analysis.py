@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
+import os
 import re
 import stat
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple, Union
@@ -33,6 +36,31 @@ if __name__ == "__main__":
     _bootstrap_installed_runtime()
 
 import yaml
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"duplicate key: {key!r}",
+                key_node.start_mark,
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 CLAIM_CLASSES = frozenset(
@@ -64,6 +92,7 @@ LOCATOR_KINDS = frozenset(
 )
 FACTUAL_CLASSES = frozenset({"observation", "extracted_fact"})
 IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+PAGE_IDENTIFIER_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\Z")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}\Z")
 HEADING_RE = re.compile(
     r"^(?P<marks>#{1,6})\s+(?P<title>.+?)\s*$",
@@ -71,6 +100,18 @@ HEADING_RE = re.compile(
 )
 FIELD_RE = re.compile(
     r"^\s*-\s+(?P<label>[A-Za-z][A-Za-z -]*):\s*(?P<value>.*?)\s*\Z"
+)
+ANALYSIS_FRONTMATTER_FIELDS = frozenset(
+    {
+        "id",
+        "kind",
+        "status",
+        "analysis_id",
+        "subject",
+        "scope",
+        "non_goals",
+        "selection_boundary",
+    }
 )
 
 
@@ -114,6 +155,13 @@ def _identifier(value: Any, label: str) -> str:
     value = value.strip()
     if not IDENTIFIER_RE.fullmatch(value):
         raise AnalysisContractError(f"{label} contains unsafe characters")
+    return value
+
+
+def _page_identifier(value: Any, label: str) -> str:
+    value = _identifier(value, label)
+    if not PAGE_IDENTIFIER_RE.fullmatch(value):
+        raise AnalysisContractError(f"{label} must use lowercase letters, digits, and internal hyphens")
     return value
 
 
@@ -400,6 +448,7 @@ class Claim:
 class ParsedAnalysis:
     analysis_id: str
     kind: str
+    status: str
     subject: str
     scope: str
     non_goals: Tuple[str, ...]
@@ -480,7 +529,7 @@ def _split_frontmatter(markdown: str) -> tuple[dict[str, Any], str]:
         raise AnalysisContractError("analysis Markdown frontmatter is not closed")
     raw = markdown[4:closing]
     try:
-        payload = yaml.safe_load(raw)
+        payload = yaml.load(raw, Loader=_UniqueKeyLoader)
     except yaml.YAMLError as exc:
         raise AnalysisContractError(f"invalid analysis frontmatter: {exc}") from exc
     if not isinstance(payload, dict):
@@ -628,10 +677,21 @@ def parse_analysis(markdown: Union[str, Path]) -> ParsedAnalysis:
     else:
         text = markdown
     frontmatter, body = _split_frontmatter(text)
-    analysis_id = _identifier(frontmatter.get("analysis_id", ""), "analysis_id")
+    actual_fields = set(frontmatter)
+    unsupported = sorted(actual_fields - ANALYSIS_FRONTMATTER_FIELDS)
+    missing = sorted(ANALYSIS_FRONTMATTER_FIELDS - actual_fields)
+    if unsupported:
+        raise AnalysisContractError(f"unsupported analysis frontmatter fields: {unsupported}")
+    if missing:
+        raise AnalysisContractError(f"missing analysis frontmatter fields: {missing}")
+    analysis_id = _page_identifier(frontmatter.get("analysis_id", ""), "analysis_id")
+    page_id = _page_identifier(frontmatter.get("id", ""), "id")
+    if page_id != analysis_id:
+        raise AnalysisContractError("analysis_id must equal the visible page id")
     kind = frontmatter.get("kind")
     if kind not in {"single-source", "synthesis"}:
         raise AnalysisContractError("analysis kind must be single-source or synthesis")
+    status = _identifier(frontmatter.get("status", ""), "status")
     subject = frontmatter.get("subject")
     if not isinstance(subject, str) or not subject.strip():
         raise AnalysisContractError("analysis subject must be non-empty")
@@ -682,6 +742,7 @@ def parse_analysis(markdown: Union[str, Path]) -> ParsedAnalysis:
     return ParsedAnalysis(
         analysis_id=analysis_id,
         kind=kind,
+        status=status,
         subject=subject.strip(),
         scope=scope.strip(),
         non_goals=non_goals,
@@ -771,14 +832,17 @@ def render_analysis(
     evidence: Sequence[Evidence] = (),
     conflicts: Sequence[str] = (),
     gaps: Sequence[str] = (),
+    status: str = "pending-review",
 ) -> str:
     if kind not in {"single-source", "synthesis"}:
         raise AnalysisContractError("analysis kind must be single-source or synthesis")
     if not isinstance(subject, str) or not subject.strip():
         raise AnalysisContractError("analysis subject must be non-empty")
     payload = {
-        "analysis_id": _identifier(analysis_id, "analysis_id"),
+        "id": _page_identifier(analysis_id, "analysis_id"),
         "kind": kind,
+        "status": _identifier(status, "status"),
+        "analysis_id": _page_identifier(analysis_id, "analysis_id"),
         "subject": subject.strip(),
         "scope": scope.strip(),
         "non_goals": list(non_goals),
@@ -851,6 +915,7 @@ def prepare_analysis(
         scope=scope,
         non_goals=non_goals,
         selection_boundary=selection_boundary,
+        status="draft",
     )
 
 
@@ -974,18 +1039,248 @@ def build_bindings(
     return bindings
 
 
+def _fs_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return metadata.st_dev, metadata.st_ino
+
+
+@contextlib.contextmanager
+def _open_analysis_directory(root: Path, relative: Path, *, create: bool = False):
+    """Open every directory segment from a trusted root without following links."""
+
+    try:
+        root_before = root.lstat()
+        root_fd = os.open(
+            root,
+            os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise AnalysisContractError(f"cannot open trusted workspace root: {root}") from exc
+    descriptors = [root_fd]
+    try:
+        root_opened = os.fstat(root_fd)
+        if (
+            stat.S_ISLNK(root_before.st_mode)
+            or not stat.S_ISDIR(root_opened.st_mode)
+            or _fs_identity(root_before) != _fs_identity(root_opened)
+        ):
+            raise AnalysisContractError("workspace root identity changed while opening it")
+        current_fd = root_fd
+        for part in relative.parts:
+            if part in {"", ".", ".."} or "/" in part or "\\" in part:
+                raise AnalysisContractError("evidence directory has an unsafe path segment")
+            try:
+                next_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=current_fd,
+                )
+            except FileNotFoundError:
+                if not create:
+                    raise AnalysisContractError(f"evidence directory does not exist: {relative}")
+                try:
+                    os.mkdir(part, 0o755, dir_fd=current_fd)
+                    os.fsync(current_fd)
+                except FileExistsError:
+                    pass
+                except OSError as exc:
+                    raise AnalysisContractError(f"cannot create evidence directory: {relative}") from exc
+                try:
+                    next_fd = os.open(
+                        part,
+                        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=current_fd,
+                    )
+                except OSError as exc:
+                    raise AnalysisContractError(
+                        f"evidence path is not a trusted directory: {relative}"
+                    ) from exc
+            except OSError as exc:
+                raise AnalysisContractError(
+                    f"evidence path is not a no-follow directory: {relative}"
+                ) from exc
+            descriptors.append(next_fd)
+            current_fd = next_fd
+        yield current_fd, _fs_identity(root_opened), _fs_identity(os.fstat(current_fd))
+    finally:
+        for descriptor in reversed(descriptors):
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+
+
+@dataclass(frozen=True)
+class _BindingFileState:
+    digest: str
+    device: int
+    inode: int
+    mode: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+
+
+def _binding_file_state(parent_fd: int, name: str) -> _BindingFileState | None:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AnalysisContractError(f"binding target is not a no-follow regular file: {name}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise AnalysisContractError(f"binding target must be a regular file: {name}")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        before_signature = (
+            _fs_identity(before),
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+            stat.S_IMODE(before.st_mode),
+        )
+        after_signature = (
+            _fs_identity(after),
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+            stat.S_IMODE(after.st_mode),
+        )
+        if before_signature != after_signature:
+            raise AnalysisContractError(f"binding target changed while reading it: {name}")
+        return _BindingFileState(
+            digest=digest.hexdigest(),
+            device=after.st_dev,
+            inode=after.st_ino,
+            mode=stat.S_IMODE(after.st_mode),
+            size=after.st_size,
+            modified_ns=after.st_mtime_ns,
+            changed_ns=after.st_ctime_ns,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _assert_analysis_directory_binding(
+    root: Path,
+    relative: Path,
+    expected_root: tuple[int, int],
+    expected_directory: tuple[int, int],
+) -> None:
+    with _open_analysis_directory(root, relative) as (
+        _directory_fd,
+        root_identity,
+        directory_identity,
+    ):
+        if root_identity != expected_root or directory_identity != expected_directory:
+            raise AnalysisContractError("evidence directory identity changed before commit")
+
+
+def _write_binding_at(
+    workspace_root: Path,
+    evidence_relative: Path,
+    evidence_fd: int,
+    root_identity: tuple[int, int],
+    evidence_identity: tuple[int, int],
+    target_name: str,
+    payload: bytes,
+) -> None:
+    before = _binding_file_state(evidence_fd, target_name)
+    temporary_name = f".{target_name}.{uuid.uuid4().hex}.tmp"
+    temporary_fd: int | None = None
+    temporary_exists = False
+    expected_digest = hashlib.sha256(payload).hexdigest()
+    try:
+        temporary_fd = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=evidence_fd,
+        )
+        temporary_exists = True
+        view = memoryview(payload)
+        while view:
+            written = os.write(temporary_fd, view)
+            if written <= 0:
+                raise OSError("short write while staging evidence binding")
+            view = view[written:]
+        if before is not None:
+            os.fchmod(temporary_fd, before.mode)
+        os.fsync(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = None
+
+        _assert_analysis_directory_binding(
+            workspace_root,
+            evidence_relative,
+            root_identity,
+            evidence_identity,
+        )
+        if _binding_file_state(evidence_fd, target_name) != before:
+            raise AnalysisContractError(f"binding target changed before commit: {target_name}")
+        os.replace(
+            temporary_name,
+            target_name,
+            src_dir_fd=evidence_fd,
+            dst_dir_fd=evidence_fd,
+        )
+        temporary_exists = False
+        committed = _binding_file_state(evidence_fd, target_name)
+        if committed is None or committed.digest != expected_digest:
+            raise AnalysisContractError(f"binding replacement verification failed: {target_name}")
+        os.fsync(evidence_fd)
+    except OSError as exc:
+        raise AnalysisContractError(f"cannot atomically write binding {target_name}: {exc}") from exc
+    finally:
+        if temporary_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(temporary_fd)
+        if temporary_exists:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=evidence_fd)
+
+
 def write_bindings(bindings: Mapping[str, Mapping[str, Any]], evidence_root: Union[str, Path]) -> None:
-    root = Path(evidence_root)
-    root.mkdir(parents=True, exist_ok=True)
+    root = Path(os.path.abspath(os.fspath(evidence_root)))
+    if root.name != "evidence" or root.parent.name != ".research":
+        raise AnalysisContractError("bindings must be written to <workspace>/.research/evidence")
+    workspace_root = root.parent.parent
+    evidence_relative = Path(".research") / "evidence"
+    encoded: list[tuple[str, bytes]] = []
     for claim_id, payload in bindings.items():
         safe_id = _identifier(claim_id, "claim_id")
-        target = root / f"{safe_id}.json"
-        temporary = target.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
+        encoded.append(
+            (
+                f"{safe_id}.json",
+                (
+                    json.dumps(dict(payload), ensure_ascii=False, sort_keys=True, indent=2)
+                    + "\n"
+                ).encode("utf-8"),
+            )
         )
-        temporary.replace(target)
+    with _open_analysis_directory(workspace_root, evidence_relative, create=True) as (
+        evidence_fd,
+        root_identity,
+        evidence_identity,
+    ):
+        for target_name, payload in encoded:
+            _write_binding_at(
+                workspace_root,
+                evidence_relative,
+                evidence_fd,
+                root_identity,
+                evidence_identity,
+                target_name,
+                payload,
+            )
 
 
 def _load_bindings(
