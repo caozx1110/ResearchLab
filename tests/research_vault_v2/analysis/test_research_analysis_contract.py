@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "skills" / "research-analysis" / "scripts" / "analysis.py"
+VAULT_SCRIPT = REPO_ROOT / "skills" / "research-vault" / "scripts" / "vault.py"
 SKILL = REPO_ROOT / "skills" / "research-analysis"
 FIXTURES = Path(__file__).parent / "fixtures"
 LIB_ROOT = REPO_ROOT / "runtime" / "lib"
@@ -30,6 +32,18 @@ def _load_analysis():
 
 
 analysis = _load_analysis()
+
+
+def _load_vault():
+    spec = importlib.util.spec_from_file_location("research_vault_v2_interop", VAULT_SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+vault = _load_vault()
 
 
 @pytest.fixture()
@@ -162,6 +176,86 @@ def test_prepare_creates_only_visible_empty_scaffold(workspace: Path) -> None:
     assert not (workspace / ".research").exists()
 
 
+def test_prepared_analysis_is_accepted_by_vault_index_without_unknown_fields(workspace: Path) -> None:
+    vault_root = workspace / "vault"
+    vault.initialize_vault(vault_root)
+    source = _source(workspace, "source-alpha")
+    prepared = analysis.prepare_analysis(
+        analysis_id="analysis-interop",
+        subject="Production schema interoperability",
+        kind="single-source",
+        sources=(source,),
+        scope="Frozen source only.",
+    )
+    target = vault_root / "Notes" / "analysis-interop.md"
+    target.write_text(prepared, encoding="utf-8")
+
+    rebuilt = vault.rebuild_index(vault_root)
+
+    page = next(item for item in rebuilt["pages"] if item["path"] == "Notes/analysis-interop.md")
+    assert page == {
+        "id": "analysis-interop",
+        "kind": "single-source",
+        "path": "Notes/analysis-interop.md",
+        "status": "draft",
+        "title": "Analysis: Production schema interoperability",
+    }
+
+    invalid = prepared.replace("subject:", "unknown_field: forbidden\nsubject:", 1)
+    with pytest.raises(analysis.AnalysisContractError, match="unsupported"):
+        analysis.parse_analysis(invalid)
+    target.write_text(invalid, encoding="utf-8")
+    with pytest.raises(vault.VaultError, match="unsupported"):
+        vault.rebuild_index(vault_root)
+
+
+def test_write_bindings_rejects_symlinked_evidence_directory(workspace: Path, tmp_path: Path) -> None:
+    research = workspace / ".research"
+    research.mkdir()
+    outside = tmp_path / "outside-evidence"
+    outside.mkdir()
+    (research / "evidence").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(analysis.AnalysisContractError):
+        analysis.write_bindings({"claim-alpha": {"claim_id": "claim-alpha"}}, research / "evidence")
+
+    assert not (outside / "claim-alpha.json").exists()
+
+
+def test_write_bindings_rechecks_evidence_directory_identity_at_commit(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = workspace / ".research" / "evidence"
+    evidence.mkdir(parents=True)
+    detached = workspace / ".research" / "evidence.detached"
+    outside = tmp_path / "outside-binding-race"
+    outside.mkdir()
+    original_boundary_check = analysis._assert_analysis_directory_binding
+    swapped = False
+
+    def swap_before_commit(*args: object, **kwargs: object) -> None:
+        nonlocal swapped
+        if not swapped:
+            evidence.rename(detached)
+            evidence.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        original_boundary_check(*args, **kwargs)
+
+    monkeypatch.setattr(analysis, "_assert_analysis_directory_binding", swap_before_commit)
+
+    with pytest.raises(analysis.AnalysisContractError, match="evidence"):
+        analysis.write_bindings(
+            {"claim-alpha": {"claim_id": "claim-alpha"}},
+            evidence,
+        )
+
+    assert swapped
+    assert not (outside / "claim-alpha.json").exists()
+    assert not (detached / "claim-alpha.json").exists()
+
+
 @pytest.mark.parametrize(
     ("claim_class", "epistemic_state"),
     (("observation", "interpretive"), ("inference", "factual")),
@@ -214,6 +308,11 @@ def test_exact_quote_locator_revision_and_digest_binding(workspace: Path) -> Non
     assert row["quote_digest"] == analysis.sha256_digest(evidence.quote)
     assert row["evidence_digest"] == evidence.evidence_digest
     assert not {"claim_text", "class", "epistemic_state", "review_state"}.intersection(binding)
+    analysis.write_bindings(bindings, workspace / ".research" / "evidence")
+    persisted = json.loads(
+        (workspace / ".research" / "evidence" / "claim-alpha.json").read_text(encoding="utf-8")
+    )
+    assert persisted == binding
 
     report = analysis.verify_analysis(
         markdown,

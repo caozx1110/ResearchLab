@@ -132,7 +132,11 @@ def test_atomic_write_and_cas_preserve_bytes_on_failure(fresh_vault: Path, monke
 
     original_replace = vault.os.replace
 
-    def fail_replace(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+    def fail_replace(
+        source: str | os.PathLike[str],
+        destination: str | os.PathLike[str],
+        **_kwargs: object,
+    ) -> None:
         raise OSError("simulated interruption")
 
     monkeypatch.setattr(vault.os, "replace", fail_replace)
@@ -140,6 +144,64 @@ def test_atomic_write_and_cas_preserve_bytes_on_failure(fresh_vault: Path, monke
         vault.atomic_write(target, "replacement\n", expected_digest=original_digest, root=fresh_vault)
     monkeypatch.setattr(vault.os, "replace", original_replace)
     assert target.read_bytes() == original
+    assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_atomic_write_rejects_parent_symlink_swap_after_validation(
+    fresh_vault: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notes = fresh_vault / "Notes"
+    detached_notes = fresh_vault / "Notes.detached"
+    outside = tmp_path / "outside-parent"
+    outside.mkdir()
+    original_ensure_directory = vault._ensure_directory
+    swapped = False
+
+    def swap_after_validation(root: Path, relative: Path | str) -> Path:
+        nonlocal swapped
+        result = original_ensure_directory(root, relative)
+        if Path(relative) == Path("Notes") and not swapped:
+            notes.rename(detached_notes)
+            notes.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(vault, "_ensure_directory", swap_after_validation)
+
+    with pytest.raises(vault.ContainmentError):
+        vault.atomic_write(notes / "escape.md", b"must stay inside\n", expected_digest=None, root=fresh_vault)
+
+    assert swapped
+    assert not (outside / "escape.md").exists()
+    assert not (detached_notes / "escape.md").exists()
+
+
+def test_atomic_write_rechecks_target_identity_at_commit_boundary(
+    fresh_vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = fresh_vault / "Notes" / "commit-cas.md"
+    target.write_bytes(b"before\n")
+    before_digest = vault.file_digest(target)
+    original_boundary_check = vault._assert_directory_binding
+    injected = False
+
+    def replace_target_before_commit(*args: object, **kwargs: object) -> None:
+        nonlocal injected
+        if not injected:
+            target.write_bytes(b"concurrent writer\n")
+            injected = True
+        original_boundary_check(*args, **kwargs)
+
+    monkeypatch.setattr(vault, "_assert_directory_binding", replace_target_before_commit)
+
+    with pytest.raises(vault.CASConflict, match="identity changed"):
+        vault.atomic_write(target, b"ours\n", expected_digest=before_digest, root=fresh_vault)
+
+    assert injected
+    assert target.read_bytes() == b"concurrent writer\n"
     assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
 
 
@@ -174,6 +236,38 @@ def test_recovery_restores_an_abandoned_operation(fresh_vault: Path) -> None:
     recovered = vault.recover_operation(fresh_vault, operation.operation_id)
     assert recovered["state"] == "recovered"
     assert target.read_bytes() == b"before\n"
+
+
+def test_recovery_rolls_back_replace_before_after_digest_checkpoint(
+    fresh_vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = fresh_vault / "Notes" / "crash-window.md"
+    target.write_bytes(b"before\n")
+    operation = vault.begin_operation(fresh_vault, "test-replace-crash", [target])
+    original_write_journal = operation._write_journal
+
+    def crash_before_completed_write(entry: dict[str, object]) -> None:
+        if entry.get("stage") == "write":
+            raise RuntimeError("simulated crash after replace")
+        original_write_journal(entry)
+
+    monkeypatch.setattr(operation, "_write_journal", crash_before_completed_write)
+    with pytest.raises(RuntimeError, match="simulated crash after replace"):
+        operation.write(target, b"after\n")
+    operation.abandon()
+
+    assert target.read_bytes() == b"after\n"
+    interrupted = vault.load_operation(fresh_vault, operation.operation_id)
+    assert interrupted["write_intents"]["Notes/crash-window.md"] == {
+        "before_digest": vault._digest_bytes(b"before\n"),
+        "after_digest": vault._digest_bytes(b"after\n"),
+    }
+    recovered = vault.recover_operation(fresh_vault, operation.operation_id)
+    assert recovered["state"] == "recovered"
+    assert recovered["write_intents"] == {}
+    assert target.read_bytes() == b"before\n"
+    assert vault.recover_operation(fresh_vault, operation.operation_id)["state"] == "recovered"
 
 
 def test_index_rebuild_is_derived_and_does_not_touch_home(fresh_vault: Path) -> None:
