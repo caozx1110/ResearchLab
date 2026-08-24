@@ -6,7 +6,7 @@
 - Parent Epic: [#21](https://github.com/caozx1110/ResearchLab/issues/21)
 - Decision owners: human maintainer + Wave 1 delivery owner
 - Supersedes: [ADR 0002](0002-separate-product-source-and-local-agent-tools.md) 中固定 installed `kb/` 物理 data layout、复制完整 runtime rules 到根 `AGENTS.md`/`.agents/AGENTS.md` 的部分；其 source/product/local-tool 分离决定继续有效
-- Superseded by: N/A
+- Superseded by: [ADR 0005](0005-markdown-semantic-source-and-five-skill-research-vault.md)（仅 supersede `record.yaml`/逻辑 `kb/...` canonical data model、旧 canonical top-level inventory、旧 Obsidian managed projection 和兼容迁移目标；本 ADR 的 root-role、containment、原子写、journal、lock、CAS 与 fail-closed 安全原则继续适用，当前 v1 实现在 hard cutover 前也仍服从本 ADR）
 
 ## Context
 
