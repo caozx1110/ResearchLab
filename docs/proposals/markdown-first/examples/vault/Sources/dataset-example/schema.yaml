@@ -1,0 +1,6 @@
+schema_version: sample-schema/v1
+fields:
+  - name: example_id
+    type: string
+  - name: value
+    type: number

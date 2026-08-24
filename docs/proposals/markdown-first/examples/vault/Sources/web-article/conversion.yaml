@@ -1,0 +1,7 @@
+schema: sample-source-conversion/v1
+status: complete
+adapter: web
+candidate_converter: defuddle-optional
+document: document.md
+source_map: source-map.yaml
+warnings: []

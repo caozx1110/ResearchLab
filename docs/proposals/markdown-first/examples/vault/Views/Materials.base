@@ -1,0 +1,42 @@
+filters:
+  and:
+    - 'file.inFolder("Sources")'
+    - 'file.basename == "index"'
+
+properties:
+  material_id:
+    displayName: "Material ID"
+  object_type:
+    displayName: "Object type"
+  title:
+    displayName: "Title"
+  source_type:
+    displayName: "Source type"
+  readiness:
+    displayName: "Readiness"
+  source_status:
+    displayName: "Source status"
+  reader_path:
+    displayName: "Reader path"
+  projects:
+    displayName: "Projects"
+  updated:
+    displayName: "Updated"
+  needs_review:
+    displayName: "Needs review"
+
+views:
+  - type: table
+    name: "Materials"
+    order:
+      - file.name
+      - material_id
+      - object_type
+      - title
+      - source_type
+      - readiness
+      - source_status
+      - reader_path
+      - projects
+      - updated
+      - needs_review

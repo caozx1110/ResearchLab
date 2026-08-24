@@ -1,0 +1,10 @@
+schema: sample-parse-cache/v1
+source_file: source.html
+locator_kind: section
+chunks:
+  - label: "section:introduction"
+    locator_kind: section
+    text: "This page describes a deterministic reading projection. The original response remains the authority for exact wording."
+  - label: "section:method"
+    locator_kind: section
+    text: "The adapter extracts readable sections and records a source map."

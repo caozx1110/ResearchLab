@@ -1,0 +1,30 @@
+filters:
+  and:
+    - 'file.inFolder("Notes")'
+    - 'needs_review == true'
+
+properties:
+  material_id:
+    displayName: "Material ID"
+  object_type:
+    displayName: "Object type"
+  status:
+    displayName: "Status"
+  confirmation_status:
+    displayName: "Confirmation"
+  needs_review:
+    displayName: "Needs review"
+  projects:
+    displayName: "Projects"
+
+views:
+  - type: table
+    name: "Pending review"
+    order:
+      - file.name
+      - material_id
+      - object_type
+      - status
+      - confirmation_status
+      - needs_review
+      - projects

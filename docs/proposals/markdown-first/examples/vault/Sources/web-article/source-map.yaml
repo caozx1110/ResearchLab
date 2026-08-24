@@ -1,0 +1,12 @@
+schema: sample-source-map/v1
+source_file: source.html
+document: document.md
+blocks:
+  - block_id: source-web-introduction
+    locator_kind: section
+    anchor: introduction
+    source_locator: "section:introduction"
+  - block_id: source-web-method
+    locator_kind: section
+    anchor: method
+    source_locator: "section:method"

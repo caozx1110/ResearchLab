@@ -1,0 +1,7 @@
+{
+  "schema": "sample-artifact/v1",
+  "rows": [
+    {"run_id": "run-001", "value": 0.42},
+    {"run_id": "run-002", "value": 0.37}
+  ]
+}
