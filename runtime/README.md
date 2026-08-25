@@ -5,7 +5,8 @@
 ## Layout
 
 - `../skills/`: 五个可发现 skill；普通 Markdown 是用户语义真相。
-- `lib/research/`: 源码树中的 Python helper。安装 allowlist 只发布 `v2_bootstrap.py`、`legacy_detector.py`、`updater.py` 与 package marker；其余 v1 helper 只供源码级回归测试，不进入安装态。
+- `lib/research/`: 仅保留四个 shipping runtime 文件：`__init__.py`、`legacy_detector.py`、`updater.py` 与 `v2_bootstrap.py`。安装 allowlist 只发布这四个文件。
+- `../tools/skill_validator.py`: development-only skill validator；它不属于 runtime，也不进入安装态。
 - `AGENTS.md`: 只供根 managed block 使用的稳定加载指针；不复制到 `.agents/`。
 - `WORKSPACE_RULES.md`: 最小 always-on runtime 合同，详细 owner 流程留在五个 skill 的一跳 references。
 
@@ -19,7 +20,7 @@
 
 Defuddle、`obsidian-markdown`、`obsidian-cli`、`obsidian-bases` 与 AnyDoc 都是外部接口或可选 adapter，不复制到 runtime，不进入 inventory。`.research/` 与对象内 `.source/` 只能保存来源、证据和运行证明，不得成为第二语义真相。
 
-旧 v1 skill implementation files may remain in the source checkout as non-discoverable internal material while hard cutover removes their shipping entrypoints. The installer and release enumeration must never package those legacy directories.
+旧 v1 skill implementation、schema 和非 shipping runtime helper 不属于当前源码树；历史实现只可从 Git 历史恢复。安装器和 release enumeration 不得从旧目录或开发工具生成安装内容。
 
 仓库根 `tools/` 与 ignored `/.agents/` 下的维护者工具不属于产品发布树，也不会复制到安装后的 workspace。
 

@@ -388,7 +388,7 @@ def _parser() -> argparse.ArgumentParser:
         "skills_root",
         nargs="?",
         type=Path,
-        default=Path(__file__).resolve().parents[2] / "skills",
+        default=Path(__file__).resolve().parents[1] / "skills",
     )
     return parser
 
