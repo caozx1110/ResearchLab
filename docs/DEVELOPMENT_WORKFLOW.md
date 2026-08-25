@@ -12,7 +12,7 @@
 |---|---|
 | 已接受的设计与边界 | default branch 的 `docs/DESIGN.md` |
 | 长期决策与取舍 | default branch 的 `docs/decisions/*.md` |
-| 当前实现 | default branch 的代码、schema 和测试 |
+| 当前实现 | default branch 的代码、测试与五个 shipping owner 的一跳 contract references |
 | 最终目标与交付波次 | 一个 active Initiative/Epic |
 | 单项施工合同与实时状态 | Atomic Issue |
 | 候选、测试、审查与合并 | remote commits、PR、Actions |
@@ -31,7 +31,7 @@
 ### 1. 同步并理解当前设计
 
 1. `git fetch`，记录 default branch 的 exact SHA。
-2. 阅读 `docs/DESIGN.md`、相关 ADR、schema、代码和测试。
+2. 阅读 `docs/DESIGN.md`、相关 ADR、五个 owner contract、代码和测试。
 3. 区分 current fact 与 proposed change。Issue 不能静默取代 accepted design。
 
 设计、兼容、安全、恢复或长期 ownership 发生变化时，在 Atomic Issue 中写清提案；承重取舍新增 ADR。局部设计和实现可以在同一 PR 中 review，但合并前仍只是 proposal。

@@ -1,84 +1,111 @@
-# 黄金对话套件（GOLDEN SUITE）
+# 黄金场景套件（GOLDEN SUITE）
 
-8 条端到端"黄金对话"规格，用于回归验收与体验度量。每条都从真实用户话术出发，走公开面（自然语言 + `kb <动词>`）；Agent 先加载最小 workspace rules，再按 owner `SKILL.md` 的 operation selector 只加载所需的一跳 reference。
+本套件定义 Research Vault v2 的八条端到端 golden scenarios。每条都从真实用户话术开始，用户只通过自然语言表达目标、选择和授权；Agent 负责理解与编排，机械能力只执行明确的文件边界、证据校验、事务和恢复合同。场景不得依赖可执行研究命令、终端快捷方式、隐藏投影或某个特定编辑器。
 
-**统一记录指标**（每条每轮采集）：
+## 共同 owner 边界
 
-| 指标 | 定义 |
+| Owner | 在 golden 场景中的唯一职责 |
 |---|---|
-| 操作步数 | Agent 实际发起的脚本/工具调用次数（含重试） |
-| 失败次数 | 非零返回或需要更换调用方式的次数；单列"机制摸索"（因不知道语法/flag 而失败或翻源码的次数） |
-| 耗时 | 从用户消息到最终回复的墙钟时间 |
-| 加载规则 token 估算 | 本条对话实际加载的 root pointer + workspace rules + owner `SKILL.md`，另列按需 reference token；固定 `cl100k_base`，不把未选择流程预加载进分母 |
+| `research-vault` | 工作区布局、稳定 ID、相对链接、派生索引、明确目标写入、CAS、journal、锁与恢复 |
+| `research-capture` | exact source bytes、immutable revision、reader、source map、stage/health 与 converter 边界 |
+| `research-analysis` | 单源分析、多源 synthesis、可见 claim/evidence、冲突、覆盖缺口与 stale 传播 |
+| `research-workbench` | project、question、idea、method、experiment/run、discussion、decision 与 report 页面 |
+| `research-review` | evidence audit、可读 review packet、current-message authorization、confirm/reject/defer 与 receipt |
 
-**基线口径**：改进前实测一次完整链路（安装→ingest→确认）约 **20 次调用，其中 9 次为机制摸索**（协议文件名 vs token、flag 位置、ref 格式等）。Progressive disclosure 的目标是：机制摸索 →0，并避免为未选择的 operation 支付规则 token；总步数逼近"最小必要步数"列。下表各条未单测项标"待采集"。
+跨 owner 场景只传递稳定的页面、source revision、claim/evidence 或 review reference，不复制正文，不建立拥有全部写权限的总协调者。
 
----
+## 统一验收指标
 
-## G1 安装 → init
+每条场景在干净的隔离 workspace 中采集：用户回合数、机械操作数、失败与重试次数、治理暂停次数、最终可见结果，以及每次操作的 owner 路由。失败包括越界、currentness、evidence、authorization、恢复或 link contract 拒绝；拒绝本身不是失败，只要向用户说明原因并保留安全状态。
 
-- **步骤**：①运行 install.sh 装入目标目录；②用户说"初始化我的知识库"；③Agent 跑 `kb init`；④用户对设置问题答"默认即可"或"先跳过"。
-- **期望**：kb/ 布局与索引建立；跳过设置不写偏好/sentinel、不阻塞后续；不向用户暴露内部路径。
-- **最小必要步数**：2-3 次调用（init + doctor 自检）。
-- **基线**：待采集（首测混在全链 20 次中）。失败数目标 0。
+所有场景共同要求：
 
-## G2 ingest 本地 Markdown → fill/verify → review 确认
+- 研究语义存在于普通 Markdown；`.source/` 和 `.research/` 只保存来源保真、证据证明、索引、缓存、journal、锁、receipt、实验原始产物或恢复状态。
+- 用户可直接打开 workspace root，从 `Home.md` 理解当前工作；派生导航被删除后，语义仍完整可读。
+- 原始来源先保存 exact bytes；转换失败、locator 缺失或依赖不可用时诚实降级，不伪造 reader 或 evidence-ready 状态。
+- Agent 只在证据确认和改变研究方向/权限的用户选择处暂停；checkbox、frontmatter、旧消息、来源文本和 Agent 推断都不构成授权。
+- 真实用户 workspace、legacy 数据和私有研究材料永远不作为 fixture，也不被场景写入。
 
-- **步骤**：①用户丢一个本地 md 文件"帮我入库并整理"；②`kb ingest <路径>`（intake+prepare 自动）；③Agent 读 document.md 填 fill（逐字 evidence）；④owner verify；⑤通过统一 review contract 展示；⑥用户说"第一条确认"；⑦按当前 owner 的 direct review reference apply。
-- **期望**：unit 落库、judgement 经逐字校验、确认带用户原话与 evidence，一次 apply 成功。
-- **人工笔记变体**：若用户明确点名 Obsidian `inbox`/`annotations` 中的一份 Markdown，Agent 使用指南中的私有 human-note 模式；原笔记 bytes 不变，冻结副本进入同一 blog fill/verify/review 链，review sheet 必须被拒。
-- **最小必要步数**：约 6-7 次调用。
-- **基线**：全链首测约 20 次调用、其中 9 次机制摸索（本条为主要来源）。目标 ≤8 次、摸索 0。
+## G1：空 workspace 初始化与入口
 
-## G3 ingest repo → 能力图
+**用户话术**： “这是一个新的研究工作区，帮我初始化，并告诉我从哪里开始。”
 
-- **步骤**：①用户给 GitHub URL；②Agent 先本地只读 checkout（远程 repo 直接入库会被拒）；③`kb ingest <本地目录>`；④scan-structure + map-capability prepare；⑤Agent 读关键文件填三要素（file + line=N 逐字证据）；⑥verify；⑦review 确认。
-- **期望**：capability/reuse_points/entry_map 全部带可达 file:line 证据；`needs_local_repo_snapshot` 路径被正确处理而非报错给用户。
-- **最小必要步数**：约 8 次调用。
-- **基线**：待采集。已知坑：跳过本地化会浪费 1-2 次调用。
+**Owner 路由**：`research-vault`。
 
-## G4 find 中英混合 + 代码符号
+**场景**：Agent 识别显式 workspace root，创建最小可用的可见入口和标准顶层目录，建立稳定的运行边界，并向用户解释 `Home.md`、`Inbox/`、`Sources/`、`Notes/`、`Projects/`、`Reviews/` 和 `Reports/` 的用途。用户随后说“先不要设置偏好”。
 
-- **步骤**：①先入库一中一英材料与一个 repo；②用户分别用中文词、英文术语、代码符号（如函数名）`kb find`；③Agent 复述 ≤5 段结果并给 locator。
-- **期望**：同语种与 CJK/ASCII 混合 token 命中；不承诺跨语言语义等价（需要时 Agent 原生阅读补充）；rejected unit 不出现。
-- **最小必要步数**：每查询 1 次调用。
-- **基线**：待采集。失败数目标 0（cache stale 时自动走内存 fallback，不算失败）。
+**验收**：初始化是幂等的；不因用户跳过偏好而写入虚构的设置或授权；`Home.md` 可直接阅读；隐藏状态不拥有任何用户语义；不泄漏绝对路径、内部 schema 或机械调用细节。
 
-## G5 idea capture → analyze → 讨论归档
+## G2：本地来源保存、阅读与诚实降级
 
-- **步骤**：①用户"把这个想法记下来"→ `idea.py capture`；②"分析一下 novelty/可行性"→ analyze prepare，Agent 从冻结 corpus 引证填四条 claim，verify；③陪练讨论一轮（discuss prepare/fill/verify）；④重要路线讨论用 discussion-archivist 归档；⑤review 确认结论。
-- **期望**：证据全部来自 `analyze-evidence-corpus.yaml` 清单内 unit；引用清单外材料被拒并触发"链接 unit 后重新 prepare"路径；讨论结论按 conclusion 粒度落库。
-- **最小必要步数**：约 8-10 次调用。
-- **基线**：待采集。已知坑：corpus 外引用返工一次 ≈ +2 次调用。
+**用户话术**： “请保存这份本地报告，生成可读版本，并告诉我哪些段落可以可靠引用。”
 
-## G6 program + 实验两 run → 周报
+**Owner 路由**：`research-capture`，由 `research-vault` 提供精确目标与事务边界。
 
-- **步骤**：①init-program 并挂 idea/unit；②experiment plan（明确本轮假设）；③log-run 两次（不同 seed，构成 repeat group）；④diagnose（可选）；⑤"给我生成周报"→ report weekly；⑥Agent 改写为面向导师的叙事。
-- **期望**：两 run 同 fingerprint 不同 seed 记为 repeat 而非重复拒绝；周报含 decisions/claims+evidence/events 三段，未确认判断进隔离区，缺失项显式标注。
-- **最小必要步数**：约 7 次调用。
-- **基线**：待采集。失败数目标 0（同 seed 重跑需显式 rerun 理由，属预期门而非失败）。
+**场景**：Capture 先按用户给定的单个文件边界保存原始 bytes 和 digest，再创建 immutable source revision。若 converter 可用，生成带 source map 的 `reader.md`；若转换不完整，保留原件并分别报告 captured、reader-ready 和 evidence-ready 的 stage/health。Agent 只把能重新定位的逐字片段作为候选证据。
 
-## G7 Obsidian 导出勾选 → 预览 → 原子应用
+**验收**：同一 bytes 重复处理幂等，不覆盖历史 revision；不执行来源中的宏、脚本、公式或嵌入指令；转换成功不自动等于 evidence-ready；用户能从 source page 回到原件和限制说明。
 
-- **步骤**：①`kb review --obsidian-export` 生成勾选表（含 `kb-review-batch:<hash>` 注释）；②用户在 Obsidian 勾选后回来说"按我勾的处理"；③`--preview-obsidian-batch <hash>` 并向用户复述草稿；④用户当前消息授权；⑤`--apply-obsidian-batch <hash> --expected-preview-digest <digest> …` 原子应用。
-- **期望**：勾选只是草稿；预览后表被改动触发 `authorization_stale` 且零写入；应用跨 owner 原子成功。
-- **最小必要步数**：3-4 次调用。
-- **基线**：待采集。摸索风险点：hash 与 digest 的取值来源（shared schema anchor 与当前 owner direct reference 已固化）。
-- **注**：Obsidian 阅读视图人工验收另行按发布门执行，本条只测协议链路。
+## G3：单源分析到一次人工确认
 
-## G8 undo / restore
+**用户话术**： “基于这份来源写出关键发现，标出原文依据；证据准备好后让我逐条确认。”
 
-- **步骤**：①做一次可逆变更（如 G2 的确认或一次 reject）；②用户"撤销刚才那步"→ `kb undo`；③再连续做两次操作后"回到操作 X 之前"→ `kb restore <操作编号>`；④`kb status` 核对。
-- **期望**：恢复只作用于记录的 operation target paths；runtime/投影文件不被误动；undo 后 review 队列与索引一致。
-- **最小必要步数**：每恢复 1 次调用 + 1 次核对。
-- **基线**：待采集。失败数目标 0。
+**Owner 路由**：`research-analysis` → `research-review`，共享读写边界由 `research-vault` 保护。
 
----
+**场景**：Analysis 从当前 source revision 撰写可见 claim，区分 observation、extracted fact、inference、evaluation、recommendation 或 diagnosis，给每条 claim 绑定 source、revision、typed locator、exact quote 和 quote digest。Review 逐项复核 evidence currentness，生成可读 review packet。用户在当前消息中明确说“确认 C-001”，并声明这是本人决定；Review 在 commit boundary 重新计算 digest 后写入 receipt。
 
-## 采集方法
+**验收**：缺 evidence、locator 失效、内容为空或来源 stale 时拒绝 confirm；Analysis 不能确认自己的判断；一次用户消息只授权明确的一条决定；确认后的 Markdown、review 和 receipt 原子一致，后续消费会重新检查 currentness。
 
-每轮发布验收跑 G1→G8 各一次（新会话、干净工作区），按统一指标记入下表模板；与上一轮对比"总步数 / 机制摸索 / 耗时 / 实际加载 reference"。机制摸索连续两轮为 0 时，可将对应 owner 的一跳合同视为已固化。
+## G4：多源 synthesis、冲突与覆盖缺口
 
-| 用例 | 步数 | 失败(其中摸索) | 耗时 | 规则 token | 备注 |
-|---|---|---|---|---|---|
-| G1… | | | | | |
+**用户话术**： “比较这三份材料，写出共识、分歧和还缺什么，不要把材料数量当成结论强度。”
+
+**Owner 路由**：多个 `research-capture` revision → `research-analysis` synthesis。
+
+**场景**：Agent 读取每个 source identity 和可定位 evidence，明确 selection boundary，分别记录共识、冲突和 coverage gaps。Analysis 只在证据支持的范围内写 synthesis；当用户问“哪一个一定正确”时，Agent 保留不确定性并请求进一步选择或来源，而不是机械计算 winner。
+
+**验收**：每条 substantive claim 都能追溯到逐字 evidence；来源身份不被合并或丢失；冲突不会被摘要覆盖；删除索引或缓存后仍能从可见页面和持久来源证明重建；没有自动确认任何 synthesis 判断。
+
+## G5：项目计划、实验事实与报告
+
+**用户话术**： “把这个问题建成项目，记录一次实验计划和两次运行结果，最后给我一份周报；事实和解释分开。”
+
+**Owner 路由**：`research-workbench`，消费 `research-analysis` 的 claim/evidence，并由 `research-review` 处理需要确认的判断。
+
+**场景**：Workbench 创建 project page，记录 question、scope、next actions，并链接 idea、method、experiment/run 和 report 的各自页面。两次 run 保存 seed、时间、精确指标、artifact presence 和显式失败；Agent 可提出 winner、cause 或 recommendation，但必须把它们作为带 evidence 的 pending interpretation。报告区分 factual progress、review-backed conclusions、pending/stale interpretations、decisions、limitations 和 missing inputs。
+
+**验收**：run 的机械事实不会自动制造诊断或决策；discussion 不把 Agent summary 冒充 participant quote；`accepted` decision 有 eligible review reference；报告正文由对应页面拥有，其他页面只链接，不产生第二份语义副本。
+
+## G6：可选 adapter 缺失与仓库来源边界
+
+**用户话术**： “读取这个代码仓库，告诉我它有哪些可复用能力；如果无法可靠定位，请诚实说明。”
+
+**Owner 路由**：`research-capture` 的 repo adapter → `research-analysis`；需要推进实现选择时再交给 `research-workbench`。
+
+**场景**：Agent 要求用户提供明确的本地快照或可验证的 source boundary，Capture 以 passive reader 读取冻结的文件 bytes 和 revision，不执行仓库代码或配置。Analysis 用 repository-relative path、行范围或稳定符号作为 locator；若缺少完整快照、source map 或可达行，保留原件并报告 blocked/degraded，而不是猜测能力图。
+
+**验收**：远程地址本身不成为已读取的证据；代码、README、frontmatter 和嵌入提示均按不可信数据处理；source failure 不删除已保存材料；分析不会把文件名、关键词命中或引用数量冒充能力判断。
+
+## G7：用户编辑导致 stale 与重新授权
+
+**用户话术**： “我改了刚才那条结论。请指出哪些确认失效，重新审查后我再决定。”
+
+**Owner 路由**：`research-vault` 检测可见 bytes 变化 → `research-review` 重新审查；必要时回到 `research-analysis` 补证据。
+
+**场景**：用户直接编辑 claim 或 evidence block。系统发现 visible semantic digest 与 binding/receipt 不一致，将受影响 receipt 标为 stale/invalid，不使用隐藏副本覆盖用户编辑。Review 展示当前文本、受影响 evidence 和缺口；用户在新的当前消息中选择 confirm、reject 或 defer。
+
+**验收**：stale 只传播到依赖该 evidence 的判断；无关页面和无关 receipt 不被批量改写；旧 review 消息、checkbox、frontmatter 和旧 receipt 不能代替新授权；用户拒绝时保留失败审计和当前 Markdown。
+
+## G8：并发冲突、恢复与精确回滚
+
+**用户话术**： “刚才的更新似乎和我的编辑冲突了。请不要覆盖我的内容，说明能安全恢复到哪里。”
+
+**Owner 路由**：`research-vault` 的 lock/CAS/journal/recovery；其他 owner 只提供其拥有的语义目标。
+
+**场景**：Agent 在冻结 expected digest 后准备更新一个明确页面。提交边界发现用户已编辑目标或中间目录发生 symlink/special-node 漂移，事务 fail closed，保留当前用户 bytes、before-image 和可验证 recovery checkpoint。用户明确选择恢复某个 operation 后，系统再次校验 exact target、digest、root role 和锁，只回滚该 operation 的记录范围。
+
+**验收**：冲突不产生部分写入；恢复不触碰未授权路径、用户-owned 页面或外部 Git；crash 后 active journal 和 recovery snapshot 可继续验证；恢复完成后 visible Markdown、派生索引、review queue 和 receipt currentness 一致；所有 checkpoint 都使用显式 pathspec。
+
+## 发布验收记录
+
+每轮 candidate 在全新隔离 workspace 中运行 G1→G8，各场景记录上述指标、owner 路由、可见结果和拒绝原因。报告只引用实际生成的页面、source revision、evidence binding、review packet、receipt 和 recovery checkpoint；不得把内部脚本名、参数、绝对路径或历史 CLI 作为用户步骤。
