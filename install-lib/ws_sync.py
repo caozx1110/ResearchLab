@@ -114,9 +114,6 @@ EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 EXCLUDED_NAMES = {
     ".DS_Store",
     MANIFEST_NAME,
-    "SCHEMAS.md",
-    "eval_research_value.py",
-    "skill_validator.py",
 }
 # Snapshot enumeration must additionally prune VCS internals that git-based
 # enumeration never sees.

@@ -1,25 +1,3 @@
 -r requirements.txt
-# Dependencies used only by retained v1 source-level regression fixtures. They
-# are not copied to installed Research Vault v2 workspaces.
-pymupdf4llm==0.0.27
-PyMuPDF==1.26.5
-markdownify==1.2.3
-beautifulsoup4==4.15.0
-soupsieve==2.8.4
-six==1.17.0
 pytest==8.4.2
 tiktoken==0.13.0
-regex==2025.11.3
-requests==2.32.5
-charset_normalizer==3.4.4
-idna==3.11
-urllib3==2.6.1
-certifi==2025.11.12
-iniconfig==2.1.0
-packaging==26.2
-pluggy==1.6.0
-Pygments==2.20.0
-exceptiongroup==1.3.1 ; python_version < "3.11"
-typing_extensions==4.16.0
-tomli==2.4.1 ; python_version < "3.11"
-colorama==0.4.6 ; sys_platform == "win32"
