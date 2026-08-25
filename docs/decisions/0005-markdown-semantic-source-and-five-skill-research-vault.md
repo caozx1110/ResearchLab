@@ -23,12 +23,6 @@
 
 本决定的完整目标合同见 [Research Vault v2 蓝图](../blueprints/research-vault-v2/BLUEPRINT.md)。本 ADR 只记录承重选择、替代方案和 rollout 边界。
 
-## Current implementation status after the #61 cleanup
-
-本 ADR 中关于“accepted target 与 v1 implementation fact 暂时并存”的文字，记录的是 2026-08-24 Wave 0 的过渡边界，不是当前行为。Issue #61 cleanup candidate 完成后，active tracked tree 只保留五个 discoverable shipping skill、minimal v2 runtime 和 v2 owner/release-boundary tests；旧 15-skill 实现、旧 runtime/schema、旧行为测试与 `research-navigator` 不再是 active source、安装输入、回归材料或兼容面。
-
-该 cleanup 不改变本 ADR 的安全边界：发现 legacy workspace 仍然只读检测并 fail closed，当前产品没有迁移、双读、双写或删除用户资料的能力。历史实现和旧交互如需考证，只能查 Git history 与明确标注为 superseded 的 CHANGELOG 条目。
-
 ## Decision
 
 ### 1. 可见 Markdown 是唯一人类语义真相

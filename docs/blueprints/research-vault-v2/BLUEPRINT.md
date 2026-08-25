@@ -1,7 +1,7 @@
 # Research Vault v2：Markdown-first / Obsidian-first 研究工作区蓝图
 
 > - Blueprint ID: `research-vault-v2`
-> - Status: Accepted target；Wave 0 已由 PR #48 合入，Issue #61 cleanup candidate 收敛 active tree；后续实现状态由 Atomic Issues、候选 SHA、测试和 PR 证明
+> - Status: Accepted target；Wave 0 已由 PR #48 合入；Issue #61 cleanup 仍是等待人类 review/merge 的 candidate，不构成 default-branch current fact
 > - Parent Epic: [#46](https://github.com/caozx1110/ResearchLab/issues/46)
 > - Wave 0 Atomic Issue: [#47](https://github.com/caozx1110/ResearchLab/issues/47)
 > - Baseline: `origin/codex/development@2c614e66c9e219c3d3216f3187af32b431aa4446`
@@ -9,7 +9,7 @@
 
 ## 1. 状态、权威与阅读边界
 
-本文件定义 Research Vault v2 的完整目标合同。Wave 0 合入后它已是 accepted target；当前 hard-cutover candidate 由五个 shipping skill、minimal v2 runtime、v2 owner/release-boundary tests、installer allowlist 和 `docs/DESIGN.md` 描述。v1 runtime、tests、schema 与 navigator 曾是过渡期源码事实；Issue #61 cleanup 后它们不再存在于 active tree，也不能反向解释 v2。历史实现只可从 Git history 和明确标注为 superseded 的发布记录恢复。
+本文件定义 Research Vault v2 的完整目标合同。Wave 0 合入后它已是 accepted target；五个 shipping skill、minimal v2 runtime、v2 owner/release-boundary tests 和 installer allowlist 是接受的目标边界。v1 runtime、tests、schema 与 navigator 即使仍存在于某个 revision，也只是非 shipping 的过渡期实现事实，不能反向解释 v2。Issue #61 candidate 提议物理删除这些退役源码；只有人类 review 合并后的 default branch 才能证明该 cleanup 已交付。
 
 本蓝图固定以下承重决定：
 
@@ -860,7 +860,7 @@ research-vault
 
 ## 17. 原 15 个 skill 的处置（历史映射）
 
-下表记录 v2 设计阶段的 15→5 处置事实，不表示这些旧目录、旧 owner 或旧交互仍在 active tree。Issue #61 cleanup 已将退役实现从当前源码边界移除；表格仅用于理解设计取舍。
+下表记录 v2 设计阶段的 15→5 处置事实，不表示这些旧目录、旧 owner 或旧交互仍是当前产品。Issue #61 candidate 提议从 tracked tree 物理删除退役实现；在它经人类 review 合并前，这只是候选 outcome。表格仅用于理解设计取舍。
 
 | 原 shipping skill | 决定 | v2 owner |
 |---|---|---|
@@ -886,9 +886,9 @@ research-vault
 - 把 workbench 塞进 `research-analysis` 会混淆“形成判断”和“管理长期研究活动”。
 - 把 `research-review` 合入产出判断的 skill 会削弱不可自签的治理边界。
 
-## 18. 当前产品源码边界
+## 18. 接受的目标产品源码边界
 
-Issue #61 cleanup candidate 完成后的 tracked product inventory 为：
+Issue #61 cleanup candidate 若经人类 review 合并，目标 tracked product inventory 为：
 
 ```text
 skills/
@@ -966,7 +966,7 @@ runtime/
 - project/idea/method/experiment/discussion/decision/report；
 - experiment import 和 factual/judgement separation；
 - installer/runtime docs 与 fresh-vault cold acceptance；
-- Issue #61 移除旧 15-skill inventory、旧 runtime/schema path、navigator 和兼容 surface；
+- Issue #61 candidate 提议移除旧 15-skill inventory、旧 runtime/schema path、navigator 和兼容 surface；交付状态以 human-reviewed merge 为准；
 - 不迁移真实旧 workspace。
 
 每个 wave 默认一个 Atomic Issue、一个 delivery branch 和一个 consolidated PR；base 或 contract 变化后重新验证。
@@ -1015,7 +1015,7 @@ runtime/
 - 新 workspace 已能初始化；
 - AnyDoc/Defuddle adapter 已安装；
 - evidence/receipt/index/recovery 已实现；
-- 旧 15-skill runtime 已删除；（该项后来由 Issue #61 cleanup candidate 处理。）
+- 旧 15-skill runtime 的删除（Issue #61 candidate 负责该 outcome，只有 human-reviewed merge 后才算交付）；
 - 用户数据已有迁移工具。
 
 这些实现事实只能由后续 Atomic Issue、remote candidate、测试、PR review 和合并后的代码建立。

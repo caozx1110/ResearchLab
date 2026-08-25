@@ -23,6 +23,7 @@ ENTRYPOINTS = (
     "research-vault/scripts/vault.py",
     "research-capture/scripts/capture.py",
     "research-analysis/scripts/analysis.py",
+    "research-review/scripts/review.py",
 )
 
 

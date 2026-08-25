@@ -1,9 +1,4 @@
-"""Small test-only loaders for the active v2 interfaces.
-
-The source/runtime track moves the validator to ``tools``.  Until that track
-lands, this helper falls back to the baseline location without importing any
-retired runtime module.
-"""
+"""Small test-only loaders for the active v2 interfaces."""
 
 from __future__ import annotations
 
@@ -28,14 +23,10 @@ def load_module(name: str, path: Path) -> ModuleType:
 
 
 def load_skill_validator() -> ModuleType:
-    candidates = (
-        REPO_ROOT / "tools" / "skill_validator.py",
-        REPO_ROOT / "runtime" / "lib" / "research" / "skill_validator.py",
-    )
-    for path in candidates:
-        if path.is_file():
-            return load_module("v2_test_skill_validator", path)
-    raise AssertionError("the v2 skill validator is missing")
+    path = REPO_ROOT / "tools" / "skill_validator.py"
+    if not path.is_file():
+        raise AssertionError("the v2 skill validator is missing")
+    return load_module("v2_test_skill_validator", path)
 
 
 def load_ws_sync() -> ModuleType:
