@@ -45,6 +45,8 @@ This is an intentional hard cutover. The v2 product has no legacy canonical name
 
 No god-orchestrator or executable command skill is shipped. The Agent routes each operation to its owner and composes owners without merging their authority.
 
+After the v2 tree cleanup, the active tracked product tree has exactly these five owners and the minimal v2 runtime. Retired v1 implementations, schemas, tests, and navigator tools are not active source, release input, or compatibility material; historical details remain in Git history and superseded release notes.
+
 ## Start with a conversation
 
 After installation, open the workspace in Codex or Claude Code and say:
