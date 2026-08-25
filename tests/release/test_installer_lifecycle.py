@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -200,7 +201,43 @@ def test_updater_apply_invokes_ws_sync_update_and_restores_version(monkeypatch, 
     workspace.mkdir()
     _assert_succeeded(_run_installer("install", workspace, tmp_path / "home"))
 
-    source_version = (REPO_ROOT / "runtime" / "VERSION").read_text(encoding="utf-8").strip()
+    source = tmp_path / "source"
+    shutil.copytree(
+        REPO_ROOT,
+        source,
+        ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__", "*.pyc"),
+    )
+    subprocess.run(
+        ["git", "init", "-b", "test-source", str(source)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.name", "Release Test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "add", "--", "skills", "runtime", "LICENSE", "install-lib"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "commit", "-m", "fixture"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_version = (source / "runtime" / "VERSION").read_text(encoding="utf-8").strip()
     assert source_version != "0.0.0"
     installed_version = workspace / ".agents" / "VERSION"
     downgraded = b"0.0.0\n"
@@ -211,6 +248,11 @@ def test_updater_apply_invokes_ws_sync_update_and_restores_version(monkeypatch, 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["files"][".agents/VERSION"] = hashlib.sha256(downgraded).hexdigest()
     manifest["tree_checksum"] = sync.tree_checksum(manifest["files"])
+    manifest["source_origin"] = "local"
+    manifest["source_checkout"] = str(source)
+    manifest["source_branch"] = "test-source"
+    manifest["source_strategy"] = "local-checkout"
+    manifest["source_commit"] = source_commit
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -236,7 +278,7 @@ def test_updater_apply_invokes_ws_sync_update_and_restores_version(monkeypatch, 
         call
         for call in calls
         if len(call) > 2
-        and Path(call[1]).resolve() == (REPO_ROOT / "install-lib" / "ws_sync.py").resolve()
+        and Path(call[1]).resolve() == (source / "install-lib" / "ws_sync.py").resolve()
         and call[2] == "update"
     ]
     assert len(ws_sync_calls) == 1
