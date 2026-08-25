@@ -11,10 +11,9 @@ from typing import Optional, Sequence
 
 SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[1]
-LIB_ROOT = REPO_ROOT / "runtime" / "lib"
-sys.path.insert(0, str(LIB_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
 
-from research.skill_validator import generated_metadata_outputs  # noqa: E402
+from tools.skill_validator import generated_metadata_outputs  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -32,7 +32,11 @@ v2 是不兼容 hard cutover。shipping product 不提供：
 
 不兼容不等于可删除。发现 legacy workspace 时，runtime 必须 fail closed，不自动读取为 v2、移动、改写或删除用户资料。未来如果需要一次性导入，必须另立 Blueprint、ADR、Atomic Issue 和可恢复迁移合同。
 
-旧 runtime helper 和实现文件可以暂时留在源码树中供历史测试或后续删除，但没有 `SKILL.md`、不进入 metadata、不可发现、不可安装，也不是 v2 设计依据。旧 schema 文件同样不是 v2 semantic contract，安装包不应依赖它。
+### 2.1 接受的产品边界与 #61 候选
+
+接受的 v2 产品架构恰好由五个 discoverable shipping skill 和 minimal installed runtime 构成；旧 runtime、schema、navigator、v1 skill 实现和 v1 行为测试都不是 shipping product、v2 设计依据或兼容面。
+
+Issue #61 的 cleanup candidate 提议从 tracked source tree 删除这些退役实现，并把验证代码收敛为 owner/release boundary。该物理清理在经人类 review 合并前不是 default-branch current fact；其交付状态只由 default branch、Issue、候选 SHA、PR 和 Actions 证明。无论 cleanup 是否已合并，legacy workspace 的只读检测仍是数据保护，而不是迁移或旧产品实现。
 
 ## 3. Workspace 物理模型
 
@@ -210,11 +214,11 @@ Abort 恢复 before-images。Crash 保留 active journal 和 recovery snapshots�
 
 ## 10. 安装与发布边界
 
-产品源码是 repository `skills/` 和 `runtime/`。安装器只复制五个 discoverable skill、metadata、四个显式 allowlist runtime 文件、PyYAML-only requirements、version、license 和 minimal workspace rules。其余保留的 v1 runtime 源文件只供源码级回归测试，不进入安装态。Repository root `/.agents/` 是 ignored maintainer tooling，不是 product 或 release input。
+产品源码是 repository `skills/` 和 `runtime/`。shipping inventory 只有五个 discoverable skill、metadata、四个显式 allowlist runtime 文件、PyYAML-only requirements、version、license 和 minimal workspace rules。Issue #61 candidate 进一步提议从 tracked tree 删除非 shipping 的 v1 runtime/schema/helper；在该候选经人类 review 合并前，不能把删除写成 default-branch current fact。Repository root `/.agents/` 是 ignored maintainer tooling，不是 product 或 release input。
 
 Project install 的 `.agents/` 可重装；research Markdown 和 `.research/` 不属于 installer manifest。Update/reinstall/uninstall 保留用户数据和 workspace-local runtime。Installer 不创建 executable research command 或 terminal shortcut。
 
-Release enumeration 以五 skill allowlist 为门，不因旧源码目录仍存在就将其打包。Metadata generator、skill validator、rule token budget、bundle lifecycle tests 和 clean installed-copy smoke 必须一致。
+Release enumeration 以五 skill allowlist 和 minimal runtime allowlist 为门。Metadata generator、skill validator、rule token budget、bundle lifecycle tests 和 clean installed-copy smoke 必须一致；retired source 是否仍存在于某个 revision 都不改变 release input 边界。
 
 ## 11. 外部工具接口
 
