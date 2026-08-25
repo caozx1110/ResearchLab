@@ -21,26 +21,33 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Compile Python files
-        run: python -m compileall skills runtime/lib tests
+        run: >-
+          python -m compileall -q
+          skills/research-vault
+          skills/research-capture
+          skills/research-analysis
+          skills/research-workbench
+          skills/research-review
+          runtime/lib/research/__init__.py
+          runtime/lib/research/legacy_detector.py
+          runtime/lib/research/updater.py
+          runtime/lib/research/v2_bootstrap.py
+          tools/skill_validator.py
+          tools/generate_skill_metadata.py
+          tools/check_rule_tokens.py
+          tests
+          install-lib/ws_sync.py
       - name: Validate installer scripts
         run: |
           bash -n install.sh
           python -m py_compile install-lib/ws_sync.py
       - name: Validate skill metadata
         run: |
-          python runtime/lib/research/skill_validator.py skills
+          python tools/skill_validator.py skills
+          python tools/generate_skill_metadata.py --check
           python tools/check_rule_tokens.py
-      - name: Configure git identity for checkpoint tests
-        run: |
-          git config --global user.name "ci"
-          git config --global user.email "ci@example.com"
-      - name: Run conversational release gate
-        run: python -m pytest tests/test_r1_conversational_release.py -q
-      - name: Run tests
-        # Unset CI for this step only: the installer PTY tests drive a simulated
-        # interactive terminal, and install.sh's is_interactive_input() correctly
-        # refuses to prompt when $CI is set (a real-CI safety guard we keep intact).
-        run: env -u CI python -m pytest tests -q --ignore=tests/test_r1_conversational_release.py
+      - name: Run v2 owner and release suite
+        run: env -u CI python -m pytest tests/owners tests/release -q
 
   macos-release-gate:
     name: "${{ github.event_name == 'push' && 'candidate-head' || 'tested-merge' }} / macos / py${{ matrix.python-version }}"
@@ -60,19 +67,23 @@ jobs:
       - name: Validate scripts and metadata
         run: |
           bash -n install.sh
-          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m compileall -q skills runtime/lib tests install-lib/ws_sync.py
-          python runtime/lib/research/skill_validator.py skills
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" python -m compileall -q \
+            skills/research-vault \
+            skills/research-capture \
+            skills/research-analysis \
+            skills/research-workbench \
+            skills/research-review \
+            runtime/lib/research/__init__.py \
+            runtime/lib/research/legacy_detector.py \
+            runtime/lib/research/updater.py \
+            runtime/lib/research/v2_bootstrap.py \
+            tools/skill_validator.py \
+            tools/generate_skill_metadata.py \
+            tools/check_rule_tokens.py \
+            tests \
+            install-lib/ws_sync.py
+          python tools/skill_validator.py skills
+          python tools/generate_skill_metadata.py --check
           python tools/check_rule_tokens.py
-      - name: Configure git identity for installer and recovery tests
-        run: |
-          git config --global user.name "ci"
-          git config --global user.email "ci@example.com"
-      - name: Run macOS release and installer smoke tests
-        run: |
-          env -u CI python -m pytest \
-            tests/test_r1_conversational_release.py \
-            tests/test_bootstrap.py \
-            tests/test_updater.py \
-            tests/test_installer.py \
-            tests/test_bundle_lifecycle.py \
-            -q
+      - name: Run macOS v2 release gate
+        run: env -u CI python -m pytest tests/owners tests/release -q
